@@ -1,0 +1,31 @@
+name: js_interpreter
+description: A comprehensive, pure Dart JavaScript interpreter supporting ES6+ features. Perfect for embedding JavaScript execution in Dart/Flutter applications.
+version: 0.0.1
+repository: https://github.com/kodjodevf/js_interpreter
+homepage: https://github.com/kodjodevf/js_interpreter
+documentation: https://github.com/kodjodevf/js_interpreter#readme
+
+environment:
+  sdk: ^3.9.0
+
+platforms:
+  android:
+  ios:
+  linux:
+  macos:
+  web:
+  windows:
+
+topics:
+  - javascript
+  - interpreter
+  - parser
+  - ecmascript
+  - es6
+
+dependencies:
+  intl: ^0.20.0
+
+dev_dependencies:
+  lints: ^6.1.0
+  test: ^1.29.0
