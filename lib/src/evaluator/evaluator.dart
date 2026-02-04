@@ -48,6 +48,25 @@ class GeneratorYieldException implements Exception {
   String toString() => 'Generator yielded: $value';
 }
 
+/// Completion record for tracking statement values
+/// According to ECMA-262, a completion record contains:
+/// - value: the completion value
+/// - type: normal, break, continue, return, throw
+/// - target: optional label for break/continue
+class CompletionRecord {
+  final JSValue value;
+  final String type; // 'normal', 'break', 'continue', 'return', 'throw'
+  final String? target; // label name for break/continue
+
+  CompletionRecord({required this.value, required this.type, this.target});
+
+  static CompletionRecord normal(JSValue value) =>
+      CompletionRecord(value: value, type: 'normal');
+
+  bool get isNormal => type == 'normal';
+  bool get isAbrupt => type != 'normal';
+}
+
 /// Execution context for a generator
 /// Stores state between next() calls
 class GeneratorExecutionContext {
@@ -7039,10 +7058,25 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
       // Executer tous les statements sauf les FunctionDeclaration
       // (les fonctions sont deja hoistees)
-      for (final stmt in node.body) {
-        if (stmt is! FunctionDeclaration || !isFunctionBody) {
-          lastValue = stmt.accept(this);
+      try {
+        for (final stmt in node.body) {
+          if (stmt is! FunctionDeclaration || !isFunctionBody) {
+            lastValue = stmt.accept(this);
+          }
         }
+      } on FlowControlException catch (e) {
+        // Attach the last value before the abrupt completion
+        if ((e.type == ExceptionType.break_ ||
+                e.type == ExceptionType.continue_) &&
+            e.completionValue == null) {
+          // Re-throw with the completion value attached
+          throw FlowControlException(
+            e.type,
+            label: e.label,
+            completionValue: lastValue,
+          );
+        }
+        rethrow;
       }
 
       // For function bodies, return undefined (functions only return values through explicit return statements)
@@ -8688,13 +8722,32 @@ class JSEvaluator implements ASTVisitor<JSValue> {
   JSValue visitIfStatement(IfStatement node) {
     final testValue = node.test.accept(this);
 
-    if (testValue.toBoolean()) {
-      return node.consequent.accept(this);
-    } else if (node.alternate != null) {
-      return node.alternate!.accept(this);
+    try {
+      if (testValue.toBoolean()) {
+        final bodyValue = node.consequent.accept(this);
+        return bodyValue;
+      } else if (node.alternate != null) {
+        final altValue = node.alternate!.accept(this);
+        return altValue;
+      }
+      return JSValueFactory.undefined();
+    } on FlowControlException catch (e) {
+      // According to ECMA-262 sec-if-statement-runtime-semantics-evaluation:
+      // Return Completion(UpdateEmpty(stmtCompletion, undefined))
+      // This means if the statement breaks/continues, the if must propagate that
+      // but with UpdateEmpty applied to the completion value
+      if (e.type == ExceptionType.break_ || e.type == ExceptionType.continue_) {
+        // Apply UpdateEmpty: if completion value is not set, use undefined
+        final completionValue = e.completionValue ?? JSValueFactory.undefined();
+        // Re-throw with updated completion value
+        throw FlowControlException(
+          e.type,
+          label: e.label,
+          completionValue: completionValue,
+        );
+      }
+      rethrow;
     }
-
-    return JSValueFactory.undefined();
   }
 
   @override
@@ -9077,19 +9130,43 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
     try {
       do {
-        lastValue = node.body.accept(this);
+        try {
+          lastValue = node.body.accept(this);
+        } on FlowControlException catch (e) {
+          if (e.type == ExceptionType.break_) {
+            if (e.label == null) {
+              // Break without label - use the completion value and exit loop
+              // The completion value contains the value of the last statement before break
+              lastValue = e.completionValue ?? JSValueFactory.undefined();
+              break;
+            } else {
+              // Labeled break - let outer context handle it
+              rethrow;
+            }
+          } else if (e.type == ExceptionType.continue_) {
+            if (e.label == null) {
+              // Continue without label - go to test condition
+              // Save the completion value before continuing
+              lastValue = e.completionValue ?? JSValueFactory.undefined();
+              continue;
+            } else {
+              // Labeled continue - let outer context handle it
+              rethrow;
+            }
+          } else {
+            // return, throw, etc.
+            rethrow;
+          }
+        }
       } while (node.test.accept(this).toBoolean());
     } on FlowControlException catch (e) {
-      if (e.type == ExceptionType.break_) {
-        // Break normal
-      } else if (e.type == ExceptionType.continue_) {
-        // Continue - refaire le test et la boucle si necessaire
-        if (node.test.accept(this).toBoolean()) {
-          return visitDoWhileStatement(node);
-        }
-      } else {
+      if ((e.type == ExceptionType.break_ ||
+              e.type == ExceptionType.continue_) &&
+          e.label != null) {
+        // Labeled break/continue already handled in inner try
         rethrow;
       }
+      rethrow;
     }
 
     return lastValue;

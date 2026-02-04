@@ -376,19 +376,39 @@ class FlowControlException implements Exception {
   final ExceptionType type;
   final JSValue? value;
   final String? label;
+  final JSValue? completionValue; // Value before the abrupt completion
 
-  const FlowControlException(this.type, {this.value, this.label});
+  const FlowControlException(
+    this.type, {
+    this.value,
+    this.label,
+    this.completionValue,
+  });
 
   factory FlowControlException.return_([JSValue? value]) {
     return FlowControlException(ExceptionType.return_, value: value);
   }
 
-  factory FlowControlException.break_([String? label]) {
-    return FlowControlException(ExceptionType.break_, label: label);
+  factory FlowControlException.break_([
+    String? label,
+    JSValue? completionValue,
+  ]) {
+    return FlowControlException(
+      ExceptionType.break_,
+      label: label,
+      completionValue: completionValue,
+    );
   }
 
-  factory FlowControlException.continue_([String? label]) {
-    return FlowControlException(ExceptionType.continue_, label: label);
+  factory FlowControlException.continue_([
+    String? label,
+    JSValue? completionValue,
+  ]) {
+    return FlowControlException(
+      ExceptionType.continue_,
+      label: label,
+      completionValue: completionValue,
+    );
   }
 
   factory FlowControlException.throw_(JSValue value) {
