@@ -4372,9 +4372,6 @@ class JSStringObject extends JSObject {
   double toNumber() => double.tryParse(_value) ?? double.nan;
 
   @override
-  bool toBoolean() => _value.isNotEmpty;
-
-  @override
   bool equals(JSValue other) {
     // When comparing a String object with another value using ==,
     // convert this to its primitive value first (ToPrimitive)
@@ -5606,9 +5603,6 @@ class JSBooleanObject extends JSObject {
   }
 
   @override
-  bool toBoolean() => primitiveValue;
-
-  @override
   JSValue getProperty(String name) {
     // Let methods come from the prototype (Boolean.prototype)
     // This ensures valueOf and toString are the same as Boolean.prototype.valueOf/toString
@@ -5666,9 +5660,6 @@ class JSNumberObject extends JSObject {
 
   @override
   String toString() => primitiveValue.toString();
-
-  @override
-  bool toBoolean() => primitiveValue != 0 && !primitiveValue.isNaN;
 
   @override
   JSValue getProperty(String name) {

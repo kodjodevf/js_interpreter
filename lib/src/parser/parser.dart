@@ -506,7 +506,10 @@ class JSParser {
   // ===== STATEMENTS =====
 
   /// Parse a statement
-  Statement _statement() {
+  Statement _statement({
+    bool allowDeclaration = true,
+    bool allowFunctionDeclaration = true,
+  }) {
     // Handle empty statement (standalone semicolon)
     if (_match([TokenType.semicolon])) {
       return EmptyStatement(line: _previous().line, column: _previous().column);
@@ -531,7 +534,10 @@ class JSParser {
 
       _consume(TokenType.colon, "Expected ':' after label");
 
-      final body = _statement();
+      final body = _statement(
+        allowDeclaration: false,
+        allowFunctionDeclaration: allowDeclaration && !_isInStrictMode(),
+      );
 
       return LabeledStatement(
         label: labelToken.lexeme,
@@ -549,7 +555,7 @@ class JSParser {
 
     // Declarations
     // Special handling for 'let' which is contextual in non-strict mode
-    if (_check(TokenType.keywordLet)) {
+    if (_check(TokenType.keywordLet) && allowDeclaration) {
       // 'let' is a declaration if followed by identifier, [, or {
       // Otherwise, it's an identifier in an expression statement
       final nextToken = _peekNext();
@@ -562,7 +568,15 @@ class JSParser {
         return _variableDeclaration();
       }
       // Otherwise, fall through to expression statement
-    } else if (_match([TokenType.keywordVar, TokenType.keywordConst])) {
+    } else if (_match([TokenType.keywordVar])) {
+      return _variableDeclaration();
+    } else if (_match([TokenType.keywordConst])) {
+      if (!allowDeclaration) {
+        throw ParseError(
+          'Lexical declaration cannot appear in a single-statement context',
+          _previous(),
+        );
+      }
       return _variableDeclaration();
     }
 
@@ -570,6 +584,12 @@ class JSParser {
       final asyncToken = _previous();
       // Check if it's followed by function (async function declaration)
       if (_check(TokenType.keywordFunction)) {
+        if (!allowDeclaration) {
+          throw ParseError(
+            'Async function declaration cannot appear in a single-statement context',
+            asyncToken,
+          );
+        }
         // Validate that 'async' doesn't contain Unicode escapes
         if (asyncToken.hasUnicodeEscape) {
           throw ParseError(
@@ -588,10 +608,31 @@ class JSParser {
     }
 
     if (_match([TokenType.keywordFunction])) {
+      final functionToken = _previous();
+      // Check if it's a generator (function*)
+      if (_check(TokenType.multiply)) {
+        if (!allowDeclaration) {
+          throw ParseError(
+            'Generator declaration cannot appear in a single-statement context',
+            functionToken,
+          );
+        }
+      } else if (!allowDeclaration && !allowFunctionDeclaration) {
+        throw ParseError(
+          'Function declaration cannot appear in a single-statement context',
+          functionToken,
+        );
+      }
       return _functionDeclaration();
     }
 
     if (_match([TokenType.keywordClass])) {
+      if (!allowDeclaration) {
+        throw ParseError(
+          'Class declaration cannot appear in a single-statement context',
+          _previous(),
+        );
+      }
       return _classDeclaration();
     }
 
@@ -603,20 +644,29 @@ class JSParser {
         // Could be import.meta, which is an expression
         // Let it be parsed as expression statement
         return _expressionStatement();
-      } else if (nextToken?.type == TokenType.leftParen ||
-          nextToken?.type == TokenType.leftBrace ||
+      } else if (nextToken?.type == TokenType.leftParen) {
+        // dynamic import is an expression
+        return _expressionStatement();
+      } else if (nextToken?.type == TokenType.leftBrace ||
           nextToken?.type == TokenType.multiply) {
-        // import(...), import { ... }, or import * ...
-        // These are import declarations
+        if (!allowDeclaration) {
+          throw ParseError(
+            'Import declaration cannot appear in a single-statement context',
+            _peek(),
+          );
+        }
         _advance(); // consume 'import'
         return _importDeclaration();
       }
-      // If nothing matches, treat as import declaration
-      _advance(); // consume 'import'
-      return _importDeclaration();
     }
 
     if (_match([TokenType.keywordExport])) {
+      if (!allowDeclaration) {
+        throw ParseError(
+          'Export declaration cannot appear in a single-statement context',
+          _previous(),
+        );
+      }
       return _exportDeclaration();
     }
 
@@ -797,11 +847,17 @@ class JSParser {
     final test = _expression();
     _consume(TokenType.rightParen, 'Expected \')\' after if condition');
 
-    final consequent = _statement();
+    final consequent = _statement(
+      allowDeclaration: false,
+      allowFunctionDeclaration: !_isInStrictMode(),
+    );
     Statement? alternate;
 
     if (_match([TokenType.keywordElse])) {
-      alternate = _statement();
+      alternate = _statement(
+        allowDeclaration: false,
+        allowFunctionDeclaration: !_isInStrictMode(),
+      );
     }
 
     return IfStatement(
@@ -821,7 +877,10 @@ class JSParser {
     final test = _expression();
     _consume(TokenType.rightParen, 'Expected \')\' after while condition');
 
-    final body = _statement();
+    final body = _statement(
+      allowDeclaration: false,
+      allowFunctionDeclaration: false,
+    );
 
     return WhileStatement(
       test: test,
@@ -835,7 +894,10 @@ class JSParser {
   DoWhileStatement _doWhileStatement() {
     final previous = _previous();
 
-    final body = _statement();
+    final body = _statement(
+      allowDeclaration: false,
+      allowFunctionDeclaration: false,
+    );
 
     _consume(TokenType.keywordWhile, 'Expected \'while\' after do body');
     _consume(TokenType.leftParen, 'Expected \'(\' after \'while\'');
@@ -965,7 +1027,10 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-in expression',
         );
-        final body = _statement();
+        final body = _statement(
+          allowDeclaration: false,
+          allowFunctionDeclaration: false,
+        );
 
         leftSide = VariableDeclaration(
           kind: kind,
@@ -988,7 +1053,10 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-of expression',
         );
-        final body = _statement();
+        final body = _statement(
+          allowDeclaration: false,
+          allowFunctionDeclaration: false,
+        );
 
         leftSide = VariableDeclaration(
           kind: kind,
@@ -1085,7 +1153,10 @@ class JSParser {
             TokenType.rightParen,
             'Expected \')\' after for-in expression',
           );
-          final body = _statement();
+          final body = _statement(
+            allowDeclaration: false,
+            allowFunctionDeclaration: false,
+          );
 
           return ForInStatement(
             left: left,
@@ -1101,7 +1172,10 @@ class JSParser {
             TokenType.rightParen,
             'Expected \')\' after for-of expression',
           );
-          final body = _statement();
+          final body = _statement(
+            allowDeclaration: false,
+            allowFunctionDeclaration: false,
+          );
 
           return ForOfStatement(
             left: left,
@@ -1125,7 +1199,10 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-in expression',
         );
-        final body = _statement();
+        final body = _statement(
+          allowDeclaration: false,
+          allowFunctionDeclaration: false,
+        );
 
         return ForInStatement(
           left: expr,
@@ -1141,7 +1218,10 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-of expression',
         );
-        final body = _statement();
+        final body = _statement(
+          allowDeclaration: false,
+          allowFunctionDeclaration: false,
+        );
 
         return ForOfStatement(
           left: expr,
@@ -1157,7 +1237,10 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-in expression',
         );
-        final body = _statement();
+        final body = _statement(
+          allowDeclaration: false,
+          allowFunctionDeclaration: false,
+        );
 
         return ForInStatement(
           left: expr.left,
@@ -1186,7 +1269,10 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-in expression',
         );
-        final body = _statement();
+        final body = _statement(
+          allowDeclaration: false,
+          allowFunctionDeclaration: false,
+        );
 
         return ForInStatement(
           left: binExpr.left,
@@ -1201,7 +1287,10 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-of expression',
         );
-        final body = _statement();
+        final body = _statement(
+          allowDeclaration: false,
+          allowFunctionDeclaration: false,
+        );
 
         return ForOfStatement(
           left: expr.left,
@@ -1230,7 +1319,10 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-of expression',
         );
-        final body = _statement();
+        final body = _statement(
+          allowDeclaration: false,
+          allowFunctionDeclaration: false,
+        );
 
         return ForOfStatement(
           left: binExpr.left,
@@ -1272,7 +1364,10 @@ class JSParser {
     }
     _consume(TokenType.rightParen, 'Expected \')\' after for clauses');
 
-    final body = _statement();
+    final body = _statement(
+      allowDeclaration: false,
+      allowFunctionDeclaration: false,
+    );
 
     return ForStatement(
       init: leftSide,
@@ -1539,7 +1634,10 @@ class JSParser {
     final object = _expression();
     _consume(TokenType.rightParen, "Expected ')' after with object");
 
-    final body = _statement();
+    final body = _statement(
+      allowDeclaration: false,
+      allowFunctionDeclaration: false,
+    );
 
     return WithStatement(
       object: object,
@@ -1571,6 +1669,18 @@ class JSParser {
 
   /// Parse an expression statement
   ExpressionStatement _expressionStatement() {
+    // ES2015/ES2017 Lookahead restrictions for ExpressionStatement:
+    // [lookahead ∉ { {, function, async [no LineTerminator here] function, class, let [ }]
+    // Note: {, function, class, and async function are already handled by _statement()
+    // choosing other statement types. We only need to check 'let [' here specifically.
+    if (_check(TokenType.keywordLet) &&
+        _peekNext()?.type == TokenType.leftBracket) {
+      throw ParseError(
+        'Lexical declaration cannot appear in a single-statement context',
+        _peek(),
+      );
+    }
+
     final expr = _expression();
     _consumeSemicolonOrASI('Expected \';\' after expression');
 
@@ -2859,19 +2969,15 @@ class JSParser {
       );
     }
 
-    // 'let' can be an identifier in non-strict mode when not followed by [ or {
-    // This handles cases like: for (let = 3; ...) or for (let in obj)
-    if (_check(TokenType.keywordLet)) {
-      final nextToken = _peekNext();
-      if (nextToken?.type != TokenType.leftBracket &&
-          nextToken?.type != TokenType.leftBrace) {
-        final token = _advance();
-        return IdentifierExpression(
-          name: token.lexeme,
-          line: token.line,
-          column: token.column,
-        );
-      }
+    // 'let' can be an identifier in non-strict mode
+    // This handles cases like: let; (when used as expression) or if (false) let
+    if (_check(TokenType.keywordLet) && !_isInStrictMode()) {
+      final token = _advance();
+      return IdentifierExpression(
+        name: token.lexeme,
+        line: token.line,
+        column: token.column,
+      );
     }
 
     // 'static', 'get', 'set' can be identifiers in general contexts
