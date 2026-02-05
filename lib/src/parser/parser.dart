@@ -1538,7 +1538,7 @@ class JSParser {
     );
   }
 
-  /// Parse a try/catch/finally statement/catch/finally
+  /// Parse a try/catch/finally statement
   TryStatement _tryStatement() {
     final tryToken = _previous();
 
@@ -1552,6 +1552,8 @@ class JSParser {
 
       // Parse optional parameter (e) dans catch(e)
       IdentifierExpression? param;
+      Pattern? paramPattern;
+
       if (_match([TokenType.leftParen])) {
         // When parentheses are present, they must contain a parameter
         // Optional-catch-binding allows catch {} but NOT catch ()
@@ -1562,32 +1564,17 @@ class JSParser {
           );
         }
 
-        // Support for destructuring patterns in catch clause        // Parse the full expression and extract the identifier
-        // This handles cases like catch ([x = default]) or catch ({x})
-        // Try to parse as destructuring pattern first
-        if (_check(TokenType.leftBracket) || _check(TokenType.leftBrace)) {
-          // Skip over the pattern - we'll handle it at runtime
-          // Just consume until we find the closing paren
-          int bracketDepth = 0;
-          int braceDepth = 0;
-
-          while (!_isAtEnd()) {
-            if (_check(TokenType.leftBracket)) {
-              bracketDepth++;
-            } else if (_check(TokenType.rightBracket)) {
-              bracketDepth--;
-            } else if (_check(TokenType.leftBrace)) {
-              braceDepth++;
-            } else if (_check(TokenType.rightBrace)) {
-              braceDepth--;
-            } else if (_check(TokenType.rightParen) &&
-                bracketDepth == 0 &&
-                braceDepth == 0) {
-              break;
-            }
-
-            _advance();
-          }
+        // Parse the catch parameter (can be simple identifier or destructuring pattern)
+        if (_check(TokenType.leftBracket)) {
+          // Array destructuring pattern
+          _advance(); // consume [
+          final expr = _parseArrayExpression();
+          paramPattern = _expressionToPattern(expr);
+        } else if (_check(TokenType.leftBrace)) {
+          // Object destructuring pattern
+          _advance(); // consume {
+          final expr = _parseObjectExpression();
+          paramPattern = _expressionToPattern(expr);
         } else if (_check(TokenType.identifier) ||
             _check(TokenType.keywordAwait) ||
             _check(TokenType.keywordYield) ||
@@ -1599,6 +1586,8 @@ class JSParser {
             line: paramToken.line,
             column: paramToken.column,
           );
+        } else {
+          throw ParseError('Expected catch parameter', _peek());
         }
         _consume(TokenType.rightParen, 'Expected \')\' after catch parameter');
       }
@@ -1606,11 +1595,33 @@ class JSParser {
       // Parse the catch body
       final catchBody = _blockStatement();
 
-      // Validate that the catch parameter is not redeclared in the catch body
+      // Validate early errors
+      // 1. Check for duplicate names in destructuring pattern
+      if (paramPattern != null) {
+        final boundNames = _getBoundNamesFromPattern(paramPattern);
+        final seen = <String>{};
+        for (final name in boundNames) {
+          if (seen.contains(name)) {
+            throw ParseError(
+              'Identifier \'$name\' has already been declared',
+              _peek(),
+            );
+          }
+          seen.add(name);
+        }
+      }
+
+      // 2. Check that catch parameter is not redeclared in the catch body
       // ES6: It is a Syntax Error if any element of the BoundNames of CatchParameter
       // also occurs in the LexicallyDeclaredNames of Block
+      final catchParamNames = <String>{};
       if (param != null) {
-        final catchParamName = param.name;
+        catchParamNames.add(param.name);
+      } else if (paramPattern != null) {
+        catchParamNames.addAll(_getBoundNamesFromPattern(paramPattern));
+      }
+
+      if (catchParamNames.isNotEmpty) {
         final lexicallyDeclaredInBody = <String>{};
 
         for (final stmt in catchBody.body) {
@@ -1631,11 +1642,14 @@ class JSParser {
           }
         }
 
-        if (lexicallyDeclaredInBody.contains(catchParamName)) {
-          throw ParseError(
-            'Identifier \'$catchParamName\' has already been declared',
-            _peek(),
-          );
+        // Check for intersection
+        for (final paramName in catchParamNames) {
+          if (lexicallyDeclaredInBody.contains(paramName)) {
+            throw ParseError(
+              'Identifier \'$paramName\' has already been declared',
+              _peek(),
+            );
+          }
         }
       }
 
