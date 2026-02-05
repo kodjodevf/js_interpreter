@@ -1606,6 +1606,39 @@ class JSParser {
       // Parse the catch body
       final catchBody = _blockStatement();
 
+      // Validate that the catch parameter is not redeclared in the catch body
+      // ES6: It is a Syntax Error if any element of the BoundNames of CatchParameter
+      // also occurs in the LexicallyDeclaredNames of Block
+      if (param != null) {
+        final catchParamName = param.name;
+        final lexicallyDeclaredInBody = <String>{};
+
+        for (final stmt in catchBody.body) {
+          if (stmt is FunctionDeclaration) {
+            lexicallyDeclaredInBody.add(stmt.id.name);
+          } else if (stmt is AsyncFunctionDeclaration) {
+            lexicallyDeclaredInBody.add(stmt.id.name);
+          } else if (stmt is ClassDeclaration) {
+            if (stmt.id?.name != null) {
+              lexicallyDeclaredInBody.add(stmt.id!.name);
+            }
+          } else if (stmt is VariableDeclaration &&
+              (stmt.kind == 'let' || stmt.kind == 'const')) {
+            for (final decl in stmt.declarations) {
+              final names = _getBoundNamesFromPattern(decl.id);
+              lexicallyDeclaredInBody.addAll(names);
+            }
+          }
+        }
+
+        if (lexicallyDeclaredInBody.contains(catchParamName)) {
+          throw ParseError(
+            'Identifier \'$catchParamName\' has already been declared',
+            _peek(),
+          );
+        }
+      }
+
       handler = CatchClause(
         param: param,
         body: catchBody,
