@@ -6,6 +6,21 @@ import '../lexer/token.dart';
 import '../lexer/lexer.dart';
 import 'ast_nodes.dart';
 
+/// Info about a label for break/continue validation
+class _LabelInfo {
+  final bool isLoop; // true if targets a loop (for/while/do-while)
+  final bool isSwitch; // true if targets a switch
+  final int functionDepth; // function nesting depth when label was registered
+
+  bool get isLoopOrSwitch => isLoop || isSwitch;
+
+  _LabelInfo({
+    required this.isLoop,
+    required this.isSwitch,
+    required this.functionDepth,
+  });
+}
+
 /// Exception raised during syntax analysis errors
 class ParseError extends Error {
   final String message;
@@ -31,8 +46,8 @@ class JSParser {
   // Context tracking for break/continue validation
   int _loopDepth = 0; // Count of nested loops (for/while/do-while)
   int _switchDepth = 0; // Count of nested switch statements
-  // Map of label -> whether it's a loop label (true) or just a statement label (false)
-  final Map<String, bool> _labelStack = {}; // label -> isLoopLabel
+  // Map of label -> label info (isLoopOrSwitch, functionDepth)
+  final Map<String, _LabelInfo> _labelStack = {};
 
   JSParser(this.tokens);
 
@@ -553,15 +568,20 @@ class JSParser {
 
       _consume(TokenType.colon, "Expected ':' after label");
 
-      // Peek ahead to determine if this will be a loop label
+      // Peek ahead to determine if this will be a loop/switch label
       final nextTokenType = _peek().type;
       final isLoopLabel =
           nextTokenType == TokenType.keywordFor ||
           nextTokenType == TokenType.keywordWhile ||
           nextTokenType == TokenType.keywordDo;
+      final isSwitchLabel = nextTokenType == TokenType.keywordSwitch;
 
       // Register label BEFORE parsing body so continue/break statements can find it
-      _labelStack[labelToken.lexeme] = isLoopLabel;
+      _labelStack[labelToken.lexeme] = _LabelInfo(
+        isLoop: isLoopLabel,
+        isSwitch: isSwitchLabel,
+        functionDepth: _functionDepth,
+      );
 
       final body = _statement(
         allowDeclaration: false,
@@ -1398,7 +1418,8 @@ class JSParser {
       label = _advance().lexeme;
     }
 
-    // Validation: break must be in a loop or switch statement
+    // Validation: break must be in a loop or switch statement (unlabeled)
+    // or must have a valid label target (labeled)
     if (label == null) {
       // Unlabeled break: must be in loop or switch
       if (_loopDepth == 0 && _switchDepth == 0) {
@@ -1409,7 +1430,17 @@ class JSParser {
       if (!_labelStack.containsKey(label)) {
         throw ParseError('Label "$label" is not defined', previous);
       }
-      // Labeled break can target any labeled statement, so no additional validation
+      final labelInfo = _labelStack[label]!;
+      // Break cannot escape a function boundary
+      if (labelInfo.functionDepth < _functionDepth) {
+        throw ParseError(
+          'Illegal break statement: cannot break to a label outside the current function',
+          previous,
+        );
+      }
+      // Note: We allow breaking any labeled statement (ES6+ style)
+      // ES5 would restrict to IterationStatement/SwitchStatement only,
+      // but test262 contains ES6+ tests that expect break to work on any labeled statement
     }
 
     // Support for ASI (Automatic Semicolon Insertion)
@@ -1440,13 +1471,24 @@ class JSParser {
         throw ParseError('Illegal continue statement', previous);
       }
     } else {
-      // Labeled continue: must target a loop label
+      // Labeled continue: must target a loop label (NOT switch)
       if (!_labelStack.containsKey(label)) {
         throw ParseError('Label "$label" is not defined', previous);
       }
-      if (!_labelStack[label]!) {
-        // The label exists but doesn't target a loop
-        throw ParseError('Continue target must be a loop', previous);
+      final labelInfo = _labelStack[label]!;
+      // ES5 12.7: continue requires label to target IterationStatement
+      if (!labelInfo.isLoop) {
+        throw ParseError(
+          'Continue target must be an iteration statement',
+          previous,
+        );
+      }
+      // Continue cannot escape a function boundary
+      if (labelInfo.functionDepth < _functionDepth) {
+        throw ParseError(
+          'Illegal continue statement: cannot continue to a label outside the current function',
+          previous,
+        );
       }
     }
 
@@ -1577,6 +1619,7 @@ class JSParser {
     _consume(TokenType.leftBrace, 'Expected \'{\' after switch discriminant');
 
     final cases = <SwitchCase>[];
+    bool hasDefault = false;
 
     _switchDepth++;
     try {
@@ -1604,6 +1647,16 @@ class JSParser {
           );
         } else if (_match([TokenType.keywordDefault])) {
           final defaultToken = _previous();
+
+          // Check for duplicate default clause
+          if (hasDefault) {
+            throw ParseError(
+              'Duplicate default clause in switch statement',
+              defaultToken,
+            );
+          }
+          hasDefault = true;
+
           _consume(TokenType.colon, 'Expected \':\' after default');
 
           final consequent = <Statement>[];

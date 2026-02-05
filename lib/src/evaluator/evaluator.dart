@@ -6996,12 +6996,10 @@ class JSEvaluator implements ASTVisitor<JSValue> {
             lexEnv,
           );
         }
-      } else if (stmt is SwitchStatement) {
-        // Hoister recursivement dans les cas du switch
-        for (final switchCase in stmt.cases) {
-          _hoistDeclarationsRecursive(switchCase.consequent, varEnv, lexEnv);
-        }
       }
+      // NOTE: Do NOT hoist declarations from switch cases!
+      // Switch cases have their own block scope, and function declarations
+      // are instantiated within that scope via BlockDeclarationInstantiation
     }
   }
 
@@ -7041,6 +7039,7 @@ class JSEvaluator implements ASTVisitor<JSValue> {
           .arguments, // Heriter les arguments du contexte parent
       newTarget: _currentContext()
           .newTarget, // Heriter le newTarget du contexte parent (ES6)
+      inCatch: _currentContext().inCatch, // Preserve inCatch flag
     );
 
     _executionStack.push(blockContext);
@@ -7723,8 +7722,17 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       );
     }
 
+    // Determine where to define the function:
+    // - In lexical environment if we're in a block scope (lexicalEnv != varEnv)
+    // - In variable environment otherwise (normal case)
+    final definitionEnv =
+        _currentContext().lexicalEnvironment !=
+            _currentContext().variableEnvironment
+        ? _currentContext().lexicalEnvironment
+        : currentEnv;
+
     // Enregistrer la fonction dans l'environnement courant (avec hoisting)
-    currentEnv.define(node.id.name, functionValue, BindingType.function);
+    definitionEnv.define(node.id.name, functionValue, BindingType.function);
 
     // Retourner la fonction pour permettre l'export
     return functionValue;
@@ -7890,8 +7898,17 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       functionValue = asyncFunction;
     }
 
+    // Determine where to define the function:
+    // - In lexical environment if we're in a block scope (lexicalEnv != varEnv)
+    // - In variable environment otherwise (normal case)
+    final definitionEnv =
+        _currentContext().lexicalEnvironment !=
+            _currentContext().variableEnvironment
+        ? _currentContext().lexicalEnvironment
+        : currentEnv;
+
     // Enregistrer la fonction dans l'environnement courant (avec hoisting)
-    currentEnv.define(node.id.name, functionValue, BindingType.function);
+    definitionEnv.define(node.id.name, functionValue, BindingType.function);
 
     // Retourner la fonction pour permettre l'export
     return functionValue;
@@ -9835,39 +9852,112 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
   @override
   JSValue visitSwitchStatement(SwitchStatement node) {
+    // Evaluate the discriminant in the current environment (before creating block env)
     final discriminantValue = node.discriminant.accept(this);
     JSValue lastValue = JSValueFactory.undefined();
-    bool hasMatched = false;
+    int startIndex = -1;
+    int defaultIndex = -1;
+
+    // Create a new lexical environment for the switch block
+    // This allows let/const declarations in cases to be block-scoped
+    final parentEnv = _currentEnvironment();
+    final switchEnv = Environment.block(parentEnv);
+
+    final switchContext = ExecutionContext(
+      lexicalEnvironment: switchEnv,
+      variableEnvironment: _currentContext().variableEnvironment,
+      thisBinding: _currentContext().thisBinding,
+      strictMode: _currentContext().strictMode,
+      debugName: 'Switch',
+      asyncTask: _currentContext().asyncTask,
+      function: _currentContext().function,
+      arguments: _currentContext().arguments,
+      newTarget: _currentContext().newTarget,
+    );
+
+    _executionStack.push(switchContext);
 
     try {
+      // BlockDeclarationInstantiation: Hoist all function declarations in switch cases
+      // This makes function declarations available throughout the switch, within its block scope
       for (final switchCase in node.cases) {
-        // Si c'est un default case ou si la valeur match
-        final shouldExecute =
-            switchCase.test == null ||
-            (switchCase.test != null &&
-                discriminantValue.strictEquals(switchCase.test!.accept(this)));
-
-        if (shouldExecute || hasMatched) {
-          if (switchCase.test != null) {
-            hasMatched = true;
-          }
-
-          // Executer les statements de ce case
-          for (final statement in switchCase.consequent) {
-            lastValue = statement.accept(this);
+        for (final statement in switchCase.consequent) {
+          if (statement is FunctionDeclaration) {
+            // Execute the function declaration in the switch's environment
+            // This will define it in the switchEnv via visitFunctionDeclaration
+            statement.accept(this);
+          } else if (statement is AsyncFunctionDeclaration) {
+            // Handle async function declarations the same way
+            statement.accept(this);
           }
         }
       }
-    } on FlowControlException catch (e) {
-      if (e.type == ExceptionType.break_) {
-        // Break dans switch - sortir normalement
-        return lastValue;
-      }
-      // Autres flow control exceptions (continue) - propager
-      rethrow;
-    }
 
-    return lastValue;
+      // First pass: Find the matching case or locate the default case
+      for (int i = 0; i < node.cases.length; i++) {
+        final switchCase = node.cases[i];
+
+        if (switchCase.test == null) {
+          // This is a default case - remember it but don't match yet
+          if (defaultIndex == -1) {
+            defaultIndex = i;
+          }
+        } else {
+          // Regular case - check if it matches
+          if (discriminantValue.strictEquals(switchCase.test!.accept(this))) {
+            startIndex = i;
+            break; // Found matching case, use it
+          }
+        }
+      }
+
+      // If no matching case, use default if it exists
+      if (startIndex == -1 && defaultIndex != -1) {
+        startIndex = defaultIndex;
+      }
+
+      try {
+        // Second pass: Execute from the matching case onwards
+        if (startIndex >= 0) {
+          for (int i = startIndex; i < node.cases.length; i++) {
+            final switchCase = node.cases[i];
+
+            // Execute statements of this case
+            // Skip function declarations - they were already hoisted/instantiated
+            for (final statement in switchCase.consequent) {
+              if (statement is! FunctionDeclaration &&
+                  statement is! AsyncFunctionDeclaration) {
+                lastValue = statement.accept(this);
+              }
+            }
+          }
+        }
+      } on FlowControlException catch (e) {
+        if (e.type == ExceptionType.break_) {
+          // Break in switch - use completion value if available
+          if (e.completionValue != null) {
+            return e.completionValue!;
+          }
+          return lastValue;
+        } else if (e.type == ExceptionType.continue_) {
+          // Continue in switch - attach completion value and propagate
+          if (e.completionValue == null) {
+            throw FlowControlException(
+              e.type,
+              label: e.label,
+              completionValue: lastValue,
+            );
+          }
+          rethrow;
+        }
+        // Other flow control exceptions - propagate as-is
+        rethrow;
+      }
+
+      return lastValue;
+    } finally {
+      _executionStack.pop();
+    }
   }
 
   @override
@@ -9904,7 +9994,7 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
   @override
   JSValue visitTryStatement(TryStatement node) {
-    JSValue? finallyResult;
+    bool finallyExecuted = false; // Track if finally has been executed
 
     try {
       // Executer le bloc try
@@ -9919,9 +10009,11 @@ class JSEvaluator implements ASTVisitor<JSValue> {
           // Si le catch block lance une exception, executer finally puis relancer
           if (node.finalizer != null) {
             try {
-              finallyResult = node.finalizer!.accept(this);
+              node.finalizer!.accept(this);
+              finallyExecuted = true;
             } catch (_) {
               // Si finally lance une exception, elle remplace l'exception du catch
+              finallyExecuted = true;
               rethrow;
             }
           }
@@ -9931,9 +10023,11 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         // Pas de catch block, executer finally puis relancer
         if (node.finalizer != null) {
           try {
-            finallyResult = node.finalizer!.accept(this);
+            node.finalizer!.accept(this);
+            finallyExecuted = true;
           } catch (_) {
             // Si finally lance une exception, elle remplace l'exception originale
+            finallyExecuted = true;
             rethrow;
           }
         }
@@ -9943,9 +10037,11 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       // Break/continue - propager apres finally
       if (node.finalizer != null) {
         try {
-          finallyResult = node.finalizer!.accept(this);
+          node.finalizer!.accept(this);
+          finallyExecuted = true;
         } catch (_) {
           // Si finally lance une exception, elle remplace le flow control
+          finallyExecuted = true;
           rethrow;
         }
       }
@@ -9954,9 +10050,11 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       // Async suspension - propager a travers les try-catch (comme break/continue)
       if (node.finalizer != null) {
         try {
-          finallyResult = node.finalizer!.accept(this);
+          node.finalizer!.accept(this);
+          finallyExecuted = true;
         } catch (_) {
           // Si finally lance une exception, elle remplace la suspension
+          finallyExecuted = true;
           rethrow;
         }
       }
@@ -9985,8 +10083,10 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         } catch (catchError) {
           if (node.finalizer != null) {
             try {
-              finallyResult = node.finalizer!.accept(this);
+              node.finalizer!.accept(this);
+              finallyExecuted = true;
             } catch (_) {
+              finallyExecuted = true;
               rethrow;
             }
           }
@@ -9995,8 +10095,10 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       } else {
         if (node.finalizer != null) {
           try {
-            finallyResult = node.finalizer!.accept(this);
+            node.finalizer!.accept(this);
+            finallyExecuted = true;
           } catch (_) {
+            finallyExecuted = true;
             rethrow;
           }
         }
@@ -10011,8 +10113,10 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         } catch (catchError) {
           if (node.finalizer != null) {
             try {
-              finallyResult = node.finalizer!.accept(this);
+              node.finalizer!.accept(this);
+              finallyExecuted = true;
             } catch (_) {
+              finallyExecuted = true;
               rethrow;
             }
           }
@@ -10021,16 +10125,18 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       } else {
         if (node.finalizer != null) {
           try {
-            finallyResult = node.finalizer!.accept(this);
+            node.finalizer!.accept(this);
+            finallyExecuted = true;
           } catch (_) {
+            finallyExecuted = true;
             rethrow;
           }
         }
         rethrow;
       }
     } finally {
-      // Executer le bloc finally s'il y en a un et qu'il n'a pas encore ete execute
-      if (node.finalizer != null && finallyResult == null) {
+      // Executer le bloc finally s'il n'a pas encore ete execute
+      if (node.finalizer != null && !finallyExecuted) {
         try {
           node.finalizer!.accept(this);
         } catch (_) {
@@ -10068,6 +10174,7 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       thisBinding: _currentContext().thisBinding,
       strictMode: _currentContext().strictMode,
       debugName: 'Catch',
+      inCatch: true,
     );
 
     _executionStack.push(catchContext);
@@ -10823,11 +10930,20 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         );
       }
 
-      // En mode non-strict, try to delete from globalThis if it's a global property
+      // En mode non-strict, check if this is a catch parameter (non-deletable)
+      // Catch parameters cannot be deleted even in non-strict mode
       final env = _currentEnvironment();
       try {
         env.get(target.name);
-        // Variable exists - check if it's a global property that can be deleted
+        // Variable exists
+
+        // Check if we're in a catch context - catch parameters are non-deletable
+        if (_currentContext().inCatch) {
+          // In catch block - catch parameters are non-deletable (DontDelete)
+          return JSValueFactory.boolean(false);
+        }
+
+        // try to delete from globalThis if it's a global property
         final globalThis = env.get('this');
         if (globalThis is JSGlobalThis) {
           // Try to delete from globalThis

@@ -441,6 +441,9 @@ class ExecutionContext {
   final Set<String>?
   parameterNames; // Non-null si on evalue des parametres by default
 
+  // Track if we're in a catch block (catch parameters are non-deletable)
+  final bool inCatch;
+
   ExecutionContext({
     required this.lexicalEnvironment,
     required this.variableEnvironment,
@@ -452,6 +455,7 @@ class ExecutionContext {
     this.newTarget,
     this.asyncTask,
     this.parameterNames,
+    this.inCatch = false,
   });
 
   /// Create a global context
