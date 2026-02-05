@@ -9880,6 +9880,36 @@ class JSEvaluator implements ASTVisitor<JSValue> {
     try {
       // BlockDeclarationInstantiation: Hoist all function declarations in switch cases
       // This makes function declarations available throughout the switch, within its block scope
+
+      // First, collect all lexically declared names (function, class, etc.)
+      // and validate there are no duplicates
+      final declaredNames =
+          <String, int>{}; // name -> first case index where declared
+      for (int caseIdx = 0; caseIdx < node.cases.length; caseIdx++) {
+        final switchCase = node.cases[caseIdx];
+        for (final statement in switchCase.consequent) {
+          String? declName;
+          if (statement is FunctionDeclaration) {
+            declName = statement.id.name;
+          } else if (statement is AsyncFunctionDeclaration) {
+            declName = statement.id.name;
+          } else if (statement is ClassDeclaration) {
+            declName = statement.id?.name;
+          }
+
+          if (declName != null) {
+            if (declaredNames.containsKey(declName)) {
+              // Duplicate declaration - throw SyntaxError
+              throwJSSyntaxError(
+                'Identifier \'$declName\' has already been declared',
+              );
+            }
+            declaredNames[declName] = caseIdx;
+          }
+        }
+      }
+
+      // Now hoist all function declarations in switch cases
       for (final switchCase in node.cases) {
         for (final statement in switchCase.consequent) {
           if (statement is FunctionDeclaration) {

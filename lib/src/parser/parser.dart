@@ -219,6 +219,25 @@ class JSParser {
     return names;
   }
 
+  /// Extract a single name from a pattern (for variable declarations)
+  String _extractNameFromPattern(Pattern pattern) {
+    if (pattern is IdentifierPattern) {
+      return pattern.name;
+    } else if (pattern is ArrayPattern) {
+      // For array patterns, get all names and return as comma-separated
+      // (This is for error messages, should not happen in simple var declarations)
+      final names = _getBoundNamesFromPattern(pattern).toList();
+      return names.isNotEmpty ? names.first : 'unknown';
+    } else if (pattern is ObjectPattern) {
+      // Similarly for object patterns
+      final names = _getBoundNamesFromPattern(pattern).toList();
+      return names.isNotEmpty ? names.first : 'unknown';
+    } else if (pattern is AssignmentPattern) {
+      return _extractNameFromPattern(pattern.left);
+    }
+    return 'unknown';
+  }
+
   /// Validate await in default parameter values (not allowed in async functions)
   void _validateNoAwaitInDefaults(
     List<Parameter> params,
@@ -1694,6 +1713,42 @@ class JSParser {
     }
 
     _consume(TokenType.rightBrace, 'Expected \'}\' after switch body');
+
+    // Validate no duplicate lexically declared names in switch cases
+    // ES6: It is a Syntax Error if the LexicallyDeclaredNames of CaseBlock
+    // contains any duplicate entries
+    final declaredNames = <String, int>{}; // name -> case index
+    for (int caseIdx = 0; caseIdx < cases.length; caseIdx++) {
+      final switchCase = cases[caseIdx];
+      for (final statement in switchCase.consequent) {
+        final names = <String>[];
+
+        if (statement is FunctionDeclaration) {
+          names.add(statement.id.name);
+        } else if (statement is AsyncFunctionDeclaration) {
+          names.add(statement.id.name);
+        } else if (statement is ClassDeclaration) {
+          if (statement.id?.name != null) {
+            names.add(statement.id!.name);
+          }
+        } else if (statement is VariableDeclaration) {
+          // Extract names from let/const declarations
+          for (final decl in statement.declarations) {
+            names.add(_extractNameFromPattern(decl.id));
+          }
+        }
+
+        for (final declName in names) {
+          if (declaredNames.containsKey(declName)) {
+            throw ParseError(
+              'Identifier \'$declName\' has already been declared',
+              _peek(),
+            );
+          }
+          declaredNames[declName] = caseIdx;
+        }
+      }
+    }
 
     return SwitchStatement(
       discriminant: discriminant,
