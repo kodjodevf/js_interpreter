@@ -368,6 +368,55 @@ class Environment {
   }
 }
 
+/// Environment wrapper for with statements
+/// Delegates property lookups to an object before checking environment bindings
+class WithEnvironment extends Environment {
+  final JSObject withObject;
+
+  WithEnvironment({required Environment parent, required this.withObject})
+    : super(parent: parent, debugName: 'With');
+
+  @override
+  JSValue get(String name) {
+    // First try the with object's properties
+    if (withObject.hasProperty(name)) {
+      return withObject.getProperty(name);
+    }
+
+    // Then try the parent environment
+    return super.get(name);
+  }
+
+  @override
+  void set(String name, JSValue value, {bool strictMode = false}) {
+    // First try the with object's properties
+    if (withObject.hasProperty(name)) {
+      withObject.setProperty(name, value);
+      return;
+    }
+
+    // Then try the parent environment
+    super.set(name, value, strictMode: strictMode);
+  }
+
+  @override
+  bool has(String name) {
+    // Check both with object and parent environment
+    return withObject.hasProperty(name) || super.has(name);
+  }
+
+  @override
+  bool delete(String name) {
+    // First try to delete from with object
+    if (withObject.hasProperty(name)) {
+      return withObject.deleteProperty(name);
+    }
+
+    // Then try parent environment
+    return super.delete(name);
+  }
+}
+
 /// Types of JavaScript exceptions for flow control
 enum ExceptionType { none, return_, break_, continue_, throw_ }
 

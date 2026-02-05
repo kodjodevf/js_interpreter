@@ -9986,10 +9986,30 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       throw JSTypeError('with statement requires an object');
     }
 
-    // Execute the body
-    // Note: A real implementation should modify the scope to include
-    // les proprietes de l'objet, mais cela necessite un environnement special
-    return node.body.accept(this);
+    // Create a with environment that wraps the object
+    final parentEnv = _currentEnvironment();
+    final withEnv = WithEnvironment(
+      parent: parentEnv,
+      withObject: objectValue as JSObject,
+    );
+
+    // Create new execution context with the with environment
+    final withContext = ExecutionContext(
+      lexicalEnvironment: withEnv,
+      variableEnvironment: _currentContext().variableEnvironment,
+      thisBinding: _currentContext().thisBinding,
+      strictMode: _currentContext().strictMode,
+      debugName: 'With',
+    );
+
+    _executionStack.push(withContext);
+
+    try {
+      // Execute the body with the with environment
+      return node.body.accept(this);
+    } finally {
+      _executionStack.pop();
+    }
   }
 
   @override

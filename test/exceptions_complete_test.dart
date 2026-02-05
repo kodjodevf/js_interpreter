@@ -60,7 +60,7 @@ void main() {
         final result = interpreter.eval('''
           try {
             throw "error";
-          } catch () {
+          } catch {
             return "caught";
           }
         ''');
