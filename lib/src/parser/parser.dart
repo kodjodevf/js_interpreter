@@ -29,7 +29,8 @@ class ParseError extends Error {
   ParseError(this.message, this.token);
 
   @override
-  String toString() => 'ParseError at ${token.line}:${token.column}: $message';
+  String toString() =>
+      'SyntaxError: ParseError at ${token.line}:${token.column}: $message';
 }
 
 /// JavaScript Syntax Analyzer (Recursive Descent Parser)
