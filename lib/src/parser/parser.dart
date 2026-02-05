@@ -1534,45 +1534,52 @@ class JSParser {
       // Parse optional parameter (e) dans catch(e)
       IdentifierExpression? param;
       if (_match([TokenType.leftParen])) {
+        // When parentheses are present, they must contain a parameter
+        // Optional-catch-binding allows catch {} but NOT catch ()
+        if (_check(TokenType.rightParen)) {
+          throw ParseError(
+            'SyntaxError: catch must have a parameter or no parentheses',
+            _peek(),
+          );
+        }
+
         // Support for destructuring patterns in catch clause        // Parse the full expression and extract the identifier
         // This handles cases like catch ([x = default]) or catch ({x})
-        if (!_check(TokenType.rightParen)) {
-          // Try to parse as destructuring pattern first
-          if (_check(TokenType.leftBracket) || _check(TokenType.leftBrace)) {
-            // Skip over the pattern - we'll handle it at runtime
-            // Just consume until we find the closing paren
-            int bracketDepth = 0;
-            int braceDepth = 0;
+        // Try to parse as destructuring pattern first
+        if (_check(TokenType.leftBracket) || _check(TokenType.leftBrace)) {
+          // Skip over the pattern - we'll handle it at runtime
+          // Just consume until we find the closing paren
+          int bracketDepth = 0;
+          int braceDepth = 0;
 
-            while (!_isAtEnd()) {
-              if (_check(TokenType.leftBracket)) {
-                bracketDepth++;
-              } else if (_check(TokenType.rightBracket)) {
-                bracketDepth--;
-              } else if (_check(TokenType.leftBrace)) {
-                braceDepth++;
-              } else if (_check(TokenType.rightBrace)) {
-                braceDepth--;
-              } else if (_check(TokenType.rightParen) &&
-                  bracketDepth == 0 &&
-                  braceDepth == 0) {
-                break;
-              }
-
-              _advance();
+          while (!_isAtEnd()) {
+            if (_check(TokenType.leftBracket)) {
+              bracketDepth++;
+            } else if (_check(TokenType.rightBracket)) {
+              bracketDepth--;
+            } else if (_check(TokenType.leftBrace)) {
+              braceDepth++;
+            } else if (_check(TokenType.rightBrace)) {
+              braceDepth--;
+            } else if (_check(TokenType.rightParen) &&
+                bracketDepth == 0 &&
+                braceDepth == 0) {
+              break;
             }
-          } else if (_check(TokenType.identifier) ||
-              _check(TokenType.keywordAwait) ||
-              _check(TokenType.keywordYield) ||
-              _check(TokenType.keywordAsync)) {
-            // Simple identifier parameter or contextual keyword
-            final paramToken = _advance();
-            param = IdentifierExpression(
-              name: paramToken.lexeme,
-              line: paramToken.line,
-              column: paramToken.column,
-            );
+
+            _advance();
           }
+        } else if (_check(TokenType.identifier) ||
+            _check(TokenType.keywordAwait) ||
+            _check(TokenType.keywordYield) ||
+            _check(TokenType.keywordAsync)) {
+          // Simple identifier parameter or contextual keyword
+          final paramToken = _advance();
+          param = IdentifierExpression(
+            name: paramToken.lexeme,
+            line: paramToken.line,
+            column: paramToken.column,
+          );
         }
         _consume(TokenType.rightParen, 'Expected \')\' after catch parameter');
       }
