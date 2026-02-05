@@ -28,6 +28,12 @@ class JSParser {
   int _functionDepth = 0; // Track function nesting (0 = top-level)
   bool _inClassContext = false; // Track if we're parsing class-related code
 
+  // Context tracking for break/continue validation
+  int _loopDepth = 0; // Count of nested loops (for/while/do-while)
+  int _switchDepth = 0; // Count of nested switch statements
+  // Map of label -> whether it's a loop label (true) or just a statement label (false)
+  final Map<String, bool> _labelStack = {}; // label -> isLoopLabel
+
   JSParser(this.tokens);
 
   /// Check if parameters are "simple" (no destructuring, defaults, or rest)
@@ -503,6 +509,19 @@ class JSParser {
     );
   }
 
+  /// Helper to parse a statement body within a loop context
+  Statement _loopBody() {
+    _loopDepth++;
+    try {
+      return _statement(
+        allowDeclaration: false,
+        allowFunctionDeclaration: false,
+      );
+    } finally {
+      _loopDepth--;
+    }
+  }
+
   // ===== STATEMENTS =====
 
   /// Parse a statement
@@ -533,6 +552,16 @@ class JSParser {
       _checkAwaitAsIdentifierInAsyncContext(labelToken);
 
       _consume(TokenType.colon, "Expected ':' after label");
+
+      // Peek ahead to determine if this will be a loop label
+      final nextTokenType = _peek().type;
+      final isLoopLabel =
+          nextTokenType == TokenType.keywordFor ||
+          nextTokenType == TokenType.keywordWhile ||
+          nextTokenType == TokenType.keywordDo;
+
+      // Register label BEFORE parsing body so continue/break statements can find it
+      _labelStack[labelToken.lexeme] = isLoopLabel;
 
       final body = _statement(
         allowDeclaration: false,
@@ -877,10 +906,7 @@ class JSParser {
     final test = _expression();
     _consume(TokenType.rightParen, 'Expected \')\' after while condition');
 
-    final body = _statement(
-      allowDeclaration: false,
-      allowFunctionDeclaration: false,
-    );
+    final body = _loopBody();
 
     return WhileStatement(
       test: test,
@@ -894,10 +920,7 @@ class JSParser {
   DoWhileStatement _doWhileStatement() {
     final previous = _previous();
 
-    final body = _statement(
-      allowDeclaration: false,
-      allowFunctionDeclaration: false,
-    );
+    final body = _loopBody();
 
     _consume(TokenType.keywordWhile, 'Expected \'while\' after do body');
     _consume(TokenType.leftParen, 'Expected \'(\' after \'while\'');
@@ -1027,10 +1050,7 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-in expression',
         );
-        final body = _statement(
-          allowDeclaration: false,
-          allowFunctionDeclaration: false,
-        );
+        final body = _loopBody();
 
         leftSide = VariableDeclaration(
           kind: kind,
@@ -1053,10 +1073,7 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-of expression',
         );
-        final body = _statement(
-          allowDeclaration: false,
-          allowFunctionDeclaration: false,
-        );
+        final body = _loopBody();
 
         leftSide = VariableDeclaration(
           kind: kind,
@@ -1153,10 +1170,7 @@ class JSParser {
             TokenType.rightParen,
             'Expected \')\' after for-in expression',
           );
-          final body = _statement(
-            allowDeclaration: false,
-            allowFunctionDeclaration: false,
-          );
+          final body = _loopBody();
 
           return ForInStatement(
             left: left,
@@ -1172,10 +1186,7 @@ class JSParser {
             TokenType.rightParen,
             'Expected \')\' after for-of expression',
           );
-          final body = _statement(
-            allowDeclaration: false,
-            allowFunctionDeclaration: false,
-          );
+          final body = _loopBody();
 
           return ForOfStatement(
             left: left,
@@ -1199,10 +1210,7 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-in expression',
         );
-        final body = _statement(
-          allowDeclaration: false,
-          allowFunctionDeclaration: false,
-        );
+        final body = _loopBody();
 
         return ForInStatement(
           left: expr,
@@ -1218,10 +1226,7 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-of expression',
         );
-        final body = _statement(
-          allowDeclaration: false,
-          allowFunctionDeclaration: false,
-        );
+        final body = _loopBody();
 
         return ForOfStatement(
           left: expr,
@@ -1237,10 +1242,7 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-in expression',
         );
-        final body = _statement(
-          allowDeclaration: false,
-          allowFunctionDeclaration: false,
-        );
+        final body = _loopBody();
 
         return ForInStatement(
           left: expr.left,
@@ -1269,10 +1271,7 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-in expression',
         );
-        final body = _statement(
-          allowDeclaration: false,
-          allowFunctionDeclaration: false,
-        );
+        final body = _loopBody();
 
         return ForInStatement(
           left: binExpr.left,
@@ -1287,10 +1286,7 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-of expression',
         );
-        final body = _statement(
-          allowDeclaration: false,
-          allowFunctionDeclaration: false,
-        );
+        final body = _loopBody();
 
         return ForOfStatement(
           left: expr.left,
@@ -1319,10 +1315,7 @@ class JSParser {
           TokenType.rightParen,
           'Expected \')\' after for-of expression',
         );
-        final body = _statement(
-          allowDeclaration: false,
-          allowFunctionDeclaration: false,
-        );
+        final body = _loopBody();
 
         return ForOfStatement(
           left: binExpr.left,
@@ -1364,10 +1357,7 @@ class JSParser {
     }
     _consume(TokenType.rightParen, 'Expected \')\' after for clauses');
 
-    final body = _statement(
-      allowDeclaration: false,
-      allowFunctionDeclaration: false,
-    );
+    final body = _loopBody();
 
     return ForStatement(
       init: leftSide,
@@ -1408,6 +1398,20 @@ class JSParser {
       label = _advance().lexeme;
     }
 
+    // Validation: break must be in a loop or switch statement
+    if (label == null) {
+      // Unlabeled break: must be in loop or switch
+      if (_loopDepth == 0 && _switchDepth == 0) {
+        throw ParseError('Illegal break statement', previous);
+      }
+    } else {
+      // Labeled break: label must exist
+      if (!_labelStack.containsKey(label)) {
+        throw ParseError('Label "$label" is not defined', previous);
+      }
+      // Labeled break can target any labeled statement, so no additional validation
+    }
+
     // Support for ASI (Automatic Semicolon Insertion)
     _consumeSemicolonOrASI('Expected \';\' after \'break\'');
 
@@ -1427,6 +1431,23 @@ class JSParser {
     // If the identifier is on a new line, ASI applies before
     if (_check(TokenType.identifier) && _peek().line == previous.line) {
       label = _advance().lexeme;
+    }
+
+    // Validation: continue must be in a loop
+    if (label == null) {
+      // Unlabeled continue: must be in loop
+      if (_loopDepth == 0) {
+        throw ParseError('Illegal continue statement', previous);
+      }
+    } else {
+      // Labeled continue: must target a loop label
+      if (!_labelStack.containsKey(label)) {
+        throw ParseError('Label "$label" is not defined', previous);
+      }
+      if (!_labelStack[label]!) {
+        // The label exists but doesn't target a loop
+        throw ParseError('Continue target must be a loop', previous);
+      }
     }
 
     // Support for ASI (Automatic Semicolon Insertion)
@@ -1557,54 +1578,59 @@ class JSParser {
 
     final cases = <SwitchCase>[];
 
-    while (!_check(TokenType.rightBrace) && !_isAtEnd()) {
-      if (_match([TokenType.keywordCase])) {
-        final caseToken = _previous();
-        final test = _expression();
-        _consume(TokenType.colon, 'Expected \':\' after case expression');
+    _switchDepth++;
+    try {
+      while (!_check(TokenType.rightBrace) && !_isAtEnd()) {
+        if (_match([TokenType.keywordCase])) {
+          final caseToken = _previous();
+          final test = _expression();
+          _consume(TokenType.colon, 'Expected \':\' after case expression');
 
-        final consequent = <Statement>[];
-        while (!_check(TokenType.keywordCase) &&
-            !_check(TokenType.keywordDefault) &&
-            !_check(TokenType.rightBrace) &&
-            !_isAtEnd()) {
-          consequent.add(_statement());
+          final consequent = <Statement>[];
+          while (!_check(TokenType.keywordCase) &&
+              !_check(TokenType.keywordDefault) &&
+              !_check(TokenType.rightBrace) &&
+              !_isAtEnd()) {
+            consequent.add(_statement());
+          }
+
+          cases.add(
+            SwitchCase(
+              test: test,
+              consequent: consequent,
+              line: caseToken.line,
+              column: caseToken.column,
+            ),
+          );
+        } else if (_match([TokenType.keywordDefault])) {
+          final defaultToken = _previous();
+          _consume(TokenType.colon, 'Expected \':\' after default');
+
+          final consequent = <Statement>[];
+          while (!_check(TokenType.keywordCase) &&
+              !_check(TokenType.keywordDefault) &&
+              !_check(TokenType.rightBrace) &&
+              !_isAtEnd()) {
+            consequent.add(_statement());
+          }
+
+          cases.add(
+            SwitchCase(
+              test: null, // null indique default case
+              consequent: consequent,
+              line: defaultToken.line,
+              column: defaultToken.column,
+            ),
+          );
+        } else {
+          throw ParseError(
+            'Expected case or default in switch statement',
+            _peek(),
+          );
         }
-
-        cases.add(
-          SwitchCase(
-            test: test,
-            consequent: consequent,
-            line: caseToken.line,
-            column: caseToken.column,
-          ),
-        );
-      } else if (_match([TokenType.keywordDefault])) {
-        final defaultToken = _previous();
-        _consume(TokenType.colon, 'Expected \':\' after default');
-
-        final consequent = <Statement>[];
-        while (!_check(TokenType.keywordCase) &&
-            !_check(TokenType.keywordDefault) &&
-            !_check(TokenType.rightBrace) &&
-            !_isAtEnd()) {
-          consequent.add(_statement());
-        }
-
-        cases.add(
-          SwitchCase(
-            test: null, // null indique default case
-            consequent: consequent,
-            line: defaultToken.line,
-            column: defaultToken.column,
-          ),
-        );
-      } else {
-        throw ParseError(
-          'Expected case or default in switch statement',
-          _peek(),
-        );
       }
+    } finally {
+      _switchDepth--;
     }
 
     _consume(TokenType.rightBrace, 'Expected \'}\' after switch body');
@@ -1634,10 +1660,7 @@ class JSParser {
     final object = _expression();
     _consume(TokenType.rightParen, "Expected ')' after with object");
 
-    final body = _statement(
-      allowDeclaration: false,
-      allowFunctionDeclaration: false,
-    );
+    final body = _loopBody();
 
     return WithStatement(
       object: object,

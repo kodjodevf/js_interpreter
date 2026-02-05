@@ -8752,6 +8752,14 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
   @override
   JSValue visitWhileStatement(WhileStatement node) {
+    // Hoist var declarations from the loop body to the current variable environment
+    // This must happen BEFORE entering the loop
+    if (node.body is BlockStatement) {
+      _hoistDeclarations((node.body as BlockStatement).body);
+    } else {
+      _hoistDeclarations([node.body]);
+    }
+
     JSValue lastValue = JSValueFactory.undefined();
 
     try {
@@ -8759,7 +8767,22 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         final testValue = node.test.accept(this);
         if (!testValue.toBoolean()) break;
 
-        lastValue = node.body.accept(this);
+        try {
+          lastValue = node.body.accept(this);
+        } on FlowControlException catch (e) {
+          // Always capture the last value before an abrupt completion
+          if ((e.type == ExceptionType.break_ ||
+                  e.type == ExceptionType.continue_) &&
+              e.completionValue == null) {
+            // Re-throw with the last normal value attached
+            throw FlowControlException(
+              e.type,
+              label: e.label,
+              completionValue: lastValue,
+            );
+          }
+          rethrow;
+        }
       }
     } on FlowControlException catch (e) {
       if (e.type == ExceptionType.break_) {
@@ -8767,14 +8790,17 @@ class JSEvaluator implements ASTVisitor<JSValue> {
           // Break avec label - laisser le niveau superieur gerer
           rethrow;
         }
-        // Break normal
+        // Break normal - return completion value if available
+        if (e.completionValue != null) {
+          return e.completionValue!;
+        }
         return JSValueFactory.undefined();
       } else if (e.type == ExceptionType.continue_) {
         if (e.label != null) {
           // Continue avec label - laisser le niveau superieur gerer
           rethrow;
         }
-        // Continue - reprendre la boucle
+        // Continue - reprendre la boucle with completion value
         return visitWhileStatement(node);
       } else {
         rethrow;
@@ -8937,6 +8963,13 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       node.init!.accept(this);
     }
 
+    // Hoist var declarations from loop body before entering the loop
+    if (node.body is BlockStatement) {
+      _hoistDeclarations((node.body as BlockStatement).body);
+    } else {
+      _hoistDeclarations([node.body]);
+    }
+
     // Create scope pour le corps de la boucle seulement
     final parentEnv = _currentEnvironment();
     final forEnv = Environment.block(parentEnv);
@@ -8966,9 +8999,21 @@ class JSEvaluator implements ASTVisitor<JSValue> {
             // Corps
             lastValue = node.body.accept(this);
           } on FlowControlException catch (e) {
+            // Capture completion value before abrupt completion
+            if ((e.type == ExceptionType.break_ ||
+                    e.type == ExceptionType.continue_) &&
+                e.completionValue == null) {
+              throw FlowControlException(
+                e.type,
+                label: e.label,
+                completionValue: lastValue,
+              );
+            }
+
             if (e.type == ExceptionType.break_) {
               if (e.label == null) {
                 // Break sans label - sortir de cette boucle
+                lastValue = e.completionValue ?? JSValueFactory.undefined();
                 break;
               } else {
                 // Break avec label - propager vers le niveau superieur
@@ -8977,6 +9022,8 @@ class JSEvaluator implements ASTVisitor<JSValue> {
             } else if (e.type == ExceptionType.continue_) {
               if (e.label == null) {
                 // Continue sans label - faire l'update et reprendre la boucle
+                // Sauvegarder la completion value
+                lastValue = e.completionValue ?? JSValueFactory.undefined();
                 // L'update se fait dans le scope courant (parent), pas dans le scope de la boucle
                 _executionStack.pop();
                 try {
@@ -9018,6 +9065,13 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
   /// Gestion speciale des boucles for avec let/const (nouvel environnement par iteration)
   JSValue _visitForStatementWithLetConst(ForStatement node) {
+    // Hoist var declarations from loop body before entering the loop
+    if (node.body is BlockStatement) {
+      _hoistDeclarations((node.body as BlockStatement).body);
+    } else {
+      _hoistDeclarations([node.body]);
+    }
+
     // Create environnement pour l'initialisation
     final parentEnv = _currentEnvironment();
     final initEnv = Environment.block(parentEnv);
@@ -9085,8 +9139,20 @@ class JSEvaluator implements ASTVisitor<JSValue> {
             // Corps dans l'environnement d'iteration
             lastValue = node.body.accept(this);
           } on FlowControlException catch (e) {
+            // Capture completion value before abrupt completion
+            if ((e.type == ExceptionType.break_ ||
+                    e.type == ExceptionType.continue_) &&
+                e.completionValue == null) {
+              throw FlowControlException(
+                e.type,
+                label: e.label,
+                completionValue: lastValue,
+              );
+            }
+
             if (e.type == ExceptionType.break_) {
               if (e.label == null) {
+                lastValue = e.completionValue ?? JSValueFactory.undefined();
                 break;
               } else {
                 rethrow;
@@ -9094,6 +9160,7 @@ class JSEvaluator implements ASTVisitor<JSValue> {
             } else if (e.type == ExceptionType.continue_) {
               if (e.label == null) {
                 // Continue - mettre a jour dans l'init env et continuer
+                lastValue = e.completionValue ?? JSValueFactory.undefined();
                 _executionStack.pop(); // sortir de iteration
                 if (node.update != null) {
                   node.update!.accept(this); // dans init env
@@ -9126,6 +9193,14 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
   @override
   JSValue visitDoWhileStatement(DoWhileStatement node) {
+    // Hoist var declarations from the loop body to the current variable environment
+    // This must happen BEFORE entering the loop
+    if (node.body is BlockStatement) {
+      _hoistDeclarations((node.body as BlockStatement).body);
+    } else {
+      _hoistDeclarations([node.body]);
+    }
+
     JSValue lastValue = JSValueFactory.undefined();
 
     try {
@@ -9133,6 +9208,17 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         try {
           lastValue = node.body.accept(this);
         } on FlowControlException catch (e) {
+          // Always capture the last value before an abrupt completion
+          if ((e.type == ExceptionType.break_ ||
+                  e.type == ExceptionType.continue_) &&
+              e.completionValue == null) {
+            // Re-throw with the last normal value attached
+            throw FlowControlException(
+              e.type,
+              label: e.label,
+              completionValue: lastValue,
+            );
+          }
           if (e.type == ExceptionType.break_) {
             if (e.label == null) {
               // Break without label - use the completion value and exit loop
@@ -9628,10 +9714,10 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       } on FlowControlException catch (e) {
         if (e.label == node.label) {
           if (e.type == ExceptionType.break_) {
-            return JSValueFactory.undefined();
+            return e.completionValue ?? JSValueFactory.undefined();
           } else if (e.type == ExceptionType.continue_) {
             // Continue avec ce label sur un non-loop statement = break
-            return JSValueFactory.undefined();
+            return e.completionValue ?? JSValueFactory.undefined();
           }
         }
         rethrow;
