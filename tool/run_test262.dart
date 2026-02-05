@@ -438,35 +438,66 @@ class Test262Runner {
     });
 
     try {
-      if (metadata.flags.contains('module')) {
-        await interpreter.loadModule(filename);
-      } else {
-        interpreter.eval(code);
-      }
-
-      if (metadata.flags.contains('async')) {
-        // Simple async wait
-        int timeout = 0;
-        while (!asyncCompleted && timeout < 2000) {
-          await Future.delayed(Duration(milliseconds: 10));
-          timeout += 10;
+      // For tests with negative phase:parse, we need to catch parsing errors separately
+      if (metadata.negativePhase == 'parse' && metadata.negativeType != null) {
+        try {
+          // Try to parse the code to detect parse-phase errors
+          if (metadata.flags.contains('module')) {
+            await interpreter.loadModule(filename);
+          } else {
+            interpreter.eval(code);
+          }
+          // If parsing succeeded but error was expected, that's a failure
+          _reportFailure(
+            filename,
+            'Expected parse error ${metadata.negativeType} but none thrown',
+            strict,
+          );
+        } catch (e) {
+          // Parse error occurred - check if it matches expected type
+          final errorStr = e.toString();
+          if (errorStr.contains(metadata.negativeType!)) {
+            _recordResult(filename, strict, 'pass');
+          } else {
+            _reportFailure(
+              filename,
+              'Expected parse error ${metadata.negativeType} but got: $e',
+              strict,
+            );
+          }
         }
-        if (!asyncCompleted) {
-          throw Exception('\$DONE() not called');
-        }
-      }
-
-      if (metadata.negativeType != null) {
-        _reportFailure(
-          filename,
-          'Expected error ${metadata.negativeType} but none thrown',
-          strict,
-        );
       } else {
-        _recordResult(filename, strict, 'pass');
+        // Normal execution path
+        if (metadata.flags.contains('module')) {
+          await interpreter.loadModule(filename);
+        } else {
+          interpreter.eval(code);
+        }
+
+        if (metadata.flags.contains('async')) {
+          // Simple async wait
+          int timeout = 0;
+          while (!asyncCompleted && timeout < 2000) {
+            await Future.delayed(Duration(milliseconds: 10));
+            timeout += 10;
+          }
+          if (!asyncCompleted) {
+            throw Exception('\$DONE() not called');
+          }
+        }
+
+        if (metadata.negativeType != null) {
+          _reportFailure(
+            filename,
+            'Expected error ${metadata.negativeType} but none thrown',
+            strict,
+          );
+        } else {
+          _recordResult(filename, strict, 'pass');
+        }
       }
     } catch (e) {
-      if (metadata.negativeType != null) {
+      if (metadata.negativePhase != 'parse' && metadata.negativeType != null) {
         final errorStr = e.toString();
         if (errorStr.contains(metadata.negativeType!)) {
           _recordResult(filename, strict, 'pass');
@@ -567,6 +598,8 @@ class Test262Runner {
         }
       } else if (trimmed.startsWith('negative:')) {
         currentKey = 'negative';
+      } else if (trimmed.startsWith('phase:') && currentKey == 'negative') {
+        metadata.negativePhase = trimmed.substring(6).trim();
       } else if (trimmed.startsWith('type:') && currentKey == 'negative') {
         metadata.negativeType = trimmed.substring(5).trim();
       } else if (trimmed.startsWith('- ')) {
@@ -601,6 +634,7 @@ class TestMetadata {
   final List<String> flags = [];
   final List<String> features = [];
   String? negativeType;
+  String? negativePhase; // 'parse' or 'execution'
 }
 
 void main(List<String> args) async {
