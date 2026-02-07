@@ -1413,6 +1413,11 @@ class JSParser {
   ReturnStatement _returnStatement() {
     final previous = _previous();
 
+    // Check if return is inside a function
+    if (_functionDepth == 0) {
+      throw ParseError('Return statement outside function', previous);
+    }
+
     Expression? argument;
     if (!_check(TokenType.semicolon) && !_isAtEnd() && !_canInsertSemicolon()) {
       argument = _expression();
@@ -3612,7 +3617,12 @@ class JSParser {
               'Expected \')\' after getter parameters',
             );
 
+            final oldFunctionDepth = _functionDepth;
+            _functionDepth++; // Increment for getter body parsing
+
             final body = _blockStatement();
+
+            _functionDepth = oldFunctionDepth; // Restore
 
             final functionExpr = FunctionExpression(
               params: [],
@@ -3753,7 +3763,12 @@ class JSParser {
               'Expected \')\' after setter parameter',
             );
 
+            final oldFunctionDepth = _functionDepth;
+            _functionDepth++; // Increment for setter body parsing
+
             final body = _blockStatement();
+
+            _functionDepth = oldFunctionDepth; // Restore
 
             final functionExpr = FunctionExpression(
               params: [
@@ -3849,8 +3864,12 @@ class JSParser {
             'Expected \')\' after generator method parameters',
           );
 
+          final oldFunctionDepth = _functionDepth;
+          _functionDepth++; // Increment for method body parsing
+
           final body = _blockStatement();
           _inGeneratorContext = oldGeneratorContext;
+          _functionDepth = oldFunctionDepth;
 
           final functionExpr = FunctionExpression(
             params: params,
@@ -3965,9 +3984,13 @@ class JSParser {
               'Expected \')\' after async method parameters',
             );
 
+            final oldFunctionDepth = _functionDepth;
+            _functionDepth++; // Increment for method body parsing
+
             final body = _blockStatement();
             _inAsyncContext = oldAsyncContext;
             _inGeneratorContext = oldGeneratorContext;
+            _functionDepth = oldFunctionDepth;
 
             Expression functionExpr;
             if (isAsyncGenerator) {
@@ -4021,7 +4044,10 @@ class JSParser {
             final params = _parseFunctionParameters();
 
             _consume(TokenType.rightParen, 'Expected \')\' after parameters');
+            final oldFunctionDepth = _functionDepth;
+            _functionDepth++;
             final body = _blockStatement();
+            _functionDepth = oldFunctionDepth;
 
             final functionExpr = FunctionExpression(
               id: null,
@@ -4111,7 +4137,10 @@ class JSParser {
             final params = _parseFunctionParameters();
 
             _consume(TokenType.rightParen, 'Expected \')\' after parameters');
+            final oldFunctionDepth = _functionDepth;
+            _functionDepth++;
             final body = _blockStatement();
+            _functionDepth = oldFunctionDepth;
 
             final functionExpr = FunctionExpression(
               id: null,
@@ -4192,7 +4221,10 @@ class JSParser {
           if (_match([TokenType.leftParen])) {
             final params = _parseFunctionParameters();
             _consume(TokenType.rightParen, 'Expected \')\' after parameters');
+            final oldFunctionDepth = _functionDepth;
+            _functionDepth++; // Increment for method body parsing
             final body = _blockStatement();
+            _functionDepth = oldFunctionDepth;
 
             final functionExpr = FunctionExpression(
               id: null,
@@ -4237,7 +4269,10 @@ class JSParser {
           if (_match([TokenType.leftParen])) {
             final params = _parseFunctionParameters();
             _consume(TokenType.rightParen, 'Expected \')\' after parameters');
+            final oldFunctionDepth = _functionDepth;
+            _functionDepth++; // Increment for method body parsing
             final body = _blockStatement();
+            _functionDepth = oldFunctionDepth;
 
             final functionExpr = FunctionExpression(
               id: null,
@@ -4282,7 +4317,10 @@ class JSParser {
           if (_match([TokenType.leftParen])) {
             final params = _parseFunctionParameters();
             _consume(TokenType.rightParen, 'Expected \')\' after parameters');
+            final oldFunctionDepth = _functionDepth;
+            _functionDepth++; // Increment for method body parsing
             final body = _blockStatement();
+            _functionDepth = oldFunctionDepth;
 
             final functionExpr = FunctionExpression(
               id: null,
@@ -5978,9 +6016,11 @@ class JSParser {
       // Set async/generator context if this is an async/generator method
       final oldAsyncContext = _inAsyncContext;
       final oldGeneratorContext = _inGeneratorContext;
+      final oldFunctionDepth = _functionDepth;
       _inAsyncContext = isAsync; // Always set to correct value for this method
       _inGeneratorContext =
           isGenerator; // Always set to correct value for this method
+      _functionDepth++; // Increment for method body parsing
 
       // Method body
       final body = _blockStatement();
@@ -5988,6 +6028,7 @@ class JSParser {
       // Restore context
       _inAsyncContext = oldAsyncContext;
       _inGeneratorContext = oldGeneratorContext;
+      _functionDepth = oldFunctionDepth;
 
       // ES6 14.1.2: Illegal to have "use strict" directive with non-simple parameters
       _validateStrictModeWithParams(
