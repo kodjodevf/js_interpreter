@@ -173,8 +173,8 @@ class JSParser {
   }
 
   /// Get bound names from a destructuring pattern
-  Set<String> _getBoundNamesFromPattern(Pattern pattern) {
-    final names = <String>{};
+  List<String> _getBoundNamesFromPattern(Pattern pattern) {
+    final names = <String>[];
 
     if (pattern is IdentifierPattern) {
       names.add(pattern.name);
@@ -184,10 +184,18 @@ class JSParser {
           names.addAll(_getBoundNamesFromPattern(elem));
         }
       }
+      // Also handle rest element
+      if (pattern.restElement != null) {
+        names.addAll(_getBoundNamesFromPattern(pattern.restElement!));
+      }
     } else if (pattern is ObjectPattern) {
       for (final prop in pattern.properties) {
         final propValue = prop.value;
         names.addAll(_getBoundNamesFromPattern(propValue));
+      }
+      // Also handle rest element
+      if (pattern.restElement != null) {
+        names.addAll(_getBoundNamesFromPattern(pattern.restElement!));
       }
     } else if (pattern is AssignmentPattern) {
       names.addAll(_getBoundNamesFromPattern(pattern.left));
@@ -1622,6 +1630,28 @@ class JSParser {
           }
           seen.add(name);
         }
+
+        // Check for eval/arguments in strict mode
+        if (_isInStrictMode()) {
+          for (final name in boundNames) {
+            if (name == 'eval' || name == 'arguments') {
+              throw ParseError(
+                'The identifier \'$name\' cannot be used as a catch parameter in strict mode',
+                _peek(),
+              );
+            }
+          }
+        }
+      }
+
+      // Check simple identifier parameter for eval/arguments in strict mode
+      if (param != null && _isInStrictMode()) {
+        if (param.name == 'eval' || param.name == 'arguments') {
+          throw ParseError(
+            'The identifier \'${param.name}\' cannot be used as a catch parameter in strict mode',
+            _peek(),
+          );
+        }
       }
 
       // 2. Check that catch parameter is not redeclared in the catch body
@@ -2067,11 +2097,27 @@ class JSParser {
   ArrayPattern _arrayExpressionToPattern(ArrayExpression expr) {
     final elements = <Pattern?>[];
     Pattern? restElement;
+    bool hasRestElement = false;
 
-    for (final element in expr.elements) {
+    for (int i = 0; i < expr.elements.length; i++) {
+      final element = expr.elements[i];
+
       if (element == null) {
+        if (hasRestElement) {
+          // Syntax error: elements after rest element
+          throw ParseError(
+            'Rest element must be last element in destructuring pattern',
+            _peek(),
+          );
+        }
         elements.add(null); // Trou dans l'array [a, , c]
       } else if (element is AssignmentExpression && element.operator == '=') {
+        if (hasRestElement) {
+          throw ParseError(
+            'Rest element must be last element in destructuring pattern',
+            _peek(),
+          );
+        }
         // Default value: a = 10
         final leftPattern = _expressionToPattern(element.left);
         elements.add(
@@ -2083,6 +2129,12 @@ class JSParser {
           ),
         );
       } else if (element is IdentifierExpression) {
+        if (hasRestElement) {
+          throw ParseError(
+            'Rest element must be last element in destructuring pattern',
+            _peek(),
+          );
+        }
         elements.add(
           IdentifierPattern(
             name: element.name,
@@ -2091,6 +2143,12 @@ class JSParser {
           ),
         );
       } else if (element is SpreadElement) {
+        if (hasRestElement) {
+          throw ParseError(
+            'Rest element must be last element in destructuring pattern',
+            _peek(),
+          );
+        }
         // Rest pattern: ...rest or ...obj.prop or ...obj[expr], etc.
         // Convert the argument expression to a pattern (can be identifier, member expr, etc.)
         if (element.argument is IdentifierExpression) {
@@ -2117,7 +2175,14 @@ class JSParser {
             _peek(),
           );
         }
+        hasRestElement = true;
       } else if (element is DestructuringAssignmentExpression) {
+        if (hasRestElement) {
+          throw ParseError(
+            'Rest element must be last element in destructuring pattern',
+            _peek(),
+          );
+        }
         // Handle destructuring assignment in array pattern: [[a, b] = default]
         elements.add(
           AssignmentPattern(
@@ -2128,8 +2193,20 @@ class JSParser {
           ),
         );
       } else if (_isDestructuringPattern(element)) {
+        if (hasRestElement) {
+          throw ParseError(
+            'Rest element must be last element in destructuring pattern',
+            _peek(),
+          );
+        }
         elements.add(_expressionToPattern(element));
       } else if (element is MemberExpression) {
+        if (hasRestElement) {
+          throw ParseError(
+            'Rest element must be last element in destructuring pattern',
+            _peek(),
+          );
+        }
         // Member expressions are valid assignment targets: obj.prop or arr[index]
         elements.add(
           ExpressionPattern(

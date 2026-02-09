@@ -16200,19 +16200,12 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       final restObj = JSObject();
 
       // Add all properties that weren't extracted
-      // Access internal properties directly
-      try {
-        final allKeys = <String>{
-          ...(obj as dynamic)._properties.keys,
-          ...(obj as dynamic)._accessorProperties.keys,
-        };
-        for (final key in allKeys) {
-          if (!usedKeys.contains(key)) {
-            restObj.setProperty(key, obj.getProperty(key));
-          }
+      // Use getPropertyNames to get all enumerable properties
+      final allKeys = obj.getPropertyNames(enumerableOnly: true);
+      for (final key in allKeys) {
+        if (!usedKeys.contains(key)) {
+          restObj.setProperty(key, obj.getProperty(key));
         }
-      } catch (e) {
-        // If we can't access internal properties, just return empty object
       }
 
       _bindingInitialization(pattern.restElement!, restObj, targetEnv);
