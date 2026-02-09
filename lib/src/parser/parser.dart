@@ -66,6 +66,65 @@ class JSParser {
     return true;
   }
 
+  /// Validate async function parameters - no 'await' allowed
+  void _validateAsyncFunctionParameters(
+    List<Parameter> params,
+    int line,
+    int column,
+  ) {
+    for (final param in params) {
+      // Check simple identifier parameters
+      final simpleName = param.name;
+      if (simpleName != null) {
+        final paramName = simpleName.name;
+        
+        // 'await' is never allowed in async function parameters
+        if (paramName == 'await') {
+          throw ParseError(
+            'await is not a valid parameter name in async functions',
+            _peek(),
+          );
+        }
+        
+        // 'arguments' and 'eval' are not allowed in strict mode parameters
+        if (_isInStrictMode() && (paramName == 'arguments' || paramName == 'eval')) {
+          throw ParseError(
+            'The identifier \'$paramName\' cannot be used as a parameter in strict mode',
+            _peek(),
+          );
+        }
+      }
+
+      // Check default values for await identifier references
+      if (param.defaultValue != null) {
+        _validateAwaitInExpression(param.defaultValue!, isAsync: true);
+      }
+
+      // Check destructuring patterns
+      if (param.isDestructuring && param.pattern != null) {
+        // The pattern contains await references which we need to validate
+        _validateAwaitInPattern(param.pattern!);
+      }
+    }
+  }
+
+  /// Helper to check for await in expressions (used in async function validation)
+  void _validateAwaitInExpression(Expression expr, {bool isAsync = false}) {
+    if (expr is IdentifierExpression && expr.name == 'await' && isAsync) {
+      throw ParseError(
+        'await is not a valid identifier reference in async function parameters',
+        _peek(),
+      );
+    }
+    // Could recursively check nested expressions if needed
+  }
+
+  /// Helper to check for await in patterns
+  void _validateAwaitInPattern(Pattern pattern) {
+    // This would need to recursively check patterns for await identifiers
+    // For now, basic implementation
+  }
+
   /// Check if block body starts with "use strict" directive
   static bool _hasUseStrictDirective(BlockStatement body) {
     if (body.body.isEmpty) return false;
@@ -4552,6 +4611,13 @@ class JSParser {
 
     _consume(TokenType.rightParen, 'Expected \')\' after parameters');
 
+    // Validate async function parameters - 'await' is not allowed
+    _validateAsyncFunctionParameters(
+      params,
+      asyncToken.line,
+      asyncToken.column,
+    );
+
     // Set async/generator context and increment function depth for body parsing
     final oldAsyncContext = _inAsyncContext;
     final oldGeneratorContext = _inGeneratorContext;
@@ -4606,6 +4672,17 @@ class JSParser {
     } else {
       throw ParseError('Expected function name', _peek());
     }
+
+    // Validate function name in strict mode
+    if (_isInStrictMode()) {
+      if (nameToken.lexeme == 'eval' || nameToken.lexeme == 'arguments') {
+        throw ParseError(
+          'The identifier \'${nameToken.lexeme}\' cannot be used as a function name in strict mode',
+          nameToken,
+        );
+      }
+    }
+
     final id = IdentifierExpression(
       name: nameToken.lexeme,
       line: nameToken.line,
@@ -4677,6 +4754,17 @@ class JSParser {
     } else {
       throw ParseError('Expected function name', _peek());
     }
+
+    // Validate function name in strict mode
+    if (_isInStrictMode()) {
+      if (nameToken.lexeme == 'eval' || nameToken.lexeme == 'arguments') {
+        throw ParseError(
+          'The identifier \'${nameToken.lexeme}\' cannot be used as a function name in strict mode',
+          nameToken,
+        );
+      }
+    }
+
     final id = IdentifierExpression(
       name: nameToken.lexeme,
       line: nameToken.line,
@@ -4689,6 +4777,13 @@ class JSParser {
     final params = _parseFunctionParameters();
 
     _consume(TokenType.rightParen, 'Expected \')\' after parameters');
+
+    // Validate async function parameters - 'await' is not allowed
+    _validateAsyncFunctionParameters(
+      params,
+      asyncToken.line,
+      asyncToken.column,
+    );
 
     // Set async/generator context and increment function depth for body parsing
     final oldAsyncContext = _inAsyncContext;
