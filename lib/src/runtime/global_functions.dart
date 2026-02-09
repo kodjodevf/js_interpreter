@@ -126,9 +126,16 @@ class GlobalFunctions {
             throw JSError('eval() called without evaluator context');
           }
 
+          // Check if current execution context is in strict mode
+          // If so, the eval code inherits that strict mode
+          final isInStrictMode = evaluator.isCurrentlyInStrictMode();
+
           // Parse and evaluate the code in current context
           // This uses evaluateDirectEval which checks for var/let conflicts
-          final program = JSParser.parseString(code);
+          final program = JSParser.parseString(
+            code,
+            initialStrictMode: isInStrictMode,
+          );
           return evaluator.evaluateDirectEval(program);
         } on JSException {
           // Re-throw JavaScript exceptions (including SyntaxErrors from var redeclaration)

@@ -37,6 +37,8 @@ class ParseError extends Error {
 class JSParser {
   final List<Token> tokens;
   int _current = 0;
+  bool _initialStrictMode =
+      false; // Initial strict mode context (e.g., from eval caller)
 
   // Context tracking for contextual keywords (await/yield)
   bool _inAsyncContext = false;
@@ -50,7 +52,8 @@ class JSParser {
   // Map of label -> label info (isLoopOrSwitch, functionDepth)
   final Map<String, _LabelInfo> _labelStack = {};
 
-  JSParser(this.tokens);
+  JSParser(this.tokens, {bool initialStrictMode = false})
+    : _initialStrictMode = initialStrictMode;
 
   /// Check if parameters are "simple" (no destructuring, defaults, or rest)
   /// ES6 14.1.2: Cannot have "use strict" in body if params are non-simple
@@ -489,11 +492,11 @@ class JSParser {
     return _strictMode;
   }
 
-  /// Parse a string of JavaScript code
-  static Program parseString(String source) {
+  /// Parse a string of JavaScript code with optional initial strict mode
+  static Program parseString(String source, {bool initialStrictMode = false}) {
     final lexer = JSLexer(source);
     final tokens = lexer.tokenize();
-    final parser = JSParser(tokens);
+    final parser = JSParser(tokens, initialStrictMode: initialStrictMode);
     return parser.parse();
   }
 
@@ -501,13 +504,16 @@ class JSParser {
   static Expression parseExpression(String source) {
     final lexer = JSLexer(source);
     final tokens = lexer.tokenize();
-    final parser = JSParser(tokens);
+    final parser = JSParser(tokens, initialStrictMode: false);
     return parser._expression();
   }
 
   /// Parse tokens and return the AST
   Program parse() {
     final statements = <Statement>[];
+
+    // Initialize strict mode from context (e.g., from eval caller)
+    _strictMode = _initialStrictMode;
 
     // Check for "use strict" directive at the start of the program
     if (!_isAtEnd()) {
