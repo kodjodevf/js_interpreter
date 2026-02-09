@@ -77,7 +77,7 @@ class JSParser {
       final simpleName = param.name;
       if (simpleName != null) {
         final paramName = simpleName.name;
-        
+
         // 'await' is never allowed in async function parameters
         if (paramName == 'await') {
           throw ParseError(
@@ -85,9 +85,10 @@ class JSParser {
             _peek(),
           );
         }
-        
+
         // 'arguments' and 'eval' are not allowed in strict mode parameters
-        if (_isInStrictMode() && (paramName == 'arguments' || paramName == 'eval')) {
+        if (_isInStrictMode() &&
+            (paramName == 'arguments' || paramName == 'eval')) {
           throw ParseError(
             'The identifier \'$paramName\' cannot be used as a parameter in strict mode',
             _peek(),
@@ -3288,10 +3289,19 @@ class JSParser {
     }
 
     // Contextual keywords as identifiers
-    // await is an identifier outside async context
-    // In sloppy mode, it can even be used inside async functions
+    // await is reserved in async function bodies (always, even in sloppy mode)
+    // Outside async context, await can be used as an identifier
     if (_match([TokenType.keywordAwait])) {
       final token = _previous();
+
+      // Check if we're in an async function context
+      if (_inAsyncContext) {
+        throw ParseError(
+          'await is not a valid identifier reference in async function context',
+          token,
+        );
+      }
+
       return IdentifierExpression(
         name: token.lexeme,
         line: token.line,
