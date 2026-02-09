@@ -72,11 +72,21 @@ class JSParser {
     int line,
     int column,
   ) {
+    final seenNames = <String>{};
+
     for (final param in params) {
-      // Check simple identifier parameters
-      final simpleName = param.name;
-      if (simpleName != null) {
-        final paramName = simpleName.name;
+      // Get all bound names from this parameter
+      final boundNames = _getParameterBoundNames(param);
+
+      for (final paramName in boundNames) {
+        // Check for duplicate parameter names
+        if (seenNames.contains(paramName)) {
+          throw ParseError(
+            'Identifier \'$paramName\' has already been declared',
+            _peek(),
+          );
+        }
+        seenNames.add(paramName);
 
         // 'await' is never allowed in async function parameters
         if (paramName == 'await') {
@@ -105,6 +115,40 @@ class JSParser {
       if (param.isDestructuring && param.pattern != null) {
         // The pattern contains await references which we need to validate
         _validateAwaitInPattern(param.pattern!);
+      }
+    }
+  }
+
+  /// Validate function parameters for duplicate names (works for all function types)
+  void _validateFunctionParameters(
+    List<Parameter> params,
+    int line,
+    int column,
+  ) {
+    final seenNames = <String>{};
+
+    for (final param in params) {
+      // Get all bound names from this parameter
+      final boundNames = _getParameterBoundNames(param);
+
+      for (final paramName in boundNames) {
+        // Check for duplicate parameter names
+        if (seenNames.contains(paramName)) {
+          throw ParseError(
+            'Identifier \'$paramName\' has already been declared',
+            _peek(),
+          );
+        }
+        seenNames.add(paramName);
+
+        // 'arguments' and 'eval' are not allowed in strict mode parameters
+        if (_isInStrictMode() &&
+            (paramName == 'arguments' || paramName == 'eval')) {
+          throw ParseError(
+            'The identifier \'$paramName\' cannot be used as a parameter in strict mode',
+            _peek(),
+          );
+        }
       }
     }
   }
@@ -4562,6 +4606,13 @@ class JSParser {
 
     _consume(TokenType.rightParen, 'Expected \')\' after parameters');
 
+    // Validate function parameters for duplicates and reserved names
+    _validateFunctionParameters(
+      params,
+      functionToken.line,
+      functionToken.column,
+    );
+
     // Set generator context and increment function depth for body parsing
     final oldGeneratorContext = _inGeneratorContext;
     final oldFunctionDepth = _functionDepth;
@@ -4705,6 +4756,13 @@ class JSParser {
     final params = _parseFunctionParameters();
 
     _consume(TokenType.rightParen, 'Expected \')\' after parameters');
+
+    // Validate function parameters for duplicates and reserved names
+    _validateFunctionParameters(
+      params,
+      functionToken.line,
+      functionToken.column,
+    );
 
     // Set generator context and increment function depth for body parsing
     final oldGeneratorContext = _inGeneratorContext;
