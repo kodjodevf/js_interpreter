@@ -4818,6 +4818,22 @@ class JSParser {
       functionToken.column,
     );
 
+    // Validate that body doesn't contain super() calls outside class context
+    if (!_inClassContext && _containsSuperCall(body)) {
+      throw ParseError(
+        'super() calls are not allowed outside of class constructors',
+        functionToken,
+      );
+    }
+
+    // Validate that body doesn't contain super.property access outside class context
+    if (!_inClassContext && _containsSuperProperty(body)) {
+      throw ParseError(
+        'super property access is not allowed outside of class methods',
+        functionToken,
+      );
+    }
+
     return FunctionDeclaration(
       id: id,
       params: params,
@@ -4909,6 +4925,22 @@ class JSParser {
       asyncToken.line,
       asyncToken.column,
     );
+
+    // Validate that body doesn't contain super() calls or super.property outside class context
+    if (!_inClassContext && _containsSuperCall(body)) {
+      throw ParseError(
+        'super() calls are not allowed outside of class constructors',
+        asyncToken,
+      );
+    }
+
+    // Validate that body doesn't contain super.property access outside class context
+    if (!_inClassContext && _containsSuperProperty(body)) {
+      throw ParseError(
+        'super property access is not allowed outside of class methods',
+        asyncToken,
+      );
+    }
 
     return AsyncFunctionDeclaration(
       id: id,
