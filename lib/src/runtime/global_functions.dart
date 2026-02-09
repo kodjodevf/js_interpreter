@@ -135,9 +135,19 @@ class GlobalFunctions {
           rethrow;
         } on ParseError catch (e) {
           // Convert parse errors to JavaScript SyntaxError exceptions
+          // Get the evaluator and use its throwJSSyntaxError method
+          final evaluator = JSEvaluator.currentInstance;
+          if (evaluator != null) {
+            evaluator.throwJSSyntaxError(e.message);
+          }
+          // Fallback if no evaluator (should not happen)
           throw JSSyntaxError(e.message);
         } catch (e) {
           // Generic error conversion
+          final evaluator = JSEvaluator.currentInstance;
+          if (evaluator != null) {
+            evaluator.throwJSSyntaxError('$e');
+          }
           throw JSSyntaxError('$e');
         }
       },

@@ -9192,12 +9192,34 @@ class JSEvaluator implements ASTVisitor<JSValue> {
               }
             } else if (e.type == ExceptionType.continue_) {
               if (e.label == null) {
-                // Continue - mettre a jour dans l'init env et continuer
+                // Continue - execute update while still in iteration environment
                 lastValue = e.completionValue ?? JSValueFactory.undefined();
-                _executionStack.pop(); // sortir de iteration
                 if (node.update != null) {
-                  node.update!.accept(this); // dans init env
+                  node.update!.accept(this); // Execute update in iteration env
                 }
+
+                // Copy back loop variables for next iteration
+                // Only for simple VariableDeclarations to avoid edge cases
+                if (node.init is VariableDeclaration) {
+                  final varDecl = node.init as VariableDeclaration;
+                  for (final decl in varDecl.declarations) {
+                    if (decl.id is IdentifierPattern) {
+                      try {
+                        final identifierPattern = decl.id as IdentifierPattern;
+                        final name = identifierPattern.name;
+                        final updatedValue = _currentEnvironment().get(name);
+                        if (updatedValue != null) {
+                          // Use set with a timeout mechanism or check existence first
+                          initEnv.set(name, updatedValue);
+                        }
+                      } catch (e) {
+                        // Ignore errors in copy-back (shouldn't happen in normal cases)
+                      }
+                    }
+                  }
+                }
+
+                _executionStack.pop(); // sortir de iteration
                 continue;
               } else {
                 rethrow;
