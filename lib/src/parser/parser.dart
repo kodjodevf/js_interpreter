@@ -801,8 +801,15 @@ class JSParser {
 
     if (_match([TokenType.keywordAsync])) {
       final asyncToken = _previous();
+
+      // Check for line terminator after async keyword
+      // If there's a line break, async becomes an identifier, not a keyword
+      final nextToken = _peek();
+      final hasLineTerminator = asyncToken.line < nextToken.line;
+
       // Check if it's followed by function (async function declaration)
-      if (_check(TokenType.keywordFunction)) {
+      // Only if there's NO line terminator
+      if (!hasLineTerminator && _check(TokenType.keywordFunction)) {
         if (!allowDeclaration) {
           throw ParseError(
             'Async function declaration cannot appear in a single-statement context',
@@ -818,7 +825,7 @@ class JSParser {
         }
         return _asyncFunctionDeclaration();
       } else {
-        // async followed by something else (expressions, arrow functions)
+        // async followed by something else (expressions, arrow functions, or line terminator)
         // are handled as expression statements
         // The async token is put back to be handled by _expressionStatement
         _current--;
@@ -3422,6 +3429,16 @@ class JSParser {
       );
     }
 
+    // 'async' can be an identifier when used in expression position
+    if (_match([TokenType.keywordAsync])) {
+      final token = _previous();
+      return IdentifierExpression(
+        name: token.lexeme,
+        line: token.line,
+        column: token.column,
+      );
+    }
+
     // Private identifiers
     if (_match([TokenType.privateIdentifier])) {
       final token = _previous();
@@ -4834,6 +4851,21 @@ class JSParser {
       );
     }
 
+    // Validate that parameter names don't conflict with lexically declared names in body
+    final paramNames = <String>{};
+    for (final param in params) {
+      paramNames.addAll(_getParameterBoundNames(param));
+    }
+    final bodyLexicalNames = _getLexicallyDeclaredNames(body);
+    for (final name in paramNames) {
+      if (bodyLexicalNames.contains(name)) {
+        throw ParseError(
+          'Identifier \'$name\' has already been declared',
+          functionToken,
+        );
+      }
+    }
+
     return FunctionDeclaration(
       id: id,
       params: params,
@@ -4940,6 +4972,21 @@ class JSParser {
         'super property access is not allowed outside of class methods',
         asyncToken,
       );
+    }
+
+    // Validate that parameter names don't conflict with lexically declared names in body
+    final paramNames = <String>{};
+    for (final param in params) {
+      paramNames.addAll(_getParameterBoundNames(param));
+    }
+    final bodyLexicalNames = _getLexicallyDeclaredNames(body);
+    for (final name in paramNames) {
+      if (bodyLexicalNames.contains(name)) {
+        throw ParseError(
+          'Identifier \'$name\' has already been declared',
+          asyncToken,
+        );
+      }
     }
 
     return AsyncFunctionDeclaration(
