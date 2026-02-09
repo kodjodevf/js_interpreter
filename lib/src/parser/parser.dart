@@ -109,6 +109,20 @@ class JSParser {
       // Check default values for await identifier references
       if (param.defaultValue != null) {
         _validateAwaitInExpression(param.defaultValue!, isAsync: true);
+        // Check for super() calls in parameter defaults
+        if (_containsSuperCall(param.defaultValue!)) {
+          throw ParseError(
+            'super() calls are not allowed in parameter default values',
+            _peek(),
+          );
+        }
+        // Check for super.property access in parameter defaults
+        if (_containsSuperProperty(param.defaultValue!)) {
+          throw ParseError(
+            'super property access is not allowed in parameter default values',
+            _peek(),
+          );
+        }
       }
 
       // Check destructuring patterns
@@ -146,6 +160,24 @@ class JSParser {
             (paramName == 'arguments' || paramName == 'eval')) {
           throw ParseError(
             'The identifier \'$paramName\' cannot be used as a parameter in strict mode',
+            _peek(),
+          );
+        }
+      }
+
+      // Check default values for super() and super.property
+      if (param.defaultValue != null) {
+        // Check for super() calls in parameter defaults
+        if (_containsSuperCall(param.defaultValue!)) {
+          throw ParseError(
+            'super() calls are not allowed in parameter default values',
+            _peek(),
+          );
+        }
+        // Check for super.property access in parameter defaults
+        if (_containsSuperProperty(param.defaultValue!)) {
+          throw ParseError(
+            'super property access is not allowed in parameter default values',
             _peek(),
           );
         }
