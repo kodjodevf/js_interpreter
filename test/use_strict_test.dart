@@ -91,20 +91,17 @@ void main() {
     final interpreter = JSInterpreter();
 
     final code = '''
-      try {
-        function test(a, a) {
-          "use strict";
-          return a;
-        }
-        test(1, 2);
-        'no error';
-      } catch(e) {
-        'duplicate params not allowed';
+      function test(a, a) {
+        "use strict";
+        return a;
       }
-    ''';
+      test(1, 2);''';
 
-    final result = interpreter.eval(code);
-    print('Duplicate params result: $result');
+    try {
+      interpreter.eval(code);
+    } catch (e) {
+      expect(e.toString(), contains('already been declared'));
+    }
   });
 
   test('use strict - octal literals should fail', () {
