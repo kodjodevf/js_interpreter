@@ -1668,6 +1668,7 @@ class JSParser {
 
       handler = CatchClause(
         param: param,
+        paramPattern: paramPattern,
         body: catchBody,
         line: catchToken.line,
         column: catchToken.column,

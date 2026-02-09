@@ -10318,9 +10318,19 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
     // Si il y a un parametre de catch, l'associer a la valeur de l'exception
     if (catchClause.param != null) {
+      // Simple identifier parameter
       final paramName = catchClause.param!.name;
       final exceptionValue = exception.toJSValue();
       catchEnv.define(paramName, exceptionValue, BindingType.let_);
+    } else if (catchClause.paramPattern != null) {
+      // Destructuring pattern parameter
+      final exceptionValue = exception.toJSValue();
+      // Perform BindingInitialization for the pattern
+      _bindingInitialization(
+        catchClause.paramPattern!,
+        exceptionValue,
+        catchEnv,
+      );
     }
 
     // Create nouveau contexte d'execution pour le catch block
@@ -16029,6 +16039,185 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
       default:
         throw JSError('Unknown pattern type: ${pattern.runtimeType}');
+    }
+  }
+
+  /// Binding Initialization for catch parameters (defines variables in given environment)
+  void _bindingInitialization(
+    Pattern pattern,
+    JSValue value,
+    Environment targetEnv, {
+    bool isNestedPattern = false,
+  }) {
+    switch (pattern) {
+      case IdentifierPattern identifierPattern:
+        final name = identifierPattern.name;
+        targetEnv.define(name, value, BindingType.let_);
+        break;
+
+      case AssignmentPattern assignmentPattern:
+        // Si la valeur est undefined, utiliser la default value
+        final actualValue = value.isUndefined
+            ? assignmentPattern.right.accept(this)
+            : value;
+        _bindingInitialization(
+          assignmentPattern.left,
+          actualValue,
+          targetEnv,
+          isNestedPattern: isNestedPattern,
+        );
+        break;
+
+      case ArrayPattern arrayPattern:
+        // Check if this is a nested array pattern with null/undefined
+        if (isNestedPattern && (value.isNull || value.isUndefined)) {
+          throw JSTypeError('Cannot destructure null or undefined');
+        }
+        _bindingInitializationArray(arrayPattern, value, targetEnv);
+        break;
+
+      case ObjectPattern objectPattern:
+        // Check if this is a nested object pattern with null/undefined
+        if (isNestedPattern && (value.isNull || value.isUndefined)) {
+          throw JSTypeError('Cannot destructure null or undefined');
+        }
+        _bindingInitializationObject(objectPattern, value, targetEnv);
+        break;
+
+      default:
+        throw JSError('Unknown pattern type: ${pattern.runtimeType}');
+    }
+  }
+
+  /// Binding initialization for array patterns
+  void _bindingInitializationArray(
+    ArrayPattern pattern,
+    JSValue value,
+    Environment targetEnv,
+  ) {
+    List<JSValue> values = [];
+
+    // Convert value to array
+    if (value is JSArray) {
+      values = value.elements;
+    } else if (value.isNull || value.isUndefined) {
+      // Empty values for null/undefined at top level
+      values = [];
+    } else if (value is JSObject) {
+      // Try to iterate - for now, just try length property
+      final lengthProp = value.getProperty('length');
+      if (lengthProp.type == JSValueType.number) {
+        final length = lengthProp.toNumber().toInt();
+        for (int i = 0; i < length; i++) {
+          values.add(value.getProperty(i.toString()));
+        }
+      }
+    }
+
+    // Initialize each element
+    int elementIndex = 0;
+    for (int i = 0; i < pattern.elements.length; i++) {
+      final element = pattern.elements[i];
+      if (element == null) {
+        // Hole - skip this element but advance the index
+        elementIndex++;
+        continue;
+      }
+
+      final elementValue = elementIndex < values.length
+          ? values[elementIndex]
+          : JSValueFactory.undefined();
+
+      // Mark nested patterns so they validate null/undefined
+      final isNested = element is ArrayPattern || element is ObjectPattern;
+      _bindingInitialization(
+        element,
+        elementValue,
+        targetEnv,
+        isNestedPattern: isNested,
+      );
+      elementIndex++;
+    }
+
+    // Handle rest element
+    if (pattern.restElement != null) {
+      final restValues = elementIndex < values.length
+          ? values.sublist(elementIndex)
+          : <JSValue>[];
+      final restArray = JSArray(restValues);
+      _bindingInitialization(pattern.restElement!, restArray, targetEnv);
+    }
+  }
+
+  /// Binding initialization for object patterns
+  void _bindingInitializationObject(
+    ObjectPattern pattern,
+    JSValue value,
+    Environment targetEnv,
+  ) {
+    if (value.isNull || value.isUndefined) {
+      throw JSTypeError('Cannot destructure null or undefined');
+    }
+
+    // Convert to object if needed
+    JSObject obj;
+    if (value is JSObject) {
+      obj = value;
+    } else {
+      throw JSTypeError('Cannot destructure non-object');
+    }
+
+    // Track which keys were extracted
+    final usedKeys = <String>{};
+
+    // Initialize each property
+    for (final prop in pattern.properties) {
+      if (prop is ObjectPatternProperty) {
+        // Get the value from the object using the property key
+        usedKeys.add(prop.key);
+        JSValue propValue = obj.getProperty(prop.key);
+
+        // Apply default value if provided and value is undefined
+        if (propValue.isUndefined && prop.defaultValue != null) {
+          propValue = prop.defaultValue!.accept(this);
+        }
+
+        final actualValue = propValue ?? JSValueFactory.undefined();
+
+        // Check if value is a nested pattern
+        final isNested =
+            prop.value is ArrayPattern || prop.value is ObjectPattern;
+        // Assign to the target pattern/identifier
+        _bindingInitialization(
+          prop.value,
+          actualValue,
+          targetEnv,
+          isNestedPattern: isNested,
+        );
+      }
+    }
+
+    // Handle rest element
+    if (pattern.restElement != null) {
+      final restObj = JSObject();
+
+      // Add all properties that weren't extracted
+      // Access internal properties directly
+      try {
+        final allKeys = <String>{
+          ...(obj as dynamic)._properties.keys,
+          ...(obj as dynamic)._accessorProperties.keys,
+        };
+        for (final key in allKeys) {
+          if (!usedKeys.contains(key)) {
+            restObj.setProperty(key, obj.getProperty(key));
+          }
+        }
+      } catch (e) {
+        // If we can't access internal properties, just return empty object
+      }
+
+      _bindingInitialization(pattern.restElement!, restObj, targetEnv);
     }
   }
 

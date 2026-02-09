@@ -1370,10 +1370,12 @@ class SwitchCase extends ASTNode {
 class CatchClause extends ASTNode {
   final IdentifierExpression?
   param; // can be null for catch() without parameter
+  final Pattern? paramPattern; // for destructuring patterns
   final BlockStatement body;
 
   const CatchClause({
     this.param,
+    this.paramPattern,
     required this.body,
     required super.line,
     required super.column,
@@ -1383,7 +1385,11 @@ class CatchClause extends ASTNode {
   T accept<T>(ASTVisitor<T> visitor) => visitor.visitCatchClause(this);
 
   @override
-  String toString() => param != null ? 'Catch($param, $body)' : 'Catch($body)';
+  String toString() {
+    if (param != null) return 'Catch($param, $body)';
+    if (paramPattern != null) return 'Catch($paramPattern, $body)';
+    return 'Catch($body)';
+  }
 }
 
 // ===== DESTRUCTURING PATTERNS =====
