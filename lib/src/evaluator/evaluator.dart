@@ -9199,21 +9199,18 @@ class JSEvaluator implements ASTVisitor<JSValue> {
                 }
 
                 // Copy back loop variables for next iteration
-                // Only for simple VariableDeclarations to avoid edge cases
                 if (node.init is VariableDeclaration) {
                   final varDecl = node.init as VariableDeclaration;
                   for (final decl in varDecl.declarations) {
                     if (decl.id is IdentifierPattern) {
+                      final identifierPattern = decl.id as IdentifierPattern;
+                      final name = identifierPattern.name;
+                      final updatedValue = _currentEnvironment().get(name);
+                      // Update the binding in initEnv
                       try {
-                        final identifierPattern = decl.id as IdentifierPattern;
-                        final name = identifierPattern.name;
-                        final updatedValue = _currentEnvironment().get(name);
-                        if (updatedValue != null) {
-                          // Use set with a timeout mechanism or check existence first
-                          initEnv.set(name, updatedValue);
-                        }
-                      } catch (e) {
-                        // Ignore errors in copy-back (shouldn't happen in normal cases)
+                        initEnv.setLocal(name, updatedValue);
+                      } catch (err) {
+                        // Ignore errors - variable might not exist
                       }
                     }
                   }
@@ -9226,6 +9223,24 @@ class JSEvaluator implements ASTVisitor<JSValue> {
               }
             } else {
               rethrow;
+            }
+          }
+
+          // Normal completion - copy back loop variables before update
+          // This ensures variables modified in the body are available for update and next iteration
+          if (node.init is VariableDeclaration) {
+            final varDecl = node.init as VariableDeclaration;
+            for (final decl in varDecl.declarations) {
+              if (decl.id is IdentifierPattern) {
+                final identifierPattern = decl.id as IdentifierPattern;
+                final name = identifierPattern.name;
+                try {
+                  final updatedValue = _currentEnvironment().get(name);
+                  initEnv.setLocal(name, updatedValue);
+                } catch (e) {
+                  // Ignore errors - variable might not exist
+                }
+              }
             }
           }
 
