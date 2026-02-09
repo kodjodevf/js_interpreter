@@ -37,6 +37,18 @@ class AsyncSuspensionException implements Exception {
   String toString() => message;
 }
 
+/// Tail Call Optimization (TCO) thunk.
+/// Thrown from visitReturnStatement when a call is in tail position.
+/// The trampoline loop in callFunction catches this and re-invokes
+/// the target function without growing the Dart call stack.
+class _TailCallThunk implements Exception {
+  final JSValue function;
+  final List<JSValue> args;
+  final JSValue? thisBinding;
+
+  _TailCallThunk(this.function, this.args, [this.thisBinding]);
+}
+
 /// Exception thrown when a generator is suspended by yield
 class GeneratorYieldException implements Exception {
   final JSValue value;
@@ -809,6 +821,10 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
   /// Function call stack for tracking caller-callee relationships (for Function.caller)
   final List<JSFunction?> _functionCallStack = [];
+
+  /// TCO: When true, visitCallExpression in tail position will throw _TailCallThunk
+  /// instead of recursing. Set to true by visitReturnStatement before evaluating its argument.
+  bool _inTailPosition = false;
 
   /// Prototype manager - stores all prototypes for this interpreter instance
   final PrototypeManager prototypeManager = PrototypeManager();
@@ -9829,8 +9845,61 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
   @override
   JSValue visitReturnStatement(ReturnStatement node) {
-    final value = node.argument?.accept(this) ?? JSValueFactory.undefined();
+    if (node.argument == null) {
+      throw FlowControlException.return_(JSValueFactory.undefined());
+    }
+
+    // TCO: Check if the return argument is a direct call expression (tail position)
+    // Only enable for strict mode (ES2015 spec: TCO is only in strict mode)
+    final arg = node.argument!;
+    if (_currentContext().strictMode && _isTailCallCandidate(arg)) {
+      // Set flag so visitCallExpression knows to throw _TailCallThunk
+      final prevTailPosition = _inTailPosition;
+      _inTailPosition = true;
+      try {
+        // This will throw _TailCallThunk from visitCallExpression
+        // if the argument is a CallExpression
+        final value = arg.accept(this);
+        // If we get here, the call wasn't eligible (native function, etc.)
+        throw FlowControlException.return_(value);
+      } on _TailCallThunk {
+        rethrow; // Let the trampoline in _callJSFunction handle it
+      } on FlowControlException {
+        rethrow;
+      } finally {
+        _inTailPosition = prevTailPosition;
+      }
+    }
+
+    final value = arg.accept(this);
     throw FlowControlException.return_(value);
+  }
+
+  /// Check if an expression is a candidate for tail call optimization.
+  /// Tail positions include:
+  /// - Direct call expressions: return f(x)
+  /// - Conditional expressions: return cond ? f(x) : g(x)
+  /// - Logical AND/OR: return x && f(x), return x || f(x)
+  /// - Nullish coalescing: return x ?? f(x)
+  /// - Comma/sequence: return (a, b, f(x))
+  bool _isTailCallCandidate(Expression expr) {
+    if (expr is CallExpression) return true;
+    if (expr is ConditionalExpression) {
+      return _isTailCallCandidate(expr.consequent) ||
+          _isTailCallCandidate(expr.alternate);
+    }
+    if (expr is SequenceExpression && expr.expressions.isNotEmpty) {
+      return _isTailCallCandidate(expr.expressions.last);
+    }
+    if (expr is BinaryExpression) {
+      if (expr.operator == '&&' || expr.operator == '||') {
+        return _isTailCallCandidate(expr.right);
+      }
+    }
+    if (expr is NullishCoalescingExpression) {
+      return _isTailCallCandidate(expr.right);
+    }
+    return false;
   }
 
   @override
@@ -12430,17 +12499,20 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       }
     }
 
-    // Verifier si c'est une arrow function
-    if (calleeValue is JSArrowFunction) {
-      return _callArrowFunction(calleeValue, argumentValues);
+    // TCO: If we're in tail position, throw a thunk instead of recursing.
+    // This lets the trampoline in _callJSFunction handle the call iteratively.
+    // Only apply to JS functions (not native functions which don't benefit from TCO).
+    if (_inTailPosition) {
+      _inTailPosition = false; // Consume the flag
+      if (calleeValue is JSFunction ||
+          calleeValue is JSArrowFunction ||
+          calleeValue is JSBoundFunction) {
+        throw _TailCallThunk(calleeValue, argumentValues, thisBinding);
+      }
     }
 
-    // Verifier si c'est une bound function
-    if (calleeValue is JSBoundFunction) {
-      return _callBoundFunction(calleeValue, argumentValues);
-    }
-
-    // Utiliser notre methode centralisee pour tous les autres types de fonctions
+    // Route all JS function calls through callFunction which has the TCO trampoline.
+    // This ensures _TailCallThunk thrown from nested tail calls is always caught.
     return _callFunctionWithErrorConversion(
       calleeValue,
       argumentValues,
@@ -13888,6 +13960,8 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
           final closureEnv = _currentEnvironment();
 
+          final currentStrictMode2 = _currentContext().strictMode;
+
           if (funcExpr.id != null) {
             final funcClosureEnv = Environment(parent: closureEnv);
             final function = JSFunction(
@@ -13895,6 +13969,7 @@ class JSEvaluator implements ASTVisitor<JSValue> {
               funcClosureEnv,
               sourceText: sourceText,
               moduleUrl: _currentModuleUrl,
+              strictMode: currentStrictMode2,
             );
             funcClosureEnv.define(
               funcExpr.id!.name,
@@ -13914,6 +13989,7 @@ class JSEvaluator implements ASTVisitor<JSValue> {
               closureEnv,
               sourceText: sourceText,
               moduleUrl: _currentModuleUrl,
+              strictMode: currentStrictMode2,
             );
             // ES6: Use setPropertyWithSymbol if this is a symbol key
             // ES spec: Object literals use CreateDataPropertyOrThrow
@@ -15218,7 +15294,33 @@ class JSEvaluator implements ASTVisitor<JSValue> {
   }
 
   /// Methode utilitaire pour appeler une fonction JavaScript depuis des methodes natives
+  /// Includes a trampoline loop for Tail Call Optimization (TCO).
   JSValue callFunction(
+    JSValue function,
+    List<JSValue> args, [
+    JSValue? thisBinding,
+  ]) {
+    // TCO Trampoline: loop to handle tail calls iteratively
+    JSValue currentFunction = function;
+    List<JSValue> currentArgs = args;
+    JSValue? currentThis = thisBinding;
+
+    while (true) {
+      try {
+        return _callFunctionDispatch(currentFunction, currentArgs, currentThis);
+      } on _TailCallThunk catch (thunk) {
+        // Instead of recursing, update the function/args and loop
+        currentFunction = thunk.function;
+        currentArgs = thunk.args;
+        currentThis = thunk.thisBinding;
+        // Continue the loop — this is the trampoline
+      }
+    }
+  }
+
+  /// Internal dispatch for callFunction. Separated out so the trampoline
+  /// can catch _TailCallThunk thrown from within function execution.
+  JSValue _callFunctionDispatch(
     JSValue function,
     List<JSValue> args, [
     JSValue? thisBinding,
