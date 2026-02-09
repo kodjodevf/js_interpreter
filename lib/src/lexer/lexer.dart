@@ -122,11 +122,20 @@ class JSLexer {
     switch (char) {
       // Whitespace
       case ' ':
-      case '\r':
       case '\t':
       case '\v': // Vertical tab (U+000B)
       case '\f': // Form feed (U+000C)
         // Ignore whitespace
+        break;
+
+      case '\r':
+        // CR (U+000D) is a line terminator per ECMAScript spec.
+        // If followed by LF (U+000A), consume it as a single CRLF line terminator.
+        if (!_isAtEnd() && source[_current] == '\n') {
+          _current++;
+        }
+        _line++;
+        _column = 1;
         break;
 
       case '\n':
@@ -562,6 +571,15 @@ class JSLexer {
       if (_peek() == '\n') {
         _line++;
         _column = 1;
+      } else if (_peek() == '\r') {
+        // CR is a line terminator; consume CRLF as single terminator
+        _advance();
+        if (!_isAtEnd() && _peek() == '\n') {
+          _advance();
+        }
+        _line++;
+        _column = 1;
+        continue;
       }
 
       if (_peek() == '\\') {
@@ -742,6 +760,13 @@ class JSLexer {
         if (char == '\n') {
           _line++;
           _column = 0; // Will be incremented to 1 by _advance()
+        } else if (char == '\r') {
+          // CR is a line terminator; consume CRLF as single terminator
+          if (!_isAtEnd() && _peek() == '\n') {
+            buffer.write(_advance());
+          }
+          _line++;
+          _column = 0;
         }
         continue;
       }
@@ -764,6 +789,13 @@ class JSLexer {
 
       // Handle new lines
       if (char == '\n') {
+        _line++;
+        _column = 1;
+      } else if (char == '\r') {
+        // CR is a line terminator; consume CRLF as single terminator
+        if (!_isAtEnd() && _peek() == '\n') {
+          buffer.write(_advance());
+        }
         _line++;
         _column = 1;
       }
@@ -866,6 +898,13 @@ class JSLexer {
 
       // Handle new lines
       if (char == '\n') {
+        _line++;
+        _column = 1;
+      } else if (char == '\r') {
+        // CR is a line terminator; consume CRLF as single terminator
+        if (!_isAtEnd() && _peek() == '\n') {
+          buffer.write(_advance());
+        }
         _line++;
         _column = 1;
       }
@@ -1510,6 +1549,15 @@ class JSLexer {
       if (_peek() == '\n') {
         _line++;
         _column = 1;
+      } else if (_peek() == '\r') {
+        // CR is a line terminator; consume CRLF as single terminator
+        _advance();
+        if (!_isAtEnd() && _peek() == '\n') {
+          _advance();
+        }
+        _line++;
+        _column = 1;
+        continue; // Already advanced past the CR (and optional LF)
       }
       _advance();
     }
@@ -1692,6 +1740,8 @@ class JSLexer {
     if (codePoint >= 0x007F && codePoint <= 0x009F) {
       return false; // DEL and C1 controls
     }
+    // Line/Paragraph separators are line terminators, not identifiers
+    if (codePoint == 0x2028 || codePoint == 0x2029) return false;
     if (codePoint >= 0xFDD0 && codePoint <= 0xFDEF) {
       return false; // Non-characters
     }
