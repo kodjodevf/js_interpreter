@@ -16172,29 +16172,27 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
     // Initialize each property
     for (final prop in pattern.properties) {
-      if (prop is ObjectPatternProperty) {
-        // Get the value from the object using the property key
-        usedKeys.add(prop.key);
-        JSValue propValue = obj.getProperty(prop.key);
+      // Get the value from the object using the property key
+      usedKeys.add(prop.key);
+      JSValue propValue = obj.getProperty(prop.key);
 
-        // Apply default value if provided and value is undefined
-        if (propValue.isUndefined && prop.defaultValue != null) {
-          propValue = prop.defaultValue!.accept(this);
-        }
-
-        final actualValue = propValue ?? JSValueFactory.undefined();
-
-        // Check if value is a nested pattern
-        final isNested =
-            prop.value is ArrayPattern || prop.value is ObjectPattern;
-        // Assign to the target pattern/identifier
-        _bindingInitialization(
-          prop.value,
-          actualValue,
-          targetEnv,
-          isNestedPattern: isNested,
-        );
+      // Apply default value if provided and value is undefined
+      if (propValue.isUndefined && prop.defaultValue != null) {
+        propValue = prop.defaultValue!.accept(this);
       }
+
+      final actualValue = propValue;
+
+      // Check if value is a nested pattern
+      final isNested =
+          prop.value is ArrayPattern || prop.value is ObjectPattern;
+      // Assign to the target pattern/identifier
+      _bindingInitialization(
+        prop.value,
+        actualValue,
+        targetEnv,
+        isNestedPattern: isNested,
+      );
     }
 
     // Handle rest element
