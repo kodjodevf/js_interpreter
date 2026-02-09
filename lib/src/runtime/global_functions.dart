@@ -133,8 +133,12 @@ class GlobalFunctions {
         } on JSException {
           // Re-throw JavaScript exceptions (including SyntaxErrors from var redeclaration)
           rethrow;
+        } on ParseError catch (e) {
+          // Convert parse errors to JavaScript SyntaxError exceptions
+          throw JSSyntaxError(e.message);
         } catch (e) {
-          throw JSError('SyntaxError: $e');
+          // Generic error conversion
+          throw JSSyntaxError('$e');
         }
       },
     );

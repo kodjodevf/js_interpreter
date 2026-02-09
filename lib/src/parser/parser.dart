@@ -1456,6 +1456,16 @@ class JSParser {
         throw ParseError('Label "$label" is not defined', previous);
       }
       final labelInfo = _labelStack[label]!;
+
+      // Break can only target IterationStatement or SwitchStatement
+      // ES5 strict requirement (test262 validates this)
+      if (!labelInfo.isLoopOrSwitch) {
+        throw ParseError(
+          'Illegal break statement: label must target a loop or switch statement',
+          previous,
+        );
+      }
+
       // Break cannot escape a function boundary
       if (labelInfo.functionDepth < _functionDepth) {
         throw ParseError(
@@ -1463,9 +1473,6 @@ class JSParser {
           previous,
         );
       }
-      // Note: We allow breaking any labeled statement (ES6+ style)
-      // ES5 would restrict to IterationStatement/SwitchStatement only,
-      // but test262 contains ES6+ tests that expect break to work on any labeled statement
     }
 
     // Support for ASI (Automatic Semicolon Insertion)
