@@ -57,11 +57,22 @@ class DartValueConverter {
   }
 
   /// Verifies if an object is a JavaScript error object
+  /// Only returns true for actual Error instances (prototype chain contains Error)
   static bool _isErrorObject(JSObject obj) {
     try {
-      final message = obj.getProperty('message');
+      // Check if the 'name' property ends with 'Error' (Error, TypeError, RangeError, etc.)
       final name = obj.getProperty('name');
-      return !message.isUndefined || !name.isUndefined;
+      if (!name.isUndefined && name.isString) {
+        final nameStr = name.toString();
+        if (nameStr.endsWith('Error')) {
+          // Also verify it has a 'message' property (all Error instances do)
+          final message = obj.getProperty('message');
+          if (!message.isUndefined) {
+            return true;
+          }
+        }
+      }
+      return false;
     } catch (e) {
       return false;
     }
@@ -118,74 +129,56 @@ class DartValueConverter {
     return array.elements.map((element) => toDartValue(element)).toList();
   }
 
-  /// Converts a JSObject to a Map (iterates over all properties)
-  static Map<String, dynamic> _objectToDartMap(JSObject obj) {
+  /// Converts a JSObject to a Map (iterates over all actual properties)
+  static Map<String, dynamic> _objectToDartMap(JSObject obj, {int depth = 0}) {
+    // Guard against overly deep recursion (circular references)
+    if (depth > 10) {
+      return {'__toString__': obj.toString()};
+    }
+
     final map = <String, dynamic>{};
 
     try {
-      // Try to get all properties of the object
-      // Les objets JSObject ont une certaine structure interne
+      // Get all own enumerable property names from the object
+      final keys = obj.getPropertyNames(enumerableOnly: true);
 
-      // Method 1: Search for known properties (for usual objects)
-      final commonKeys = [
-        'name',
-        'value',
-        'message',
-        'code',
-        'status',
-        'data',
-        'result',
-        'error',
-        'id',
-        'type',
-        'text',
-        'content',
-        'html',
-        'url',
-        'src',
-        'href',
-        'constructor',
-        'prototype',
-        'length',
-      ];
-
-      for (final key in commonKeys) {
+      for (final key in keys) {
         try {
           final value = obj.getProperty(key);
-          if (!value.isUndefined && !value.isObject) {
-            // Avoid circular references (nested objects)
-            map[key] = toDartValue(value);
+          if (value.isUndefined) continue;
+
+          // Skip functions (methods like toString, valueOf, etc.)
+          if (value.isFunction) continue;
+
+          // Convert value recursively
+          if (value is JSNull) {
+            map[key] = null;
+          } else if (value is JSBoolean) {
+            map[key] = value.toBoolean();
+          } else if (value is JSNumber) {
+            final num = value.toNumber();
+            map[key] = (num == num.toInt()) ? num.toInt() : num;
+          } else if (value is JSString) {
+            map[key] = value.toString();
+          } else if (value is JSArray) {
+            map[key] = _arrayToDartList(value);
+          } else if (value is JSObject) {
+            // Recurse into nested objects
+            if (_isErrorObject(value)) {
+              map[key] = _errorObjectToDartMap(value);
+            } else {
+              map[key] = _objectToDartMap(value, depth: depth + 1);
+            }
+          } else if (value is JSBigInt) {
+            map[key] = value.value.toInt();
           }
         } catch (e) {
           // Ignore inaccessible properties
         }
       }
-
-      // Add the numbered properties (for array-like objects)
-      for (int i = 0; i < 100; i++) {
-        try {
-          final value = obj.getProperty(i.toString());
-          if (!value.isUndefined && !value.isObject) {
-            map[i.toString()] = toDartValue(value);
-          }
-        } catch (e) {
-          break;
-        }
-      }
-
-      // Add a string representation of the object
-      final objectString = obj.toString();
-      if (objectString.isNotEmpty && objectString != '[object Object]') {
-        map['__toString__'] = objectString;
-      }
     } catch (e) {
       // Fallback: return a map with the string representation
       map['__error__'] = 'Failed to convert object';
-      map['__toString__'] = obj.toString();
-    }
-
-    // If the map is empty, add at least one string representation
-    if (map.isEmpty) {
       map['__toString__'] = obj.toString();
     }
 
