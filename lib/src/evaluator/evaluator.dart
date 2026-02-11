@@ -8093,6 +8093,9 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
       _executionStack.push(functionContext);
       try {
+        // Hoist var/function declarations in the async function body
+        _hoistDeclarations(continuation.node.body.body);
+
         // Executer le corps de la fonction async
         final result = continuation.node.body.accept(this);
 
@@ -8348,12 +8351,11 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
       _executionStack.push(functionContext);
       try {
-        // Executer le corps de la fonction async
-        final result = node.body.accept(this);
+        // Hoist var/function declarations in the async function body
+        _hoistDeclarations(node.body.body);
 
-        // La fonction s'est terminee normalement
-        task.complete(result);
-        resolve.call([result]);
+        // Executer le corps de la fonction async
+        node.body.accept(this);
       } catch (e) {
         if (e is FlowControlException && e.type == ExceptionType.return_) {
           // Return statement - la fonction se termine avec la valeur de retour

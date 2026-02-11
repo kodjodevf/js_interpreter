@@ -2,6 +2,7 @@
 /// Management of scopes, execution contexts and variable binding
 library;
 
+import 'js_symbol.dart';
 import 'js_value.dart';
 
 /// Types of variable binding according to ECMAScript
@@ -376,10 +377,26 @@ class WithEnvironment extends Environment {
   WithEnvironment({required Environment parent, required this.withObject})
     : super(parent: parent, debugName: 'With');
 
+  /// Check if a property name is blocked by Symbol.unscopables on the withObject.
+  /// Per ES6 8.1.1.2.1 HasBinding: if the binding object has @@unscopables
+  /// set to an object whose property [name] is truthy, the name is unscopable.
+  bool _isUnscopable(String name) {
+    final unscopablesValue = withObject.getPropertyBySymbol(
+      JSSymbol.unscopables,
+    );
+    if (unscopablesValue is JSObject) {
+      final blocked = unscopablesValue.getProperty(name);
+      if (blocked.toBoolean()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   @override
   JSValue get(String name) {
-    // First try the with object's properties
-    if (withObject.hasProperty(name)) {
+    // First try the with object's properties (unless blocked by @@unscopables)
+    if (withObject.hasProperty(name) && !_isUnscopable(name)) {
       return withObject.getProperty(name);
     }
 
@@ -389,8 +406,8 @@ class WithEnvironment extends Environment {
 
   @override
   void set(String name, JSValue value, {bool strictMode = false}) {
-    // First try the with object's properties
-    if (withObject.hasProperty(name)) {
+    // First try the with object's properties (unless blocked by @@unscopables)
+    if (withObject.hasProperty(name) && !_isUnscopable(name)) {
       withObject.setProperty(name, value);
       return;
     }
@@ -401,14 +418,15 @@ class WithEnvironment extends Environment {
 
   @override
   bool has(String name) {
-    // Check both with object and parent environment
-    return withObject.hasProperty(name) || super.has(name);
+    // Check both with object (unless blocked by @@unscopables) and parent environment
+    return (withObject.hasProperty(name) && !_isUnscopable(name)) ||
+        super.has(name);
   }
 
   @override
   bool delete(String name) {
-    // First try to delete from with object
-    if (withObject.hasProperty(name)) {
+    // First try to delete from with object (unless blocked by @@unscopables)
+    if (withObject.hasProperty(name) && !_isUnscopable(name)) {
       return withObject.deleteProperty(name);
     }
 
