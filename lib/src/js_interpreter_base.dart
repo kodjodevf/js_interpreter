@@ -58,7 +58,10 @@ class JSInterpreter {
   JSValue eval(String code) {
     try {
       final program = JSParser.parseString(code);
-      return _evaluator.evaluate(program);
+      final result = _evaluator.evaluate(program);
+      // Process any pending microtasks (e.g. Promise callbacks)
+      _evaluator.runPendingAsyncTasks();
+      return result;
     } catch (e) {
       if (e is JSError) rethrow;
 
@@ -112,6 +115,9 @@ class JSInterpreter {
           },
         ),
       ], result);
+
+      // Process microtasks to execute the .then() callback we just registered
+      _evaluator.runPendingAsyncTasks();
 
       return completer.future;
     } else {

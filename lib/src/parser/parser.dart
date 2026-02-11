@@ -3454,7 +3454,11 @@ class JSParser {
     // Function expressions
     if (_match([TokenType.keywordAsync])) {
       final asyncToken = _previous();
-      if (_match([TokenType.keywordFunction])) {
+      final nextToken = _peek();
+      // Check for line terminator between async and next token
+      final hasLineTerminatorAfterAsync = asyncToken.line != nextToken.line;
+
+      if (!hasLineTerminatorAfterAsync && _match([TokenType.keywordFunction])) {
         // Validate that 'async' doesn't contain Unicode escapes (only when used as async function keyword)
         if (asyncToken.hasUnicodeEscape) {
           throw ParseError(
@@ -3463,21 +3467,17 @@ class JSParser {
           );
         }
         return _asyncFunctionExpression();
+      } else if (hasLineTerminatorAfterAsync) {
+        // There's a line terminator after async - treat async as an identifier
+        return IdentifierExpression(
+          name: 'async',
+          line: asyncToken.line,
+          column: asyncToken.column,
+        );
       } else {
         // Async arrow function: async (params) => body ou async param => body
-        // But per spec: async [no LineTerminator here] AsyncArrowBindingIdentifier
-        // If there's a line terminator after async, treat async as identifier
-        final nextToken = _peek();
-
-        // Check for line terminator between async and next token
-        if (asyncToken.line != nextToken.line) {
-          // There's a line terminator - treat async as an identifier (not validating escapes)
-          return IdentifierExpression(
-            name: 'async',
-            line: asyncToken.line,
-            column: asyncToken.column,
-          );
-        }
+        // Per spec: async [no LineTerminator here] AsyncArrowBindingIdentifier
+        // Line terminator case is already handled above
 
         // If 'async' has Unicode escapes and is followed by 'of' or 'in', treat as identifier
         // (for-of/for-in loops allow escaped async as identifier: for (\u0061sync of [...]))

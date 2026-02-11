@@ -637,10 +637,35 @@ class AsyncScheduler {
   final List<AsyncTask> _suspendedTasks = [];
   final Map<JSPromise, List<AsyncTask>> _promiseWaiters = {};
 
+  // Queue for Promise callbacks (microtasks)
+  final List<void Function()> _microtaskQueue = [];
+
   /// Adds a task to scheduler
   void addTask(AsyncTask task) {
     _pendingTasks.add(task);
   }
+
+  /// Enqueue a microtask (Promise callback) to be executed
+  void enqueueMicrotask(void Function() callback) {
+    _microtaskQueue.add(callback);
+  }
+
+  /// Process all enqueued microtasks
+  void processMicrotasks() {
+    // Process all microtasks that were queued
+    while (_microtaskQueue.isNotEmpty) {
+      final callback = _microtaskQueue.removeAt(0);
+      try {
+        callback();
+      } catch (e) {
+        // Log but don't crash on microtask errors
+      }
+    }
+  }
+
+  /// Returns true if there are pending microtasks or pending tasks to process
+  bool get hasPendingWork =>
+      _microtaskQueue.isNotEmpty || _pendingTasks.isNotEmpty;
 
   /// Suspend a task waiting for a Promise
   void suspendTask(AsyncTask task, JSPromise promise) {
@@ -837,9 +862,21 @@ class JSEvaluator implements ASTVisitor<JSValue> {
     _asyncScheduler.notifyPromiseResolved(promise, this);
   }
 
+  /// Access to the async scheduler for enqueueing microtasks
+  AsyncScheduler get asyncScheduler => _asyncScheduler;
+
   /// Manually executes pending asynchronous tasks (for testing)
   void runPendingAsyncTasks() {
-    _asyncScheduler.runPendingTasks(this);
+    // Process microtasks and async tasks in a loop until everything is drained.
+    // Running async tasks can enqueue new microtasks (e.g. Promise resolution),
+    // and processing microtasks can schedule new async tasks (e.g. notifyPromiseResolved).
+    int iterations = 0;
+    const maxIterations = 100; // Safety limit to prevent infinite loops
+    do {
+      _asyncScheduler.processMicrotasks();
+      _asyncScheduler.runPendingTasks(this);
+      iterations++;
+    } while (_asyncScheduler.hasPendingWork && iterations < maxIterations);
   }
 
   /// Schedules an asynchronous operation and returns a JavaScript Promise
@@ -857,10 +894,14 @@ class JSEvaluator implements ASTVisitor<JSValue> {
               .then((result) {
                 // Call resolve with the result
                 resolve.call([result]);
+                // Process microtasks enqueued by the resolution
+                runPendingAsyncTasks();
               })
               .catchError((error) {
                 // Call reject with the error
                 reject.call([JSValueFactory.string(error.toString())]);
+                // Process microtasks enqueued by the rejection
+                runPendingAsyncTasks();
               });
         }
         return JSValueFactory.undefined();
@@ -6002,6 +6043,14 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         continue;
       }
       lastValue = stmt.accept(this);
+
+      // Drain microtask queue after each top-level statement.
+      // This emulates the microtask checkpoint that occurs between tasks
+      // in the JS event loop, ensuring Promise callbacks (which are
+      // microtasks per spec) execute before the next statement runs.
+      if (_asyncScheduler.hasPendingWork) {
+        _asyncScheduler.processMicrotasks();
+      }
     }
 
     return lastValue;
@@ -6473,9 +6522,13 @@ class JSEvaluator implements ASTVisitor<JSValue> {
           // Utiliser module.id (resolu) au lieu de moduleId (original)
           final exports = _getModuleExports(module.id);
           promise.resolve(exports);
+          // Process microtasks enqueued by the resolution (e.g. .then() callbacks)
+          runPendingAsyncTasks();
         })
         .catchError((error) {
           promise.reject(JSValueFactory.string(error.toString()));
+          // Process microtasks enqueued by the rejection
+          runPendingAsyncTasks();
         });
 
     return promise;
@@ -8012,10 +8065,22 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       }
 
       // Create contexte d'execution pour la fonction async
+      // Apply sloppy-mode this binding promotion (like regular functions)
+      final JSValue effectiveThis;
+      final rawThis = continuation.thisBinding;
+      if (rawThis == null || rawThis.isUndefined || rawThis.isNull) {
+        // Check if the function body has 'use strict'
+        final isStrict = _detectStrictMode(continuation.node.body.body);
+        effectiveThis = isStrict
+            ? JSValueFactory.undefined()
+            : _globalThisBinding;
+      } else {
+        effectiveThis = rawThis;
+      }
       final functionContext = ExecutionContext(
         lexicalEnvironment: functionEnv,
         variableEnvironment: functionEnv,
-        thisBinding: continuation.thisBinding ?? JSValueFactory.undefined(),
+        thisBinding: effectiveThis,
         function: null,
         arguments: continuation.args,
         debugName: 'AsyncFunction ${continuation.node.id.name}',

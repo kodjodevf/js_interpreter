@@ -473,6 +473,9 @@ class GlobalFunctions {
                         final jsValue = _dartToJSValue(result);
                         resolve.call([jsValue]);
                       }
+                      // Process microtasks enqueued by the resolution
+                      final evaluator = JSEvaluator.currentInstance;
+                      evaluator?.runPendingAsyncTasks();
                     })
                     .catchError((error) {
                       // Reject the promise with the error message
@@ -480,6 +483,9 @@ class GlobalFunctions {
                           ? error.message
                           : error.toString();
                       reject.call([JSValueFactory.string(errorMessage)]);
+                      // Process microtasks enqueued by the rejection
+                      final evaluator = JSEvaluator.currentInstance;
+                      evaluator?.runPendingAsyncTasks();
                     });
               }
               return JSValueFactory.undefined();
@@ -522,6 +528,9 @@ class GlobalFunctions {
           try {
             // Call the callback function with additional arguments
             evaluator.callFunction(callback, additionalArgs);
+            // Process any microtasks enqueued by the callback
+            // (e.g. Promise resolve/reject inside setTimeout)
+            evaluator.runPendingAsyncTasks();
           } catch (e) {
             // Log error but don't crash
             print('setTimeout callback error: $e');

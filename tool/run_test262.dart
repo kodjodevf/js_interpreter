@@ -475,11 +475,16 @@ class Test262Runner {
         }
 
         if (metadata.flags.contains('async')) {
+          // Process all pending microtasks (Promise callbacks) first
+          interpreter.runPendingAsyncTasks();
+
           // Simple async wait
           int timeout = 0;
           while (!asyncCompleted && timeout < 2000) {
             await Future.delayed(Duration(milliseconds: 10));
             timeout += 10;
+            // Continue processing microtasks in each iteration
+            interpreter.runPendingAsyncTasks();
           }
           if (!asyncCompleted) {
             throw Exception('\$DONE() not called');
@@ -543,7 +548,10 @@ class Test262Runner {
         functionName: 'print',
         nativeImpl: (args) {
           final msg = args.isNotEmpty ? args[0].toString() : '';
-          interpreter.evalToDart('print("$msg")'); // Trigger onMessage
+          // Directly trigger the onMessage('print') callback via MessageSystem
+          MessageSystem(
+            interpreter.getInterpreterInstanceId(),
+          ).sendMessage('print', msg);
           return JSValueFactory.undefined();
         },
       ),

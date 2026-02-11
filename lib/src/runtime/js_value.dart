@@ -5935,38 +5935,46 @@ class JSPromise extends JSObject {
   }
 
   void _settle() {
-    // Process all pending callbacks
+    // Schedule callback execution as microtasks
+    // Per ES6 spec, Promise callbacks must execute asynchronously
     final evaluator = JSEvaluator.currentInstance;
     if (evaluator == null) return;
 
+    // Enqueue microtasks for all callbacks
     if (_state == PromiseState.fulfilled) {
       for (final callback in _onFulfilledCallbacks) {
         if (callback is JSFunction) {
-          try {
-            evaluator.callFunction(callback, [
-              _value ?? JSValueFactory.undefined(),
-            ], JSValueFactory.undefined());
-          } catch (e) {
-            // Ignore errors in callbacks
-          }
+          evaluator.asyncScheduler.enqueueMicrotask(() {
+            try {
+              evaluator.callFunction(callback, [
+                _value ?? JSValueFactory.undefined(),
+              ], JSValueFactory.undefined());
+            } catch (e) {
+              // Ignore errors in callbacks
+            }
+          });
         }
       }
     } else if (_state == PromiseState.rejected) {
       for (final callback in _onRejectedCallbacks) {
         if (callback is JSFunction) {
-          try {
-            evaluator.callFunction(callback, [
-              _reason ?? JSValueFactory.undefined(),
-            ], JSValueFactory.undefined());
-          } catch (e) {
-            // Ignore errors in callbacks
-          }
+          evaluator.asyncScheduler.enqueueMicrotask(() {
+            try {
+              evaluator.callFunction(callback, [
+                _reason ?? JSValueFactory.undefined(),
+              ], JSValueFactory.undefined());
+            } catch (e) {
+              // Ignore errors in callbacks
+            }
+          });
         }
       }
     }
 
     // Notify the scheduler that this Promise has been resolved
-    evaluator.notifyPromiseResolved(this);
+    evaluator.asyncScheduler.enqueueMicrotask(() {
+      evaluator.notifyPromiseResolved(this);
+    });
 
     // Clear callback lists
     _onFulfilledCallbacks.clear();
@@ -6063,85 +6071,91 @@ class PromisePrototype {
           if (evaluator == null) return JSValueFactory.undefined();
 
           if (promise._state == PromiseState.fulfilled) {
-            if (onFulfilled != null) {
-              try {
-                final result = evaluator.callFunction(
-                  onFulfilled as JSFunction,
-                  [promise._value ?? JSValueFactory.undefined()],
-                  JSValueFactory.undefined(),
-                );
+            // Schedule callback execution as microtask
+            evaluator.asyncScheduler.enqueueMicrotask(() {
+              if (onFulfilled != null) {
+                try {
+                  final result = evaluator.callFunction(
+                    onFulfilled as JSFunction,
+                    [promise._value ?? JSValueFactory.undefined()],
+                    JSValueFactory.undefined(),
+                  );
 
-                // If the result is a Promise, wait for its resolution
-                if (result is JSPromise) {
-                  then([
-                    JSNativeFunction(
-                      functionName: 'chainResolve',
-                      nativeImpl: (args) {
-                        (resolve as JSNativeFunction).call(args);
-                        return JSValueFactory.undefined();
-                      },
-                    ),
-                    JSNativeFunction(
-                      functionName: 'chainReject',
-                      nativeImpl: (args) {
-                        (reject as JSNativeFunction).call(args);
-                        return JSValueFactory.undefined();
-                      },
-                    ),
-                  ], result);
-                } else {
-                  (resolve as JSNativeFunction).call([result]);
+                  // If the result is a Promise, wait for its resolution
+                  if (result is JSPromise) {
+                    then([
+                      JSNativeFunction(
+                        functionName: 'chainResolve',
+                        nativeImpl: (args) {
+                          (resolve as JSNativeFunction).call(args);
+                          return JSValueFactory.undefined();
+                        },
+                      ),
+                      JSNativeFunction(
+                        functionName: 'chainReject',
+                        nativeImpl: (args) {
+                          (reject as JSNativeFunction).call(args);
+                          return JSValueFactory.undefined();
+                        },
+                      ),
+                    ], result);
+                  } else {
+                    (resolve as JSNativeFunction).call([result]);
+                  }
+                } catch (e) {
+                  (reject as JSNativeFunction).call([
+                    JSValueFactory.string(e.toString()),
+                  ]);
                 }
-              } catch (e) {
-                (reject as JSNativeFunction).call([
-                  JSValueFactory.string(e.toString()),
+              } else {
+                (resolve as JSNativeFunction).call([
+                  promise._value ?? JSValueFactory.undefined(),
                 ]);
               }
-            } else {
-              (resolve as JSNativeFunction).call([
-                promise._value ?? JSValueFactory.undefined(),
-              ]);
-            }
+            });
           } else if (promise._state == PromiseState.rejected) {
-            if (onRejected != null) {
-              try {
-                final result = evaluator.callFunction(
-                  onRejected as JSFunction,
-                  [promise._reason ?? JSValueFactory.undefined()],
-                  JSValueFactory.undefined(),
-                );
+            // Schedule callback execution as microtask
+            evaluator.asyncScheduler.enqueueMicrotask(() {
+              if (onRejected != null) {
+                try {
+                  final result = evaluator.callFunction(
+                    onRejected as JSFunction,
+                    [promise._reason ?? JSValueFactory.undefined()],
+                    JSValueFactory.undefined(),
+                  );
 
-                // If the result is a Promise, wait for its resolution
-                if (result is JSPromise) {
-                  then([
-                    JSNativeFunction(
-                      functionName: 'chainResolve',
-                      nativeImpl: (args) {
-                        (resolve as JSNativeFunction).call(args);
-                        return JSValueFactory.undefined();
-                      },
-                    ),
-                    JSNativeFunction(
-                      functionName: 'chainReject',
-                      nativeImpl: (args) {
-                        (reject as JSNativeFunction).call(args);
-                        return JSValueFactory.undefined();
-                      },
-                    ),
-                  ], result);
-                } else {
-                  (resolve as JSNativeFunction).call([result]);
+                  // If the result is a Promise, wait for its resolution
+                  if (result is JSPromise) {
+                    then([
+                      JSNativeFunction(
+                        functionName: 'chainResolve',
+                        nativeImpl: (args) {
+                          (resolve as JSNativeFunction).call(args);
+                          return JSValueFactory.undefined();
+                        },
+                      ),
+                      JSNativeFunction(
+                        functionName: 'chainReject',
+                        nativeImpl: (args) {
+                          (reject as JSNativeFunction).call(args);
+                          return JSValueFactory.undefined();
+                        },
+                      ),
+                    ], result);
+                  } else {
+                    (resolve as JSNativeFunction).call([result]);
+                  }
+                } catch (e) {
+                  (reject as JSNativeFunction).call([
+                    JSValueFactory.string(e.toString()),
+                  ]);
                 }
-              } catch (e) {
+              } else {
                 (reject as JSNativeFunction).call([
-                  JSValueFactory.string(e.toString()),
+                  promise._reason ?? JSValueFactory.undefined(),
                 ]);
               }
-            } else {
-              (reject as JSNativeFunction).call([
-                promise._reason ?? JSValueFactory.undefined(),
-              ]);
-            }
+            });
           } else {
             // Promise encore en attente
             if (onFulfilled != null) {
@@ -6151,39 +6165,43 @@ class PromisePrototype {
                   nativeImpl: (callbackArgs) {
                     final evaluator = JSEvaluator.currentInstance;
                     if (evaluator == null) return JSValueFactory.undefined();
-                    try {
-                      final result = evaluator.callFunction(
-                        onFulfilled as JSFunction,
-                        callbackArgs,
-                        JSValueFactory.undefined(),
-                      );
 
-                      // If the result is a Promise, wait for its resolution
-                      if (result is JSPromise) {
-                        then([
-                          JSNativeFunction(
-                            functionName: 'chainResolve',
-                            nativeImpl: (args) {
-                              (resolve as JSNativeFunction).call(args);
-                              return JSValueFactory.undefined();
-                            },
-                          ),
-                          JSNativeFunction(
-                            functionName: 'chainReject',
-                            nativeImpl: (args) {
-                              (reject as JSNativeFunction).call(args);
-                              return JSValueFactory.undefined();
-                            },
-                          ),
-                        ], result);
-                      } else {
-                        (resolve as JSNativeFunction).call([result]);
+                    // Enqueue the callback as a microtask
+                    evaluator.asyncScheduler.enqueueMicrotask(() {
+                      try {
+                        final result = evaluator.callFunction(
+                          onFulfilled as JSFunction,
+                          callbackArgs,
+                          JSValueFactory.undefined(),
+                        );
+
+                        // If the result is a Promise, wait for its resolution
+                        if (result is JSPromise) {
+                          then([
+                            JSNativeFunction(
+                              functionName: 'chainResolve',
+                              nativeImpl: (args) {
+                                (resolve as JSNativeFunction).call(args);
+                                return JSValueFactory.undefined();
+                              },
+                            ),
+                            JSNativeFunction(
+                              functionName: 'chainReject',
+                              nativeImpl: (args) {
+                                (reject as JSNativeFunction).call(args);
+                                return JSValueFactory.undefined();
+                              },
+                            ),
+                          ], result);
+                        } else {
+                          (resolve as JSNativeFunction).call([result]);
+                        }
+                      } catch (e) {
+                        (reject as JSNativeFunction).call([
+                          JSValueFactory.string(e.toString()),
+                        ]);
                       }
-                    } catch (e) {
-                      (reject as JSNativeFunction).call([
-                        JSValueFactory.string(e.toString()),
-                      ]);
-                    }
+                    });
                     return JSValueFactory.undefined();
                   },
                 ),
@@ -6197,39 +6215,43 @@ class PromisePrototype {
                   nativeImpl: (callbackArgs) {
                     final evaluator = JSEvaluator.currentInstance;
                     if (evaluator == null) return JSValueFactory.undefined();
-                    try {
-                      final result = evaluator.callFunction(
-                        onRejected as JSFunction,
-                        callbackArgs,
-                        JSValueFactory.undefined(),
-                      );
 
-                      // If the result is a Promise, wait for its resolution
-                      if (result is JSPromise) {
-                        then([
-                          JSNativeFunction(
-                            functionName: 'chainResolve',
-                            nativeImpl: (args) {
-                              (resolve as JSNativeFunction).call(args);
-                              return JSValueFactory.undefined();
-                            },
-                          ),
-                          JSNativeFunction(
-                            functionName: 'chainReject',
-                            nativeImpl: (args) {
-                              (reject as JSNativeFunction).call(args);
-                              return JSValueFactory.undefined();
-                            },
-                          ),
-                        ], result);
-                      } else {
-                        (resolve as JSNativeFunction).call([result]);
+                    // Enqueue the callback as a microtask
+                    evaluator.asyncScheduler.enqueueMicrotask(() {
+                      try {
+                        final result = evaluator.callFunction(
+                          onRejected as JSFunction,
+                          callbackArgs,
+                          JSValueFactory.undefined(),
+                        );
+
+                        // If the result is a Promise, wait for its resolution
+                        if (result is JSPromise) {
+                          then([
+                            JSNativeFunction(
+                              functionName: 'chainResolve',
+                              nativeImpl: (args) {
+                                (resolve as JSNativeFunction).call(args);
+                                return JSValueFactory.undefined();
+                              },
+                            ),
+                            JSNativeFunction(
+                              functionName: 'chainReject',
+                              nativeImpl: (args) {
+                                (reject as JSNativeFunction).call(args);
+                                return JSValueFactory.undefined();
+                              },
+                            ),
+                          ], result);
+                        } else {
+                          (resolve as JSNativeFunction).call([result]);
+                        }
+                      } catch (e) {
+                        (reject as JSNativeFunction).call([
+                          JSValueFactory.string(e.toString()),
+                        ]);
                       }
-                    } catch (e) {
-                      (reject as JSNativeFunction).call([
-                        JSValueFactory.string(e.toString()),
-                      ]);
-                    }
+                    });
                     return JSValueFactory.undefined();
                   },
                 ),
