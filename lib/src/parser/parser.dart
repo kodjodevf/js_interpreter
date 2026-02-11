@@ -3429,16 +3429,6 @@ class JSParser {
       );
     }
 
-    // 'async' can be an identifier when used in expression position
-    if (_match([TokenType.keywordAsync])) {
-      final token = _previous();
-      return IdentifierExpression(
-        name: token.lexeme,
-        line: token.line,
-        column: token.column,
-      );
-    }
-
     // Private identifiers
     if (_match([TokenType.privateIdentifier])) {
       final token = _previous();

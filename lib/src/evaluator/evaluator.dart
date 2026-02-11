@@ -5617,6 +5617,13 @@ class JSEvaluator implements ASTVisitor<JSValue> {
             stmt.accept(this);
             continue;
           }
+
+          // Function and class declarations do not contribute to completion value
+          if (stmt is FunctionDeclaration || stmt is ClassDeclaration) {
+            stmt.accept(this);
+            continue;
+          }
+
           result = stmt.accept(this);
         }
         return result;
