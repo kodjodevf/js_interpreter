@@ -15198,8 +15198,9 @@ class JSEvaluator implements ASTVisitor<JSValue> {
     JSValue? thisBinding,
   ]) {
     // Parse the function body using the static parseString method
+    // Set initialFunctionDepth to 1 so 'return' statements are allowed
     final wrappedCode = '{\n${function.bodyCode}\n}';
-    final ast = JSParser.parseString(wrappedCode);
+    final ast = JSParser.parseString(wrappedCode, initialFunctionDepth: 1);
 
     if (ast.body.isEmpty) {
       return JSValueFactory.undefined();

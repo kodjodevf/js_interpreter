@@ -43,7 +43,7 @@ class JSParser {
   // Context tracking for contextual keywords (await/yield)
   bool _inAsyncContext = false;
   bool _inGeneratorContext = false;
-  int _functionDepth = 0; // Track function nesting (0 = top-level)
+  int _functionDepth; // Track function nesting (0 = top-level)
   bool _inClassContext = false; // Track if we're parsing class-related code
 
   // Context tracking for break/continue validation
@@ -52,8 +52,12 @@ class JSParser {
   // Map of label -> label info (isLoopOrSwitch, functionDepth)
   final Map<String, _LabelInfo> _labelStack = {};
 
-  JSParser(this.tokens, {bool initialStrictMode = false})
-    : _initialStrictMode = initialStrictMode;
+  JSParser(
+    this.tokens, {
+    bool initialStrictMode = false,
+    int initialFunctionDepth = 0,
+  }) : _initialStrictMode = initialStrictMode,
+       _functionDepth = initialFunctionDepth;
 
   /// Check if parameters are "simple" (no destructuring, defaults, or rest)
   /// ES6 14.1.2: Cannot have "use strict" in body if params are non-simple
@@ -629,10 +633,18 @@ class JSParser {
   }
 
   /// Parse a string of JavaScript code with optional initial strict mode
-  static Program parseString(String source, {bool initialStrictMode = false}) {
+  static Program parseString(
+    String source, {
+    bool initialStrictMode = false,
+    int initialFunctionDepth = 0,
+  }) {
     final lexer = JSLexer(source);
     final tokens = lexer.tokenize();
-    final parser = JSParser(tokens, initialStrictMode: initialStrictMode);
+    final parser = JSParser(
+      tokens,
+      initialStrictMode: initialStrictMode,
+      initialFunctionDepth: initialFunctionDepth,
+    );
     return parser.parse();
   }
 
