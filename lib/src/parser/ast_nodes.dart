@@ -49,6 +49,7 @@ abstract class ASTVisitor<T> {
 
   // Declarations
   T visitVariableDeclaration(VariableDeclaration node);
+  T visitAwaitUsingDeclaration(AwaitUsingDeclaration node);
   T visitFunctionDeclaration(FunctionDeclaration node);
   T visitAsyncFunctionDeclaration(AsyncFunctionDeclaration node);
   T visitClassDeclaration(ClassDeclaration node);
@@ -65,6 +66,7 @@ abstract class ASTVisitor<T> {
   T visitForStatement(ForStatement node);
   T visitForInStatement(ForInStatement node);
   T visitForOfStatement(ForOfStatement node);
+  T visitUsingStatement(UsingStatement node);
   T visitLabeledStatement(LabeledStatement node);
   T visitReturnStatement(ReturnStatement node);
   T visitBreakStatement(BreakStatement node);
@@ -746,6 +748,47 @@ class VariableDeclaration extends Declaration {
 
   @override
   String toString() => 'VarDecl($kind ${declarations.join(', ')})';
+}
+
+/// Await-using declaration: 'await using x = resource;'
+class AwaitUsingDeclaration extends Declaration {
+  final List<VariableDeclarator> declarations;
+
+  const AwaitUsingDeclaration({
+    required this.declarations,
+    required super.line,
+    required super.column,
+  });
+
+  @override
+  T accept<T>(ASTVisitor<T> visitor) =>
+      visitor.visitAwaitUsingDeclaration(this);
+
+  @override
+  String toString() => 'AwaitUsingDecl(${declarations.join(', ')})';
+}
+
+/// Using statement (ES: using declaration with statement body)
+/// Syntax: using x = expr { ... } or await using x = expr { ... }
+class UsingStatement extends Statement {
+  final List<VariableDeclarator> declarations;
+  final Statement body;
+  final bool await; // true for 'await using', false for 'using'
+
+  const UsingStatement({
+    required this.declarations,
+    required this.body,
+    this.await = false,
+    required super.line,
+    required super.column,
+  });
+
+  @override
+  T accept<T>(ASTVisitor<T> visitor) => visitor.visitUsingStatement(this);
+
+  @override
+  String toString() =>
+      '${await ? 'AwaitUsing' : 'Using'}Stmt(${declarations.join(', ')}) $body';
 }
 
 /// Function parameter

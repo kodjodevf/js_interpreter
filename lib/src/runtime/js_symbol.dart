@@ -37,6 +37,9 @@ class JSSymbol extends JSValue {
   static late final JSSymbol split;
   static late final JSSymbol isConcatSpreadable;
   static late final JSSymbol unscopables;
+  static late final JSSymbol dispose; // Symbol.dispose for resource cleanup
+  static late final JSSymbol
+  asyncDispose; // Symbol.asyncDispose for async resource cleanup
 
   JSSymbol._(this.description, this.isGlobal, this.globalKey) : _id = _nextId++;
 
@@ -72,6 +75,8 @@ class JSSymbol extends JSValue {
     split = JSSymbol._('Symbol.split', false, null);
     isConcatSpreadable = JSSymbol._('Symbol.isConcatSpreadable', false, null);
     unscopables = JSSymbol._('Symbol.unscopables', false, null);
+    dispose = JSSymbol._('Symbol.dispose', false, null);
+    asyncDispose = JSSymbol._('Symbol.asyncDispose', false, null);
   }
 
   /// Returns the key of a global symbol or null

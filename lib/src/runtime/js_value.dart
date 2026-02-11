@@ -1259,7 +1259,12 @@ class JSObject extends JSValue {
   /// Defines a getter for a property.
   /// [enumerable] defaults to false for Object.defineProperty compatibility,
   /// but should be true for object literal getters per ES6 spec.
-  void defineGetter(String name, JSFunction getter, {bool enumerable = false}) {
+  void defineGetter(
+    String name,
+    JSFunction getter, {
+    bool enumerable = false,
+    JSSymbol? symbol,
+  }) {
     final existing = _accessorProperties[name];
     if (existing != null && existing.setter != null) {
       // Preserve the existing setter
@@ -1276,12 +1281,22 @@ class JSObject extends JSValue {
         configurable: true,
       );
     }
+
+    // Track the symbol if provided
+    if (symbol != null) {
+      _symbolKeys[name] = symbol;
+    }
   }
 
   /// Defines a setter for a property.
   /// [enumerable] defaults to false for Object.defineProperty compatibility,
   /// but should be true for object literal setters per ES6 spec.
-  void defineSetter(String name, JSFunction setter, {bool enumerable = false}) {
+  void defineSetter(
+    String name,
+    JSFunction setter, {
+    bool enumerable = false,
+    JSSymbol? symbol,
+  }) {
     final existing = _accessorProperties[name];
     if (existing != null && existing.getter != null) {
       // Preserve the existing getter
@@ -1297,6 +1312,11 @@ class JSObject extends JSValue {
         enumerable: enumerable,
         configurable: true,
       );
+    }
+
+    // Track the symbol if provided
+    if (symbol != null) {
+      _symbolKeys[name] = symbol;
     }
   }
 

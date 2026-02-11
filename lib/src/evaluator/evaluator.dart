@@ -825,6 +825,8 @@ class JSEvaluator implements ASTVisitor<JSValue> {
   final ExecutionStack _executionStack = ExecutionStack();
   late Environment _globalEnvironment;
   late JSValue _globalThisBinding; // Global 'this' value for non-strict mode
+  JSValue?
+  _asyncFunctionThisBinding; // Temporary storage for async function 'this' binding
   final AsyncScheduler _asyncScheduler = AsyncScheduler();
   bool moduleMode =
       false; // Track if we're in module mode (modules are always strict)
@@ -3740,6 +3742,8 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       JSSymbol.isConcatSpreadable,
     );
     symbolConstructor.setProperty('unscopables', JSSymbol.unscopables);
+    symbolConstructor.setProperty('dispose', JSSymbol.dispose);
+    symbolConstructor.setProperty('asyncDispose', JSSymbol.asyncDispose);
 
     // Symbol ne peut pas etre appele avec new
     final symbolPrototype = JSObject();
@@ -7161,12 +7165,33 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       }
       return lastValue;
     } finally {
+      // Dispose of all await-using resources in reverse order (LIFO)
+      final asyncDisposalPromise = _disposeResourcesAsync(_currentContext());
+
+      if (asyncDisposalPromise != null) {
+        // We have async disposals that need to be awaited
+        final asyncTask = _currentContext().asyncTask;
+        if (asyncTask is AsyncTask) {
+          // Suspend the async task on the Promise
+          _asyncScheduler.suspendTask(
+            asyncTask,
+            asyncDisposalPromise as JSPromise,
+          );
+          throw AsyncSuspensionException('Awaiting async resource disposal');
+        }
+      }
+
       _executionStack.pop();
     }
   }
 
   @override
   JSValue visitVariableDeclaration(VariableDeclaration node) {
+    // Handle 'using' and 'await-using' declarations
+    if (node.kind == 'using' || node.kind == 'await-using') {
+      return _handleUsingDeclaration(node);
+    }
+
     final env = node.kind == 'var'
         ? _currentContext().variableEnvironment
         : _currentEnvironment();
@@ -7245,6 +7270,55 @@ class JSEvaluator implements ASTVisitor<JSValue> {
     }
 
     return JSValueFactory.undefined();
+  }
+
+  /// Handle 'using' and 'await-using' declarations
+  JSValue _handleUsingDeclaration(VariableDeclaration node) {
+    final isAsync = node.kind == 'await-using';
+    final env = _currentEnvironment();
+
+    for (final decl in node.declarations) {
+      if (decl.id is IdentifierPattern) {
+        final identifierPattern = decl.id as IdentifierPattern;
+        final name = identifierPattern.name;
+
+        // Evaluate the initializer (required for using/await-using)
+        final value = decl.init?.accept(this) ?? JSValueFactory.undefined();
+
+        // Define as let binding in the lexical environment
+        env.define(name, value, BindingType.let_);
+
+        // Track resource for disposal at block exit
+        _currentContext().disposableResourceStack.add((name, value, isAsync));
+      } else {
+        // Destructuring not yet supported for using declarations
+        throw JSSyntaxError(
+          'Destructuring in ${node.kind} declarations not yet supported',
+        );
+      }
+    }
+
+    return JSValueFactory.undefined();
+  }
+
+  @override
+  JSValue visitAwaitUsingDeclaration(AwaitUsingDeclaration node) {
+    // This method should no longer be called as await-using declarations are now
+    // regular VariableDeclarations. Kept for compatibility.
+    throw UnsupportedError(
+      'AwaitUsingDeclaration should be parsed as VariableDeclaration with kind="await-using"',
+    );
+  }
+
+  /// Visit using statement - handles both 'using' and 'await using'
+  /// The statement manages resource lifecycle with Symbol.dispose/Symbol.asyncDispose
+  @override
+  JSValue visitUsingStatement(UsingStatement node) {
+    // This method should no longer be called as using statements are now
+    // regular VariableDeclarations. Kept for compatibility.
+    throw UnsupportedError(
+      'UsingStatement should be parsed as VariableDeclaration with kind="using"',
+    );
   }
 
   /// Cree un objet generateur pour une fonction generatrice
@@ -8162,8 +8236,9 @@ class JSEvaluator implements ASTVisitor<JSValue> {
     List<JSValue> args,
     Environment closureEnv,
     JSNativeFunction resolve,
-    JSNativeFunction reject,
-  ) {
+    JSNativeFunction reject, [
+    JSValue? thisBinding,
+  ]) {
     try {
       // Create nouvel environnement pour l'execution de la fonction
       final functionEnv = Environment(parent: closureEnv);
@@ -8340,10 +8415,22 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       functionEnv.define('arguments', argumentsObject, BindingType.var_);
 
       // Create contexte d'execution pour la fonction async
+      // Compute effective this binding (undefined/null -> global in non-strict mode)
+      final JSValue effectiveThis;
+      if (thisBinding == null ||
+          thisBinding.isUndefined ||
+          thisBinding.isNull) {
+        // No thisBinding provided or explicitly undefined/null
+        // In non-strict mode (async functions are non-strict), use global object
+        effectiveThis = _globalThisBinding;
+      } else {
+        effectiveThis = thisBinding;
+      }
+
       final functionContext = ExecutionContext(
         lexicalEnvironment: functionEnv,
         variableEnvironment: functionEnv,
-        thisBinding: JSValueFactory.undefined(),
+        thisBinding: effectiveThis,
         function: null,
         arguments: args,
         debugName: 'AsyncFunction ${node.id?.name ?? 'anonymous'}',
@@ -8450,8 +8537,9 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       final asyncFunction = JSNativeFunction(
         functionName: node.id?.name ?? 'anonymous',
         expectedArgs: functionLength,
+        isAsync: true, // Mark as async function
         nativeImpl: (args) {
-          // Createe Promise qui sera resolue quand la fonction async se termine
+          // Create Promise qui sera resolue quand la fonction async se termine
           final promise = JSPromise(
             JSNativeFunction(
               functionName: 'asyncResolver',
@@ -8459,7 +8547,7 @@ class JSEvaluator implements ASTVisitor<JSValue> {
                 final resolve = executorArgs[0] as JSNativeFunction;
                 final reject = executorArgs[1] as JSNativeFunction;
 
-                // Createe tache asynchrone pour gerer l'execution
+                // Create tache asynchrone pour gerer l'execution
                 final taskId =
                     'async_expr_${node.id?.name ?? 'anonymous'}_${DateTime.now().millisecondsSinceEpoch}';
                 final asyncTask = AsyncTask(taskId);
@@ -8467,15 +8555,19 @@ class JSEvaluator implements ASTVisitor<JSValue> {
                 // Add the task to the scheduler
                 _asyncScheduler.addTask(asyncTask);
 
-                // Demarrer l'execution asynchrone
-                _executeAsyncFunctionExpression(
-                  asyncTask,
-                  node,
-                  args,
-                  currentEnv,
-                  resolve,
-                  reject,
-                );
+                // Schedule the function execution as a microtask (deferred)
+                // This ensures the function body runs when runPendingAsyncTasks() is called
+                _asyncScheduler.enqueueMicrotask(() {
+                  _executeAsyncFunctionExpression(
+                    asyncTask,
+                    node,
+                    args,
+                    currentEnv,
+                    resolve,
+                    reject,
+                    _asyncFunctionThisBinding,
+                  );
+                });
 
                 return JSValueFactory.undefined();
               },
@@ -14058,12 +14150,22 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         // Getter: { get prop() { return value; } }
         // ES6 spec: Object literal getters are enumerable
         final getterFunction = objectProp.value.accept(this) as JSFunction;
-        obj.defineGetter(propertyKey, getterFunction, enumerable: true);
+        obj.defineGetter(
+          propertyKey,
+          getterFunction,
+          enumerable: true,
+          symbol: symbolKey,
+        );
       } else if (objectProp.kind == 'set') {
         // Setter: { set prop(value) { this._value = value; } }
         // ES6 spec: Object literal setters are enumerable
         final setterFunction = objectProp.value.accept(this) as JSFunction;
-        obj.defineSetter(propertyKey, setterFunction, enumerable: true);
+        obj.defineSetter(
+          propertyKey,
+          setterFunction,
+          enumerable: true,
+          symbol: symbolKey,
+        );
       } else {
         // Propriete normale: { prop: value }
         // ES2019: For method shorthand, capture source text from ObjectProperty
@@ -15464,9 +15566,17 @@ class JSEvaluator implements ASTVisitor<JSValue> {
     // For JS functions, leave it null so _callJSFunction can decide based on strict mode
     final JSValue nativeThisBinding = thisBinding ?? _globalThisBinding;
 
-    // Verifier si c'est une fonction native
-    if (function is JSNativeFunction) {
-      return function.callWithThis(args, nativeThisBinding);
+    // Special handling for async native functions (async function expressions)
+    // We need to pass the thisBinding through to the Promise executor
+    if (function is JSNativeFunction && function.isAsync) {
+      // Temporarily set the async this binding so it can be accessed in the Promise executor
+      final previousAsyncThisBinding = _asyncFunctionThisBinding;
+      _asyncFunctionThisBinding = thisBinding;
+      try {
+        return function.callWithThis(args, nativeThisBinding);
+      } finally {
+        _asyncFunctionThisBinding = previousAsyncThisBinding;
+      }
     }
 
     // Verifier si c'est une arrow function
@@ -15560,6 +15670,11 @@ class JSEvaluator implements ASTVisitor<JSValue> {
           thisBinding,
         );
       }
+    }
+
+    // Check if this is a JSNativeFunction (which doesn't have a declaration)
+    if (function is JSNativeFunction) {
+      return function.callWithThis(args, thisBinding ?? _globalThisBinding);
     }
 
     // Fonction JavaScript normale
@@ -17006,6 +17121,95 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
     // For primitives like numbers, booleans, they are not iterable
     throw JSTypeError('Cannot destructure ${value.type} value');
+  }
+
+  /// Dispose of all await-using resources in a block/context
+  /// Resources are disposed in reverse order (LIFO)
+  /// Calls Symbol.asyncDispose() if present, otherwise Symbol.dispose()
+  /// Dispose resources and return a Promise if async disposal is needed, otherwise null
+  JSValue? _disposeResourcesAsync(ExecutionContext context) {
+    final resources = context.disposableResourceStack;
+    final asyncDisposals = <JSValue>[];
+
+    // Dispose in reverse order (LIFO)
+    for (int i = resources.length - 1; i >= 0; i--) {
+      final (varName, resource, isAsync) = resources[i];
+
+      if (resource.isNull || resource.isUndefined) {
+        // null and undefined don't need disposal
+        continue;
+      }
+
+      if (!resource.isObject) {
+        // Non-objects don't have dispose methods
+        continue;
+      }
+
+      final obj = resource as JSObject;
+
+      // For async using, check Symbol.asyncDispose first
+      if (isAsync) {
+        JSValue asyncDisposeMethod = JSValueFactory.undefined();
+        try {
+          asyncDisposeMethod = obj.getPropertyBySymbol(JSSymbol.asyncDispose);
+          if (!asyncDisposeMethod.isUndefined &&
+              asyncDisposeMethod.isFunction) {
+            try {
+              final result = callFunction(asyncDisposeMethod, [], resource);
+              if (result is JSPromise) {
+                asyncDisposals.add(result);
+              }
+            } catch (e) {
+              // Errors during disposal are suppressed for now
+            }
+            continue;
+          }
+        } catch (_) {
+          // asyncDispose not found
+        }
+      }
+
+      // Try Symbol.dispose (for both sync and async if no asyncDispose)
+      JSValue disposeMethod = JSValueFactory.undefined();
+      try {
+        disposeMethod = obj.getPropertyBySymbol(JSSymbol.dispose);
+      } catch (_) {
+        // No dispose method found
+      }
+
+      // Call the dispose method if found
+      if (!disposeMethod.isUndefined && disposeMethod.isFunction) {
+        try {
+          callFunction(disposeMethod, [], resource);
+        } catch (e) {
+          // Errors during disposal are suppressed for now
+          // TODO: Implement proper SuppressedError handling
+        }
+      }
+    }
+
+    // Clear the resource stack
+    resources.clear();
+
+    // If we have async disposals, return a Promise that resolves when all are done
+    if (asyncDisposals.isNotEmpty) {
+      // Get Promise constructor from global scope
+      final promiseConstructor = getGlobalVariable('Promise');
+      if (promiseConstructor.isObject && promiseConstructor is JSObject) {
+        final promiseAll = promiseConstructor.getProperty('all') as JSFunction;
+        final allPromisesArray = JSArray();
+        for (final promise in asyncDisposals) {
+          allPromisesArray.push(promise);
+        }
+
+        final result = callFunction(promiseAll, [
+          allPromisesArray,
+        ], JSValueFactory.undefined());
+        return result;
+      }
+    }
+
+    return null;
   }
 }
 

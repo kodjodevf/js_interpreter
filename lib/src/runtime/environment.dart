@@ -511,6 +511,10 @@ class ExecutionContext {
   // Track if we're in a catch block (catch parameters are non-deletable)
   final bool inCatch;
 
+  // Track disposable resources from 'using' and 'await using' declarations
+  // List of (varName, resourceValue, isAsync) tuples for cleanup
+  final List<(String, JSValue, bool)> disposableResourceStack = [];
+
   ExecutionContext({
     required this.lexicalEnvironment,
     required this.variableEnvironment,

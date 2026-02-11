@@ -799,6 +799,30 @@ class JSParser {
       return _variableDeclaration();
     }
 
+    // Check for 'await using' in async context
+    if (_inAsyncContext &&
+        _check(TokenType.keywordAwait) &&
+        allowDeclaration &&
+        _peekNext()?.lexeme == 'using') {
+      _advance(); // consume 'await'
+      _advance(); // consume 'using'
+      return _variableDeclarationWithKind('await-using');
+    }
+
+    // Check for 'using' (non-await version)
+    if (_check(TokenType.identifier) &&
+        _peek().lexeme == 'using' &&
+        allowDeclaration) {
+      final nextToken = _peekNext();
+      if (nextToken != null &&
+          (nextToken.type == TokenType.identifier ||
+              nextToken.type == TokenType.leftBracket ||
+              nextToken.type == TokenType.leftBrace)) {
+        _advance(); // consume 'using'
+        return _variableDeclarationWithKind('using');
+      }
+    }
+
     if (_match([TokenType.keywordAsync])) {
       final asyncToken = _previous();
 
@@ -824,6 +848,10 @@ class JSParser {
           );
         }
         return _asyncFunctionDeclaration();
+      } else if (!hasLineTerminator && _peek().lexeme == 'using') {
+        // 'async using' (same as 'await using')
+        _advance(); // consume 'using'
+        return _awaitUsingStatement();
       } else {
         // async followed by something else (expressions, arrow functions, or line terminator)
         // are handled as expression statements
@@ -988,6 +1016,62 @@ class JSParser {
   }
 
   /// Parse a variable declaration
+  /// Parse variable declaration with specific kind (var, let, const, using, await-using)
+  Statement _variableDeclarationWithKind(String kind) {
+    final startToken = _previous();
+    final declarations = <VariableDeclarator>[];
+
+    do {
+      Pattern id;
+      if (_match([TokenType.leftBracket])) {
+        final expr = _parseArrayExpression();
+        id = _expressionToPattern(expr);
+      } else if (_match([TokenType.leftBrace])) {
+        final expr = _parseObjectExpression();
+        id = _expressionToPattern(expr);
+      } else {
+        Token name;
+        if (_check(TokenType.identifier)) {
+          name = _advance();
+          _checkAwaitAsIdentifierInAsyncContext(name);
+        } else if (_check(TokenType.keywordAwait)) {
+          name = _advance();
+          _checkAwaitAsIdentifierInAsyncContext(name);
+        } else if (_checkContextualKeyword()) {
+          name = _advance();
+        } else {
+          throw ParseError('Expected variable name', _peek());
+        }
+
+        id = IdentifierPattern(
+          name: name.lexeme,
+          line: name.line,
+          column: name.column,
+        );
+      }
+
+      Expression? init;
+      if (_match([TokenType.assign])) {
+        init = _assignmentExpression();
+      } else if (kind == 'const') {
+        throw ParseError('Missing initializer in const declaration', _peek());
+      } else if (kind == 'using' || kind == 'await-using') {
+        throw ParseError('$kind declaration must have an initializer', _peek());
+      }
+
+      declarations.add(VariableDeclarator(id: id, init: init));
+    } while (_match([TokenType.comma]));
+
+    _match([TokenType.semicolon]);
+
+    return VariableDeclaration(
+      kind: kind,
+      declarations: declarations,
+      line: startToken.line,
+      column: startToken.column,
+    );
+  }
+
   VariableDeclaration _variableDeclaration() {
     final previous = _previous();
     final kind = previous.lexeme; // var, let, const
@@ -1065,6 +1149,66 @@ class JSParser {
     );
   }
 
+  /// Parse an await-using declaration
+  /// Parse await using statement
+  /// Syntax: await using id = expr { body }
+  Statement _awaitUsingStatement() {
+    final previous = _previous(); // This is the 'using' token
+    // The 'await' was already consumed before calling this
+
+    final declarations = <VariableDeclarator>[];
+
+    do {
+      // Parse a simple identifier (no destructuring for await-using)
+      Token name;
+      if (_check(TokenType.identifier)) {
+        name = _advance();
+      } else if (_check(TokenType.keywordAwait)) {
+        name = _advance();
+        _checkAwaitAsIdentifierInAsyncContext(name);
+      } else if (_checkContextualKeyword()) {
+        name = _advance();
+      } else {
+        throw ParseError(
+          'Expected variable name in await-using declaration',
+          _peek(),
+        );
+      }
+
+      final id = IdentifierPattern(
+        name: name.lexeme,
+        line: name.line,
+        column: name.column,
+      );
+
+      Expression? init;
+      if (_match([TokenType.assign])) {
+        init = _assignmentExpression();
+      } else {
+        throw ParseError(
+          'Await-using declaration must have an initializer',
+          _peek(),
+        );
+      }
+
+      declarations.add(VariableDeclarator(id: id, init: init));
+    } while (_match([TokenType.comma]));
+
+    // Parse the body statement (required for await using) - must not be empty from ';'
+    // Use _loopBody to prevent lone semicolon from being treated as body
+    final body = _loopBody();
+
+    return UsingStatement(
+      declarations: declarations,
+      body: body,
+      await: true,
+      line: previous.line,
+      column: previous.column,
+    );
+  }
+
+  /// Parse using statement (non-await version)
+  /// Syntax: using id = expr { body }
   /// Parse an if statement
   IfStatement _ifStatement() {
     final previous = _previous();

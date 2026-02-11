@@ -24,6 +24,9 @@ class JSNativeFunction extends JSFunction {
   /// Default is false for most native functions as per ES6 spec
   final bool _isConstructorInternal;
 
+  /// If true, this is an async function and needs thisBinding passed through executor
+  final bool isAsync;
+
   /// Track if 'name' property has been deleted
   bool _nameDeleted = false;
 
@@ -36,6 +39,7 @@ class JSNativeFunction extends JSFunction {
     this.expectedArgs = -1, // -1 = variadic
     this.hasContextBound = false,
     bool isConstructor = false, // Default: not a constructor
+    this.isAsync = false, // Default: not async
     JSObject? functionPrototype, // Add optional prototype parameter
   }) : _isConstructorInternal = isConstructor,
        super(

@@ -548,4 +548,195 @@ void main() {
       expect(map['canCreateRegExpV'], isTrue);
     });
   });
+
+  group('ES2024 Explicit Resource Management (using/await using) Tests', () {
+    test('should support using statement with sync disposal', () async {
+      final code = '''
+        let disposed = false;
+        
+        const resource = {
+          [Symbol.dispose]() {
+            disposed = true;
+          }
+        };
+        
+        {
+          using r = resource;
+          // Use resource
+        }
+        
+        disposed; // should be true
+      ''';
+
+      final result = interpreter.eval(code);
+      expect(result.toString(), equals('true'));
+    });
+
+    test('should support await using statement with async disposal', () async {
+      final code = '''
+        let asyncDisposed = false;
+        
+        const asyncResource = {
+          [Symbol.asyncDispose]() {
+            asyncDisposed = true;
+            return Promise.resolve();
+          }
+        };
+        
+        async function test() {
+          {
+            await using r = asyncResource;
+            // Use resource
+          }
+          return asyncDisposed;
+        }
+        
+        await test();
+      ''';
+
+      final result = await interpreter.evalAsync(code);
+      expect(result.toString(), equals('true'));
+    });
+
+    test('should dispose multiple resources in LIFO order', () {
+      final code = '''
+        const disposed = [];
+        
+        const res1 = {
+          [Symbol.dispose]() {
+            disposed.push('res1');
+          }
+        };
+        
+        const res2 = {
+          [Symbol.dispose]() {
+            disposed.push('res2');
+          }
+        };
+        
+        {
+          using r1 = res1;
+          using r2 = res2;
+        }
+        
+        disposed; // should be ['res2', 'res1'] - LIFO order
+      ''';
+
+      final result = interpreter.eval(code);
+      final list = (result as JSArray).toList();
+      expect(list.length, equals(2));
+      expect(list[0], equals('res2'));
+      expect(list[1], equals('res1'));
+    });
+
+    test('should use Symbol.dispose for sync context', () {
+      final code = '''
+        let syncCalled = false;
+        let asyncCalled = false;
+        
+        const resource = {
+          [Symbol.dispose]() {
+            syncCalled = true;
+          },
+          [Symbol.asyncDispose]() {
+            asyncCalled = true;
+          }
+        };
+        
+        {
+          using r = resource;
+        }
+        
+        ({ syncCalled, asyncCalled });
+      ''';
+
+      final result = interpreter.eval(code);
+      final map = (result as JSObject).toMap();
+      expect(map['syncCalled'], isTrue);
+      expect(map['asyncCalled'], isFalse);
+    });
+
+    test('should initialize resources in order', () {
+      final code = '''
+        const initialized = [];
+        
+        const makeResource = (name) => ({
+          [Symbol.dispose]() {},
+          name
+        });
+        
+        {
+          using r1 = (initialized.push('r1'), makeResource('r1'))[1];
+          using r2 = (initialized.push('r2'), makeResource('r2'))[1];
+          using r3 = (initialized.push('r3'), makeResource('r3'))[1];
+        }
+        
+        initialized; // should be ['r1', 'r2', 'r3']
+      ''';
+
+      final result = interpreter.eval(code);
+      final list = (result as JSArray).toList();
+      expect(list, equals(['r1', 'r2', 'r3']));
+    });
+
+    test('should handle resource errors during disposal', () {
+      final code = '''
+        const disposed = [];
+        
+        const failingResource = {
+          [Symbol.dispose]() {
+            disposed.push('failed');
+            throw new Error('Disposal error');
+          }
+        };
+        
+        const normalResource = {
+          [Symbol.dispose]() {
+            disposed.push('normal');
+          }
+        };
+        
+        try {
+          {
+            using r1 = normalResource;
+            using r2 = failingResource;
+          }
+        } catch(e) {
+          // Error during disposal is suppressed
+        }
+        
+        disposed; // both should dispose despite error
+      ''';
+
+      final result = interpreter.eval(code);
+      final list = (result as JSArray).toList();
+      expect(list.length, equals(2));
+      // Both resources should have attempted disposal
+    });
+
+    test('should work with complex resource patterns', () {
+      final code = '''
+        let state = 'created';
+        
+        const resource = {
+          acquired: true,
+          [Symbol.dispose]() {
+            state = 'disposed';
+          }
+        };
+        
+        {
+          using myResource = resource;
+          state = 'in-use';
+        }
+        
+        ({ state, wasAcquired: resource.acquired });
+      ''';
+
+      final result = interpreter.eval(code);
+      final map = (result as JSObject).toMap();
+      expect(map['state'], equals('disposed'));
+      expect(map['wasAcquired'], isTrue);
+    });
+  });
 }
