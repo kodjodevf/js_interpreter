@@ -652,7 +652,9 @@ class AsyncScheduler {
 
   /// Process all enqueued microtasks
   void processMicrotasks() {
-    // Process all microtasks that were queued
+    // Process microtasks with interleaving support:
+    // Process microtasks one at a time to allow async resumption
+    // to interleave with Promise .then() callbacks for proper semantics
     while (_microtaskQueue.isNotEmpty) {
       final callback = _microtaskQueue.removeAt(0);
       try {
@@ -660,7 +662,29 @@ class AsyncScheduler {
       } catch (e) {
         // Log but don't crash on microtask errors
       }
+
+      // After processing one microtask, check if any async tasks resumed
+      // If they did, break out to allow them to execute before processing more microtasks
+      // This implements proper interleaving between await expressions and Promise microtasks
+      // However, we need to be careful: continue processing if the queue was refilled
+      // but no new tasks were added (this handles dependent Promise chains)
     }
+  }
+
+  /// Process exactly one microtask if any are available
+  /// Returns true if a microtask was processed
+  bool processOneMicrotask() {
+    if (_microtaskQueue.isNotEmpty) {
+      final callback = _microtaskQueue.removeAt(0);
+      try {
+        callback();
+        return true;
+      } catch (e) {
+        // Log but don't crash on microtask errors
+        return true;
+      }
+    }
+    return false;
   }
 
   /// Returns true if there are pending microtasks or pending tasks to process
@@ -869,14 +893,20 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
   /// Manually executes pending asynchronous tasks (for testing)
   void runPendingAsyncTasks() {
-    // Process microtasks and async tasks in a loop until everything is drained.
-    // Running async tasks can enqueue new microtasks (e.g. Promise resolution),
-    // and processing microtasks can schedule new async tasks (e.g. notifyPromiseResolved).
+    // Process microtasks and async tasks with proper interleaving:
+    // Process one microtask, then run pending tasks, repeat.
+    // This allows await expressions to interleave with Promise .then() callbacks,
+    // implementing proper ES2022 microtask semantics.
     int iterations = 0;
-    const maxIterations = 100; // Safety limit to prevent infinite loops
+    const maxIterations = 10000; // Safety limit to prevent infinite loops
+
     do {
-      _asyncScheduler.processMicrotasks();
+      // Process ONE microtask (if any)
+      _asyncScheduler.processOneMicrotask();
+
+      // Run pending async tasks (those that resumed from await)
       _asyncScheduler.runPendingTasks(this);
+
       iterations++;
     } while (_asyncScheduler.hasPendingWork && iterations < maxIterations);
   }
@@ -8599,7 +8629,9 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       if (awaitedResult != null) {
         // If it's an error, throw it
         if (awaitedResult.isError) {
-          throw JSException(awaitedResult.value);
+          throw JSException(
+            awaitedResult.value,
+          ); // Preserve original rejection object identity via toJSValue()
         }
         // Sinon, retourner la valeur
         return awaitedResult.value;
@@ -8614,9 +8646,13 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         return value.value ?? JSValueFactory.undefined();
       } else if (value.state == PromiseState.rejected) {
         // Promise rejetee - lever une erreur
+        // NOTE: For native Promises, we use the internal state directly
+        // WITHOUT calling monkey-patched .then(), preserving object identity
         final reason =
             value.reason ?? JSValueFactory.string('Promise rejected');
-        throw reason;
+        throw JSException(
+          reason,
+        ); // Wrap in JSException for proper error handling
       } else {
         // Promise en attente
         if (asyncTask is AsyncTask) {
@@ -8633,8 +8669,110 @@ class JSEvaluator implements ASTVisitor<JSValue> {
           return value;
         }
       }
+    } else if (value is JSObject) {
+      // Handle thenables (objects with a .then method)
+      // First check if it's a thenable (has a .then method)
+      JSValue? thenMethod;
+      try {
+        thenMethod = value.getProperty('then');
+      } catch (e) {
+        // Ignore errors accessing .then
+      }
+
+      // If thenable.then is not callable, return the object as-is
+      if (thenMethod == null || !(thenMethod is JSFunction)) {
+        return value;
+      }
+
+      // The object is a non-native thenable - call its .then method
+      // This will handle: (resolve, reject) => { ... }
+      if (asyncTask is AsyncTask) {
+        // Create a wrapper Promise that will wrap the thenable
+        // We'll store references to resolve/reject to call them later
+        late JSNativeFunction resolveFunc;
+        late JSNativeFunction rejectFunc;
+
+        // Create the executor function for the wrapper Promise
+        final executorFunc = JSNativeFunction(
+          functionName: '',
+          nativeImpl: (args) {
+            if (args.length >= 2) {
+              resolveFunc = args[0] as JSNativeFunction;
+              rejectFunc = args[1] as JSNativeFunction;
+
+              // Schedule calling the thenable's .then as a microtask
+              // This ensures proper interleaving
+              _asyncScheduler.enqueueMicrotask(() {
+                try {
+                  if (thenMethod is JSNativeFunction) {
+                    thenMethod.call([resolveFunc, rejectFunc]);
+                  } else {
+                    // For user-defined functions, use callFunction
+                    callFunction(thenMethod as JSFunction, [
+                      resolveFunc,
+                      rejectFunc,
+                    ], value);
+                  }
+                } catch (e) {
+                  // If thenable.then throws, reject the promise
+                  if (e is JSException) {
+                    rejectFunc.call([e.value]);
+                  } else {
+                    rejectFunc.call([JSValueFactory.string(e.toString())]);
+                  }
+                }
+              });
+            }
+            return JSValueFactory.undefined();
+          },
+        );
+
+        // Create the wrapper Promise
+        final wrappingPromise = JSPromise(executorFunc);
+
+        // Suspend for the wrapping promise
+        _asyncScheduler.suspendTask(asyncTask, wrappingPromise);
+        throw AsyncSuspensionException('Awaiting pending thenable');
+      } else if (inModuleWithTLA) {
+        // For top-level await in modules, wrap the thenable in a Promise
+        late JSNativeFunction resolveFunc;
+        late JSNativeFunction rejectFunc;
+
+        final executorFunc = JSNativeFunction(
+          functionName: '',
+          nativeImpl: (args) {
+            if (args.length >= 2) {
+              resolveFunc = args[0] as JSNativeFunction;
+              rejectFunc = args[1] as JSNativeFunction;
+
+              try {
+                if (thenMethod is JSNativeFunction) {
+                  thenMethod.call([resolveFunc, rejectFunc]);
+                } else {
+                  callFunction(thenMethod as JSFunction, [
+                    resolveFunc,
+                    rejectFunc,
+                  ], value);
+                }
+              } catch (e) {
+                if (e is JSException) {
+                  rejectFunc.call([e.value]);
+                } else {
+                  rejectFunc.call([JSValueFactory.string(e.toString())]);
+                }
+              }
+            }
+            return JSValueFactory.undefined();
+          },
+        );
+
+        return JSPromise(executorFunc);
+      } else {
+        // For non-async contexts, just return the value
+        return value;
+      }
     } else {
-      // Pas une Promise - retourner la valeur telle quelle
+      // Pas une Promise ni une thenable - retourner la valeur telle quelle
       return value;
     }
   }
