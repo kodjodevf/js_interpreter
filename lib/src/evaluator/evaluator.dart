@@ -680,7 +680,7 @@ class AsyncScheduler {
         callback();
         return true;
       } catch (e) {
-        // Log but don't crash on microtask errors
+        // Don't crash on microtask errors
         return true;
       }
     }
@@ -705,22 +705,18 @@ class AsyncScheduler {
     final waiters = _promiseWaiters.remove(promise);
     if (waiters != null) {
       for (final task in waiters) {
+        _suspendedTasks.remove(task);
+
         if (promise.state == PromiseState.fulfilled) {
           task.resume(promise.value ?? JSValueFactory.undefined());
-          // Add the resumed task to pending tasks so it can be executed
-          _pendingTasks.add(task);
         } else if (promise.state == PromiseState.rejected) {
           task.fail(
             promise.reason ?? JSValueFactory.string('Promise rejected'),
           );
-          // For failed tasks, also add them to handle the error
-          _pendingTasks.add(task);
         }
-        _suspendedTasks.remove(task);
-      }
-      // Execute any pending tasks that were just resumed
-      if (_pendingTasks.isNotEmpty) {
-        evaluator.runPendingAsyncTasks();
+
+        // Enqueue the task to be processed by the event loop, but don't execute it immediately
+        _pendingTasks.add(task);
       }
     }
   }
@@ -893,22 +889,18 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
   /// Manually executes pending asynchronous tasks (for testing)
   void runPendingAsyncTasks() {
-    // Process microtasks and async tasks with proper interleaving:
-    // Process one microtask, then run pending tasks, repeat.
-    // This allows await expressions to interleave with Promise .then() callbacks,
-    // implementing proper ES2022 microtask semantics.
-    int iterations = 0;
-    const maxIterations = 10000; // Safety limit to prevent infinite loops
+    // Must run within the prototype manager's zone so that microtask callbacks
+    // can create properly-prototyped objects (e.g. Promise with .then method)
+    prototypeManager.runWithin(() {
+      int iterations = 0;
+      const maxIterations = 10000;
 
-    do {
-      // Process ONE microtask (if any)
-      _asyncScheduler.processOneMicrotask();
-
-      // Run pending async tasks (those that resumed from await)
-      _asyncScheduler.runPendingTasks(this);
-
-      iterations++;
-    } while (_asyncScheduler.hasPendingWork && iterations < maxIterations);
+      do {
+        _asyncScheduler.processOneMicrotask();
+        _asyncScheduler.runPendingTasks(this);
+        iterations++;
+      } while (_asyncScheduler.hasPendingWork && iterations < maxIterations);
+    });
   }
 
   /// Schedules an asynchronous operation and returns a JavaScript Promise
@@ -6078,13 +6070,10 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       }
       lastValue = stmt.accept(this);
 
-      // Drain microtask queue after each top-level statement.
-      // This emulates the microtask checkpoint that occurs between tasks
-      // in the JS event loop, ensuring Promise callbacks (which are
-      // microtasks per spec) execute before the next statement runs.
-      if (_asyncScheduler.hasPendingWork) {
-        _asyncScheduler.processMicrotasks();
-      }
+      // Note: Per ES spec, microtasks (Promise callbacks) are processed
+      // only after the current task (script evaluation) completes, NOT between
+      // statements. The microtask checkpoint is handled by runPendingAsyncTasks()
+      // called from eval() after evaluate(program) returns.
     }
 
     return lastValue;
@@ -6419,6 +6408,10 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
     // Demarrer l'execution asynchrone
     _executeAsyncFunction(asyncTask);
+
+    // Process pending microtasks and async tasks to allow the module's
+    // top-level await to resolve (e.g. await Promise.resolve(42))
+    runPendingAsyncTasks();
 
     // Attendre la completion
     try {
@@ -8640,32 +8633,31 @@ class JSEvaluator implements ASTVisitor<JSValue> {
     final value = node.argument.accept(this);
 
     if (value is JSPromise) {
-      // Check the Promise state
+      if (asyncTask is AsyncTask) {
+        // ES2022: In async functions, await always creates a microtask boundary
+        // This means we should suspend even for fulfilled promises to allow
+        // proper interleaving with other microtasks (like Promise callbacks)
+        _asyncScheduler.suspendTask(asyncTask, value);
+        throw AsyncSuspensionException('Awaiting Promise');
+      }
+
+      // Non-async context (can be top-level await in modules or evalAsync)
+      // Check the Promise state and act accordingly
       if (value.state == PromiseState.fulfilled) {
-        // Promise resolue - retourner la valeur
+        // Promise resolved - return the value
         return value.value ?? JSValueFactory.undefined();
       } else if (value.state == PromiseState.rejected) {
-        // Promise rejetee - lever une erreur
-        // NOTE: For native Promises, we use the internal state directly
-        // WITHOUT calling monkey-patched .then(), preserving object identity
+        // Promise rejected - throw error
         final reason =
             value.reason ?? JSValueFactory.string('Promise rejected');
-        throw JSException(
-          reason,
-        ); // Wrap in JSException for proper error handling
+        throw JSException(reason);
       } else {
-        // Promise en attente
-        if (asyncTask is AsyncTask) {
-          // Dans une fonction async - suspendre l'execution
-          _asyncScheduler.suspendTask(asyncTask, value);
-          throw AsyncSuspensionException('Awaiting pending Promise');
-        } else if (inModuleWithTLA) {
-          // ES2022: Top-level await dans un module - retourner la Promise
-          // Elle sera attendue par _evalModuleAsync
+        // Promise pending
+        if (inModuleWithTLA) {
+          // ES2022: Top-level await in module - return the Promise
           return value;
         } else {
-          // Pas dans une fonction async ni dans un module TLA - retourner la Promise elle-meme
-          // Cela permet a evalAsync d'attendre la Promise
+          // Return Promise itself for evalAsync to await
           return value;
         }
       }

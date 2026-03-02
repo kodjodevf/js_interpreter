@@ -320,38 +320,35 @@ void main() {
   group('ES2018 - Promise.prototype.finally()', () {
     group('Basic finally() Behavior', () {
       test('should call finally on resolved promise', () {
-        const code = '''
+        interpreter.eval('''
           let finallyCalled = false;
           Promise.resolve(42)
             .finally(() => { finallyCalled = true; });
-          finallyCalled;
-        ''';
-        final result = interpreter.eval(code);
+        ''');
+        final result = interpreter.eval('finallyCalled');
         expect(result.toBoolean(), isTrue);
       });
 
       test('should call finally on rejected promise', () {
-        const code = '''
+        interpreter.eval('''
           let finallyCalled = false;
           const p = Promise.reject(new Error('test'));
           p.finally(() => { finallyCalled = true; });
           // Catch error separately to avoid 'catch' keyword parsing issue
           p.then(null, () => {});
-          finallyCalled;
-        ''';
-        final result = interpreter.eval(code);
+        ''');
+        final result = interpreter.eval('finallyCalled');
         expect(result.toBoolean(), isTrue);
       });
 
       test('should pass through resolved value', () {
-        const code = '''
+        interpreter.eval('''
           let finalValue;
           Promise.resolve(42)
             .finally(() => { return 99; })
             .then(value => { finalValue = value; });
-          finalValue;
-        ''';
-        final result = interpreter.eval(code);
+        ''');
+        final result = interpreter.eval('finalValue');
         expect(
           result.toNumber(),
           equals(42),
@@ -360,14 +357,13 @@ void main() {
       });
 
       test('should pass through rejection', () {
-        const code = '''
+        interpreter.eval('''
           let errorMessage;
           const p = Promise.reject(new Error('original'));
           p.finally(() => { return 99; });
           p.then(null, err => { errorMessage = err.message; });
-          errorMessage;
-        ''';
-        final result = interpreter.eval(code);
+        ''');
+        final result = interpreter.eval('errorMessage');
         expect(result.toString(), equals('original'));
       });
 
@@ -385,74 +381,67 @@ void main() {
 
     group('finally() Chaining', () {
       test('should chain multiple finally calls', () {
-        const code = '''
+        interpreter.eval('''
           let count = 0;
           Promise.resolve(1)
             .finally(() => { count++; })
             .finally(() => { count++; })
             .finally(() => { count++; });
-          count;
-        ''';
-        final result = interpreter.eval(code);
+        ''');
+        final result = interpreter.eval('count');
         expect(result.toNumber(), equals(3));
       });
 
       test('should work with then and finally chain', () {
-        const code = '''
+        interpreter.eval('''
           let result;
           Promise.resolve(10)
             .then(x => x * 2)
             .finally(() => {})
             .then(x => { result = x; });
-          result;
-        ''';
-        final result = interpreter.eval(code);
+        ''');
+        final result = interpreter.eval('result');
         expect(result.toNumber(), equals(20));
       });
 
       test('should work with catch and finally chain', () {
-        const code = '''
+        interpreter.eval('''
           let result;
           const p = Promise.reject(new Error('test'));
           p.then(null, err => 'caught')
             .finally(() => {})
             .then(x => { result = x; });
-          result;
-        ''';
-        final result = interpreter.eval(code);
+        ''');
+        final result = interpreter.eval('result');
         expect(result.toString(), equals('caught'));
       });
     });
 
     group('finally() with Errors', () {
       test('should override rejection if finally throws', () {
-        const code = '''
+        interpreter.eval('''
           let errorMessage = 'not set';
           const p = Promise.resolve(42);
           p.finally(() => { throw new Error('finally error'); });
           p.then(null, err => { errorMessage = err.message; });
-          // Error propagation in finally() may need more work
-          errorMessage !== undefined;
-        ''';
-        final result = interpreter.eval(code);
+        ''');
+        final result = interpreter.eval('errorMessage !== undefined');
         expect(result.toBoolean(), isTrue);
       });
 
       test('should override original rejection if finally throws', () {
-        const code = '''
+        interpreter.eval('''
           let errorMessage = 'not set';
           const p = Promise.reject(new Error('original'));
           p.finally(() => { throw new Error('finally error'); });
           p.then(null, err => { errorMessage = err.message; });
-          // Error override in finally() may need more work  
-          errorMessage !== 'not set';
-        ''';
-        final result = interpreter.eval(code);
+        ''');
+        final result = interpreter.eval("errorMessage !== 'not set'");
         expect(result.toBoolean(), isTrue);
       });
 
       test('should handle async cleanup in finally', () {
-        const code = '''
+        interpreter.eval('''
           let cleanupDone = false;
           Promise.resolve(42)
             .finally(() => {
@@ -460,16 +449,15 @@ void main() {
                 cleanupDone = true;
               });
             });
-          cleanupDone;
-        ''';
-        final result = interpreter.eval(code);
+        ''');
+        final result = interpreter.eval('cleanupDone');
         expect(result.toBoolean(), isTrue);
       });
     });
 
     group('finally() Practical Use Cases', () {
       test('should cleanup resources after success', () {
-        const code = '''
+        interpreter.eval('''
           let resource = null;
           let cleaned = false;
           
@@ -485,15 +473,13 @@ void main() {
           
           acquire()
             .finally(() => cleanup());
-          
-          cleaned;
-        ''';
-        final result = interpreter.eval(code);
+        ''');
+        final result = interpreter.eval('cleaned');
         expect(result.toBoolean(), isTrue);
       });
 
       test('should cleanup resources after failure', () {
-        const code = '''
+        interpreter.eval('''
           let resource = null;
           let cleaned = false;
           
@@ -510,15 +496,13 @@ void main() {
           const p = acquire();
           p.finally(() => cleanup());
           p.then(null, () => {});
-          
-          cleaned;
-        ''';
-        final result = interpreter.eval(code);
+        ''');
+        final result = interpreter.eval('cleaned');
         expect(result.toBoolean(), isTrue);
       });
 
       test('should work like try-finally pattern', () {
-        const code = '''
+        interpreter.eval('''
           let logs = [];
           
           function operation() {
@@ -534,10 +518,8 @@ void main() {
             .finally(() => {
               logs.push('cleanup');
             });
-          
-          logs.join(',');
-        ''';
-        final result = interpreter.eval(code);
+        ''');
+        final result = interpreter.eval("logs.join(',')");
         expect(result.toString(), equals('start,success:42,cleanup'));
       });
     });

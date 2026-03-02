@@ -43,17 +43,16 @@ void main() {
 
     group('Promise.prototype.finally()', () {
       test('should support finally on resolved promise', () {
-        const code = '''
+        interpreter.eval('''
           let finallyCalled = false;
           let promiseValue = null;
           Promise.resolve(42)
             .finally(() => { finallyCalled = true; })
             .then(value => { promiseValue = value; });
-          finallyCalled;
-        ''';
+        ''');
 
-        final result = interpreter.eval(code);
-        // Check if finally was called
+        // After eval(), microtasks have been processed
+        final result = interpreter.eval('finallyCalled');
         expect(result.toBoolean(), isTrue);
       });
 

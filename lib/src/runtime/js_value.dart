@@ -5958,7 +5958,9 @@ class JSPromise extends JSObject {
     // Schedule callback execution as microtasks
     // Per ES6 spec, Promise callbacks must execute asynchronously
     final evaluator = JSEvaluator.currentInstance;
-    if (evaluator == null) return;
+    if (evaluator == null) {
+      return;
+    }
 
     // Enqueue microtasks for all callbacks
     if (_state == PromiseState.fulfilled) {

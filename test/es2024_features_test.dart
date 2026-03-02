@@ -266,30 +266,28 @@ void main() {
     });
 
     test('should allow external promise resolution', () async {
-      final code = '''
+      interpreter.eval('''
         const { promise, resolve, reject } = Promise.withResolvers();
         let result = 'pending';
         promise.then(value => { result = value; });
         resolve('resolved');
-        result;
-      ''';
+      ''');
 
-      final result = await interpreter.evalAsync(code);
-      // The result should be 'resolved' after async resolution
+      // After eval(), microtasks have been processed
+      final result = interpreter.eval('result');
       expect(result.toString(), equals('resolved'));
     });
 
     test('should allow external promise rejection', () async {
-      final code = '''
+      interpreter.eval('''
         const { promise, resolve, reject } = Promise.withResolvers();
         let result = 'pending';
         promise['catch'](error => { result = error; });
         reject('error occurred');
-        result;
-      ''';
+      ''');
 
-      final result = await interpreter.evalAsync(code);
-      // The result should be 'error occurred' after async rejection
+      // After eval(), microtasks have been processed
+      final result = interpreter.eval('result');
       expect(result.toString(), equals('error occurred'));
     });
 
