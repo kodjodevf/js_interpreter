@@ -45,6 +45,7 @@ class JSParser {
   bool _inGeneratorContext = false;
   int _functionDepth; // Track function nesting (0 = top-level)
   bool _inClassContext = false; // Track if we're parsing class-related code
+  final bool _allowTopLevelAwait;
 
   // Context tracking for break/continue validation
   int _loopDepth = 0; // Count of nested loops (for/while/do-while)
@@ -56,8 +57,10 @@ class JSParser {
     this.tokens, {
     bool initialStrictMode = false,
     int initialFunctionDepth = 0,
+    bool allowTopLevelAwait = false,
   }) : _initialStrictMode = initialStrictMode,
-       _functionDepth = initialFunctionDepth;
+       _functionDepth = initialFunctionDepth,
+       _allowTopLevelAwait = allowTopLevelAwait;
 
   /// Check if parameters are "simple" (no destructuring, defaults, or rest)
   /// ES6 14.1.2: Cannot have "use strict" in body if params are non-simple
@@ -637,6 +640,7 @@ class JSParser {
     String source, {
     bool initialStrictMode = false,
     int initialFunctionDepth = 0,
+    bool allowTopLevelAwait = false,
   }) {
     final lexer = JSLexer(source);
     final tokens = lexer.tokenize();
@@ -644,6 +648,7 @@ class JSParser {
       tokens,
       initialStrictMode: initialStrictMode,
       initialFunctionDepth: initialFunctionDepth,
+      allowTopLevelAwait: allowTopLevelAwait,
     );
     return parser.parse();
   }
@@ -2331,6 +2336,10 @@ class JSParser {
       final operator = _previous();
       final right = _assignment();
 
+      if (expr is AwaitExpression) {
+        throw ParseError('Invalid left-hand side in assignment', operator);
+      }
+
       // Check if it's a destructuring assignment
       if (operator.lexeme == '=' && _isDestructuringPattern(expr)) {
         final pattern = _expressionToPattern(expr);
@@ -2888,36 +2897,17 @@ class JSParser {
     // 1. Unary expression when in an async context
     // 2. Operator at top-level in module mode (ES2022 top-level await)
     // 3. Identifier when outside async context (for other contexts)
-    if (_check(TokenType.keywordAwait)) {
-      final nextToken = _peekNext();
+    if (_check(TokenType.keywordAwait) &&
+        (_inAsyncContext || (_allowTopLevelAwait && _functionDepth == 0))) {
+      _advance();
+      final awaitToken = _previous();
+      final argument = _unary();
 
-      // Treat as unary operator if:
-      // - We're in async context, OR
-      // - Next token is not '(' - if it's '(', then await is being used as identifier (function call)
-      if (_inAsyncContext || nextToken?.type != TokenType.leftParen) {
-        // Also exclude other terminators where await should be an identifier
-        if (nextToken?.type == TokenType.semicolon ||
-            nextToken?.type == TokenType.comma ||
-            nextToken?.type == TokenType.rightBrace ||
-            nextToken?.type == TokenType.rightParen ||
-            nextToken?.type == TokenType.rightBracket ||
-            nextToken?.type == TokenType.colon ||
-            nextToken?.type == TokenType.eof) {
-          // Fall through to let _primary() handle as identifier
-        } else {
-          // Treat as unary operator (await expression)
-          _advance();
-          final awaitToken = _previous();
-          final argument = _unary(); // Recursive for chained awaits
-
-          return AwaitExpression(
-            argument: argument,
-            line: awaitToken.line,
-            column: awaitToken.column,
-          );
-        }
-      }
-      // Otherwise, fall through to let _primary() handle it as identifier
+      return AwaitExpression(
+        argument: argument,
+        line: awaitToken.line,
+        column: awaitToken.column,
+      );
     }
 
     // Handle yield and yield* - only if we are in a generator context
@@ -4787,6 +4777,12 @@ class JSParser {
         _check(TokenType.keywordAwait) ||
         _check(TokenType.keywordAsync)) {
       final nameToken = _advance();
+      if (_inAsyncContext && nameToken.lexeme == 'await') {
+        throw ParseError(
+          'await is not a valid binding identifier in async function context',
+          nameToken,
+        );
+      }
       id = IdentifierExpression(
         name: nameToken.lexeme,
         line: nameToken.line,
@@ -4809,8 +4805,10 @@ class JSParser {
     );
 
     // Set generator context and increment function depth for body parsing
+    final oldAsyncContext = _inAsyncContext;
     final oldGeneratorContext = _inGeneratorContext;
     final oldFunctionDepth = _functionDepth;
+    _inAsyncContext = false;
     _inGeneratorContext =
         isGenerator; // Always set to correct value for this function
     _functionDepth++;
@@ -4819,6 +4817,7 @@ class JSParser {
     final body = _blockStatement();
 
     // Restore context
+    _inAsyncContext = oldAsyncContext;
     _inGeneratorContext = oldGeneratorContext;
     _functionDepth = oldFunctionDepth;
 
@@ -4853,6 +4852,21 @@ class JSParser {
     IdentifierExpression? id;
     if (_check(TokenType.identifier)) {
       final nameToken = _advance();
+      id = IdentifierExpression(
+        name: nameToken.lexeme,
+        line: nameToken.line,
+        column: nameToken.column,
+      );
+    } else if (_check(TokenType.keywordYield) ||
+        _check(TokenType.keywordAwait) ||
+        _check(TokenType.keywordAsync)) {
+      final nameToken = _advance();
+      if (_inAsyncContext && nameToken.lexeme == 'await') {
+        throw ParseError(
+          'await is not a valid binding identifier in async function context',
+          nameToken,
+        );
+      }
       id = IdentifierExpression(
         name: nameToken.lexeme,
         line: nameToken.line,
@@ -4929,6 +4943,13 @@ class JSParser {
       throw ParseError('Expected function name', _peek());
     }
 
+    if (_inAsyncContext && nameToken.lexeme == 'await') {
+      throw ParseError(
+        'await is not a valid binding identifier in async function context',
+        nameToken,
+      );
+    }
+
     // Validate function name in strict mode
     if (_isInStrictMode()) {
       if (nameToken.lexeme == 'eval' || nameToken.lexeme == 'arguments') {
@@ -4960,8 +4981,10 @@ class JSParser {
     );
 
     // Set generator context and increment function depth for body parsing
+    final oldAsyncContext = _inAsyncContext;
     final oldGeneratorContext = _inGeneratorContext;
     final oldFunctionDepth = _functionDepth;
+    _inAsyncContext = false;
     _inGeneratorContext =
         isGenerator; // Always set to correct value for this function
     _functionDepth++;
@@ -4970,6 +4993,7 @@ class JSParser {
     final body = _blockStatement();
 
     // Restore context
+    _inAsyncContext = oldAsyncContext;
     _inGeneratorContext = oldGeneratorContext;
     _functionDepth = oldFunctionDepth;
 
@@ -5047,6 +5071,13 @@ class JSParser {
       nameToken = _advance();
     } else {
       throw ParseError('Expected function name', _peek());
+    }
+
+    if (_inAsyncContext && nameToken.lexeme == 'await') {
+      throw ParseError(
+        'await is not a valid binding identifier in async function context',
+        nameToken,
+      );
     }
 
     // Validate function name in strict mode

@@ -5861,6 +5861,9 @@ class JSPromise extends JSObject {
   JSValue? _value;
   JSValue? _reason;
 
+  // Flag: true when this promise wraps a non-Promise thenable (needs extra microtask tick)
+  bool isThenableWrapper = false;
+
   // Callbacks for then/catch
   final List<JSValue> _onFulfilledCallbacks = [];
   final List<JSValue> _onRejectedCallbacks = [];

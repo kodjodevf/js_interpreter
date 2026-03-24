@@ -82,7 +82,23 @@ class JSInterpreter {
   /// Evaluates a JavaScript code string asynchronously
   /// If the result is a JavaScript Promise, returns a Dart Future that resolves when the JS Promise resolves
   Future<JSValue> evalAsync(String code) async {
-    final result = eval(code);
+    // Parse with allowTopLevelAwait so that `await expr` works at the top level
+    final JSValue result;
+    try {
+      final program = JSParser.parseString(code, allowTopLevelAwait: true);
+      result = _evaluator.evaluate(program);
+    } catch (e) {
+      if (e is JSError) rethrow;
+      if (e.toString().contains('ParseError')) {
+        final message = e.toString().replaceFirst(
+          'ParseError at',
+          'Unexpected token at',
+        );
+        throw JSSyntaxError(message);
+      }
+      if (e is Exception) rethrow;
+      throw JSError('Evaluation error: $e');
+    }
 
     // Execute pending async tasks after evaluation
     _evaluator.runPendingAsyncTasks();

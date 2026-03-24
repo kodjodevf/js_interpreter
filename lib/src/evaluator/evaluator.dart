@@ -544,6 +544,12 @@ class AsyncTask {
   // Used to skip re-initialization of variables in the function body
   bool _isResumedExecution = false;
 
+  // Track completed ExpressionStatements in async function body for replay skip.
+  // Only ExpressionStatements are skipped to prevent duplicate side effects.
+  final Set<int> _completedExprStmtIndices = {};
+  // Track how many await results each completed ExpressionStatement consumed.
+  final Map<int, int> _exprStmtAwaitCounts = {};
+
   AsyncTask(this.id);
 
   /// Returns true if this task has been resumed after suspension (not first execution)
@@ -602,6 +608,7 @@ class AsyncTask {
     if (_state == AsyncTaskState.suspended) {
       _state = AsyncTaskState.running;
       _awaitedResults.add(AwaitedResult(error, isError: true));
+      _isResumedExecution = true;
     } else {
       // For global task failure
       _state = AsyncTaskState.failed;
@@ -618,6 +625,9 @@ class AsyncTask {
     }
     return null;
   }
+
+  /// Gets the number of awaited results already consumed in the current replay.
+  int get currentAwaitIndex => _currentAwaitIndex;
 
   /// Gets the continuation
   AsyncContinuation? get continuation => _continuation;
@@ -715,8 +725,16 @@ class AsyncScheduler {
           );
         }
 
-        // Enqueue the task to be processed by the event loop, but don't execute it immediately
-        _pendingTasks.add(task);
+        if (promise.isThenableWrapper) {
+          // Non-Promise thenables need an extra microtask tick before resumption
+          // to match the spec's PerformPromiseThen reaction scheduling.
+          enqueueMicrotask(() {
+            _pendingTasks.add(task);
+          });
+        } else {
+          // Enqueue the task to be processed by the event loop
+          _pendingTasks.add(task);
+        }
       }
     }
   }
@@ -6332,7 +6350,7 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       final sourceCode = await moduleLoader!(resolvedId);
 
       // Parser le code du module
-      final ast = JSParser.parseString(sourceCode);
+      final ast = JSParser.parseString(sourceCode, allowTopLevelAwait: true);
       module.ast = ast;
 
       // ES2022: Detecter si le module contient du top-level await
@@ -6960,16 +6978,19 @@ class JSEvaluator implements ASTVisitor<JSValue> {
     Environment varEnv,
     Environment lexEnv,
   ) {
+    final asyncTask = _executionStack.current.asyncTask;
+    final preserveExistingVarBindings =
+        asyncTask is AsyncTask && asyncTask.isResumedExecution;
+
     for (final stmt in statements) {
       if (stmt is VariableDeclaration && stmt.kind == 'var') {
         // Hoister les declarations var (seulement pour les identifiants simples)
         for (final decl in stmt.declarations) {
           if (decl.id is IdentifierPattern) {
-            varEnv.define(
-              (decl.id as IdentifierPattern).name,
-              JSValueFactory.undefined(),
-              BindingType.var_,
-            );
+            final name = (decl.id as IdentifierPattern).name;
+            if (!(preserveExistingVarBindings && varEnv.hasLocal(name))) {
+              varEnv.define(name, JSValueFactory.undefined(), BindingType.var_);
+            }
           }
           // Les patterns complexes (array/object) ne peuvent pas etre hoistes
         }
@@ -7016,11 +7037,14 @@ class JSEvaluator implements ASTVisitor<JSValue> {
           if (varDecl.kind == 'var') {
             for (final decl in varDecl.declarations) {
               if (decl.id is IdentifierPattern) {
-                varEnv.define(
-                  (decl.id as IdentifierPattern).name,
-                  JSValueFactory.undefined(),
-                  BindingType.var_,
-                );
+                final name = (decl.id as IdentifierPattern).name;
+                if (!(preserveExistingVarBindings && varEnv.hasLocal(name))) {
+                  varEnv.define(
+                    name,
+                    JSValueFactory.undefined(),
+                    BindingType.var_,
+                  );
+                }
               }
             }
           }
@@ -7042,11 +7066,14 @@ class JSEvaluator implements ASTVisitor<JSValue> {
           if (varDecl.kind == 'var') {
             for (final decl in varDecl.declarations) {
               if (decl.id is IdentifierPattern) {
-                varEnv.define(
-                  (decl.id as IdentifierPattern).name,
-                  JSValueFactory.undefined(),
-                  BindingType.var_,
-                );
+                final name = (decl.id as IdentifierPattern).name;
+                if (!(preserveExistingVarBindings && varEnv.hasLocal(name))) {
+                  varEnv.define(
+                    name,
+                    JSValueFactory.undefined(),
+                    BindingType.var_,
+                  );
+                }
               }
             }
           }
@@ -7124,6 +7151,18 @@ class JSEvaluator implements ASTVisitor<JSValue> {
     // Create nouveau scope pour le bloc
     final parentEnv = _currentEnvironment();
 
+    // Check if this is an async function body being replayed
+    final asyncTask = _currentContext().asyncTask;
+    AsyncContinuation? asyncContinuation;
+    bool isAsyncBody = false;
+    if (asyncTask is AsyncTask) {
+      asyncContinuation = asyncTask.continuation;
+      if (asyncContinuation != null &&
+          identical(node, asyncContinuation.node.body)) {
+        isAsyncBody = true;
+      }
+    }
+
     // Always create a new block environment for proper scoping
     final blockEnv = Environment.block(parentEnv);
 
@@ -7158,13 +7197,54 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         _hoistDeclarations(node.body);
       }
 
+      // ASYNC REPLAY: During async function body replay, skip completed
+      // ExpressionStatements to prevent duplicate side effects (e.g. extra
+      // array pushes to outer-scope arrays). This optimisation is ONLY safe
+      // when the body contains no VariableDeclarations — if the body has local
+      // declarations, skipping preceding ExpressionStatements would lose the
+      // side effects they produce on locally-declared variables (which are
+      // freshly re-created on each replay).
+      Set<int>? completedExprStmtIndices;
+      if (isAsyncBody && asyncTask!.isResumedExecution) {
+        // Check that the body has no variable declarations
+        final hasVarDecl = node.body.any((s) => s is VariableDeclaration);
+        if (!hasVarDecl) {
+          completedExprStmtIndices = asyncTask._completedExprStmtIndices;
+        }
+      }
+
       // Executer tous les statements sauf les FunctionDeclaration
       // (les fonctions sont deja hoistees)
       try {
+        int stmtIndex = 0;
         for (final stmt in node.body) {
           if (stmt is! FunctionDeclaration || !isFunctionBody) {
+            // Skip completed ExpressionStatements during async replay
+            // (only when body has no variable declarations)
+            if (completedExprStmtIndices != null &&
+                stmt is ExpressionStatement &&
+                stmt.expression is! AssignmentExpression &&
+                stmt.expression is! DestructuringAssignmentExpression &&
+                completedExprStmtIndices.contains(stmtIndex)) {
+              // Advance the await result index past consumed results
+              final awaitCount =
+                  asyncTask!._exprStmtAwaitCounts[stmtIndex] ?? 0;
+              asyncTask._currentAwaitIndex += awaitCount;
+              stmtIndex++;
+              continue;
+            }
+            final awaitIndexBefore = isAsyncBody
+                ? asyncTask!._currentAwaitIndex
+                : 0;
             lastValue = stmt.accept(this);
+            // Track completed ExpressionStatements for async replay
+            if (isAsyncBody && stmt is ExpressionStatement) {
+              asyncTask!._completedExprStmtIndices.add(stmtIndex);
+              asyncTask._exprStmtAwaitCounts[stmtIndex] =
+                  asyncTask._currentAwaitIndex - awaitIndexBefore;
+            }
           }
+          stmtIndex++;
         }
       } on FlowControlException catch (e) {
         // Attach the last value before the abrupt completion
@@ -7218,6 +7298,7 @@ class JSEvaluator implements ASTVisitor<JSValue> {
     final env = node.kind == 'var'
         ? _currentContext().variableEnvironment
         : _currentEnvironment();
+    final asyncTask = _executionStack.current.asyncTask;
 
     for (final decl in node.declarations) {
       // ES6: const declarations must have an initializer
@@ -7243,8 +7324,21 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         // ES6: var foo = function() {} => foo.name should be 'foo'
         final previousTarget = _targetBindingNameForFunction;
         _targetBindingNameForFunction = name;
-        // Evaluate the initializer
-        final value = decl.init?.accept(this) ?? JSValueFactory.undefined();
+
+        // During async replay before reaching the first already-resolved await,
+        // preserve existing var initializer values instead of recreating them.
+        final shouldReuseExistingVarValue =
+            asyncTask is AsyncTask &&
+            asyncTask.isResumedExecution &&
+            asyncTask.currentAwaitIndex == 0 &&
+            node.kind == 'var' &&
+            decl.init != null &&
+            decl.init is! AwaitExpression &&
+            env.has(name);
+
+        final value = shouldReuseExistingVarValue
+            ? env.get(name)
+            : decl.init?.accept(this) ?? JSValueFactory.undefined();
         _targetBindingNameForFunction = previousTarget;
 
         // ES6: Set name for anonymous class expressions assigned to variables
@@ -8671,8 +8765,36 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         // Ignore errors accessing .then
       }
 
-      // If thenable.then is not callable, return the object as-is
+      // If thenable.then is not callable, treat it like any other value.
       if (thenMethod == null || !(thenMethod is JSFunction)) {
+        if (asyncTask is AsyncTask) {
+          final resolvedPromise = JSPromise(
+            JSNativeFunction(
+              functionName: 'awaitResolvedObject',
+              nativeImpl: (args) {
+                final resolve = args[0] as JSNativeFunction;
+                resolve.call([value]);
+                return JSValueFactory.undefined();
+              },
+            ),
+          );
+          _asyncScheduler.suspendTask(asyncTask, resolvedPromise);
+          throw AsyncSuspensionException('Awaiting non-thenable object');
+        }
+
+        if (inModuleWithTLA) {
+          return JSPromise(
+            JSNativeFunction(
+              functionName: 'awaitResolvedModuleObject',
+              nativeImpl: (args) {
+                final resolve = args[0] as JSNativeFunction;
+                resolve.call([value]);
+                return JSValueFactory.undefined();
+              },
+            ),
+          );
+        }
+
         return value;
       }
 
@@ -8721,6 +8843,7 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
         // Create the wrapper Promise
         final wrappingPromise = JSPromise(executorFunc);
+        wrappingPromise.isThenableWrapper = true;
 
         // Suspend for the wrapping promise
         _asyncScheduler.suspendTask(asyncTask, wrappingPromise);
@@ -8764,6 +8887,34 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         return value;
       }
     } else {
+      if (asyncTask is AsyncTask) {
+        final resolvedPromise = JSPromise(
+          JSNativeFunction(
+            functionName: 'awaitResolvedValue',
+            nativeImpl: (args) {
+              final resolve = args[0] as JSNativeFunction;
+              resolve.call([value]);
+              return JSValueFactory.undefined();
+            },
+          ),
+        );
+        _asyncScheduler.suspendTask(asyncTask, resolvedPromise);
+        throw AsyncSuspensionException('Awaiting non-Promise value');
+      }
+
+      if (inModuleWithTLA) {
+        return JSPromise(
+          JSNativeFunction(
+            functionName: 'awaitResolvedModuleValue',
+            nativeImpl: (args) {
+              final resolve = args[0] as JSNativeFunction;
+              resolve.call([value]);
+              return JSValueFactory.undefined();
+            },
+          ),
+        );
+      }
+
       // Pas une Promise ni une thenable - retourner la valeur telle quelle
       return value;
     }
