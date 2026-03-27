@@ -462,12 +462,33 @@ class JSParser {
     if (expr is AssignmentExpression) {
       return _containsAwait(expr.right);
     }
-    // IdentifierExpression named 'await' is valid as a reference,
-    // but we catch actual AwaitExpression above
+    // IdentifierExpression named 'await' should also be caught —
+    // this happens when 'await' is used in async arrow parameter defaults
+    // before the async context was set
     if (expr is IdentifierExpression && expr.name == 'await') {
-      // This is referencing a variable named 'await', which should have been
-      // caught as a syntax error in async context during parsing
-      return false;
+      return true;
+    }
+    // Check arrow functions for 'await' as parameter names
+    if (expr is ArrowFunctionExpression) {
+      for (final param in expr.params) {
+        if (_paramContainsAwait(param)) return true;
+      }
+      if (expr.body is Expression) {
+        if (_containsAwait(expr.body as Expression)) return true;
+      }
+    }
+    return false;
+  }
+
+  /// Check if a parameter contains 'await' as a binding name
+  bool _paramContainsAwait(Parameter param) {
+    final nameOrPattern = param.nameOrPattern;
+    if (nameOrPattern is IdentifierExpression &&
+        nameOrPattern.name == 'await') {
+      return true;
+    }
+    if (param.defaultValue != null && param.defaultValue is Expression) {
+      if (_containsAwait(param.defaultValue!)) return true;
     }
     return false;
   }
@@ -2337,6 +2358,15 @@ class JSParser {
       final right = _assignment();
 
       if (expr is AwaitExpression) {
+        throw ParseError('Invalid left-hand side in assignment', operator);
+      }
+
+      // Function/class expressions are not valid assignment targets
+      if (expr is FunctionExpression ||
+          expr is AsyncFunctionExpression ||
+          expr is ArrowFunctionExpression ||
+          expr is AsyncArrowFunctionExpression ||
+          expr is ClassExpression) {
         throw ParseError('Invalid left-hand side in assignment', operator);
       }
 
@@ -4852,6 +4882,14 @@ class JSParser {
     IdentifierExpression? id;
     if (_check(TokenType.identifier)) {
       final nameToken = _advance();
+      // Validate binding identifier in strict mode
+      if (_isInStrictMode() &&
+          (nameToken.lexeme == 'eval' || nameToken.lexeme == 'arguments')) {
+        throw ParseError(
+          'The identifier \'${nameToken.lexeme}\' cannot be used as a function name in strict mode',
+          nameToken,
+        );
+      }
       id = IdentifierExpression(
         name: nameToken.lexeme,
         line: nameToken.line,
@@ -4912,6 +4950,37 @@ class JSParser {
       asyncToken.line,
       asyncToken.column,
     );
+
+    // Validate that body doesn't contain super() calls outside class context
+    if (!_inClassContext && _containsSuperCall(body)) {
+      throw ParseError(
+        'super() calls are not allowed outside of class constructors',
+        asyncToken,
+      );
+    }
+
+    // Validate that body doesn't contain super.property access outside class context
+    if (!_inClassContext && _containsSuperProperty(body)) {
+      throw ParseError(
+        'super property access is not allowed outside of class methods',
+        asyncToken,
+      );
+    }
+
+    // Validate that parameter names don't conflict with lexically declared names in body
+    final paramNames = <String>{};
+    for (final param in params) {
+      paramNames.addAll(_getParameterBoundNames(param));
+    }
+    final bodyLexicalNames = _getLexicallyDeclaredNames(body);
+    for (final name in paramNames) {
+      if (bodyLexicalNames.contains(name)) {
+        throw ParseError(
+          'Identifier \'$name\' has already been declared',
+          asyncToken,
+        );
+      }
+    }
 
     return AsyncFunctionExpression(
       id: id,
@@ -5397,6 +5466,11 @@ class JSParser {
     } else {
       // Handle (param1, param2) => expr
       parameters = _extractParametersFromExpression(params);
+    }
+
+    // If we're inside an async context, 'await' is not allowed in arrow param defaults
+    if (_inAsyncContext) {
+      _validateNoAwaitInDefaults(parameters, token.line, token.column);
     }
 
     // Increment function depth for body parsing

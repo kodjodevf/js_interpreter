@@ -190,6 +190,8 @@ class Test262Runner {
         'Total time: ${(stopwatch.elapsedMilliseconds / 1000).toStringAsFixed(3)}s',
       );
     }
+    // Force exit to avoid hanging on pending async operations from timed-out tests
+    exit(testFailed > 0 ? 1 : 0);
   }
 
   void _recordResult(
@@ -705,6 +707,7 @@ void main(List<String> args) async {
   }
 
   await runner.run();
+  exit(0);
 }
 
 // example: dart tool/run_test262.dart -v test262/test/language/statements/if/ test262/harness/

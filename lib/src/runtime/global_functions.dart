@@ -140,6 +140,10 @@ class GlobalFunctions {
         } on JSException {
           // Re-throw JavaScript exceptions (including SyntaxErrors from var redeclaration)
           rethrow;
+        } on JSError {
+          // Re-throw JavaScript errors (JSTypeError, JSReferenceError, etc.)
+          // These will be caught by visitTryStatement and converted to proper JS objects
+          rethrow;
         } on ParseError catch (e) {
           // Convert parse errors to JavaScript SyntaxError exceptions
           // Get the evaluator and use its throwJSSyntaxError method

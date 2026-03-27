@@ -12,6 +12,7 @@ enum BindingType {
   const_, // const declarations (block-scoped, immutable)
   function, // function declarations (hoisted)
   parameter, // function parameters
+  functionExprName, // named function expression binding (immutable, silent fail in non-strict)
 }
 
 /// Exceptions for environment errors
@@ -198,6 +199,13 @@ class Environment {
       BindingType.const_ => Binding.constBinding(name, value),
       BindingType.function => Binding.functionBinding(name, value),
       BindingType.parameter => Binding.parameterBinding(name, value),
+      BindingType.functionExprName => Binding(
+        name: name,
+        type: BindingType.functionExprName,
+        value: value,
+        mutable: false,
+        initialized: true,
+      ),
     };
 
     _bindings[name] = binding;
@@ -260,7 +268,15 @@ class Environment {
   void set(String name, JSValue value, {bool strictMode = false}) {
     // Search in this environment
     if (_bindings.containsKey(name)) {
-      _bindings[name]!.setValue(value);
+      final binding = _bindings[name]!;
+      // Named function expression bindings: silent fail in non-strict, TypeError in strict
+      if (binding.type == BindingType.functionExprName) {
+        if (strictMode) {
+          throw JSTypeError('Assignment to constant variable: $name');
+        }
+        return; // silently ignore in non-strict mode
+      }
+      binding.setValue(value);
       return;
     }
 

@@ -8315,6 +8315,14 @@ class JSEvaluator implements ASTVisitor<JSValue> {
           if (task.state == AsyncTaskState.running) {
             _asyncScheduler.runPendingTasks(this);
           }
+        } else if (e is JSError) {
+          // Dart-side JS error - convert to proper JS error object
+          final errorValue = JSErrorObjectFactory.fromDartError(e);
+          task.fail(errorValue);
+          continuation.reject.call([errorValue]);
+          if (task.state == AsyncTaskState.running) {
+            _asyncScheduler.runPendingTasks(this);
+          }
         } else {
           // Erreur inattendue
           final errorValue = e is JSValue
@@ -8353,9 +8361,10 @@ class JSEvaluator implements ASTVisitor<JSValue> {
     List<JSValue> args,
     Environment closureEnv,
     JSNativeFunction resolve,
-    JSNativeFunction reject, [
+    JSNativeFunction reject, {
     JSValue? thisBinding,
-  ]) {
+    bool strictMode = false,
+  }) {
     try {
       // Create nouvel environnement pour l'execution de la fonction
       final functionEnv = Environment(parent: closureEnv);
@@ -8533,13 +8542,15 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
       // Create contexte d'execution pour la fonction async
       // Compute effective this binding (undefined/null -> global in non-strict mode)
+      final isStrictFunction = strictMode || _detectStrictMode(node.body.body);
       final JSValue effectiveThis;
       if (thisBinding == null ||
           thisBinding.isUndefined ||
           thisBinding.isNull) {
-        // No thisBinding provided or explicitly undefined/null
-        // In non-strict mode (async functions are non-strict), use global object
-        effectiveThis = _globalThisBinding;
+        // In strict mode, this stays undefined; in non-strict, use global
+        effectiveThis = isStrictFunction
+            ? JSValueFactory.undefined()
+            : _globalThisBinding;
       } else {
         effectiveThis = thisBinding;
       }
@@ -8548,6 +8559,7 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         lexicalEnvironment: functionEnv,
         variableEnvironment: functionEnv,
         thisBinding: effectiveThis,
+        strictMode: isStrictFunction,
         function: null,
         arguments: args,
         debugName: 'AsyncFunction ${node.id?.name ?? 'anonymous'}',
@@ -8559,7 +8571,11 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         _hoistDeclarations(node.body.body);
 
         // Executer le corps de la fonction async
-        node.body.accept(this);
+        final result = node.body.accept(this);
+
+        // La fonction s'est terminee normalement (pas de return explicite)
+        task.complete(result);
+        resolve.call([JSValueFactory.undefined()]);
       } catch (e) {
         if (e is FlowControlException && e.type == ExceptionType.return_) {
           // Return statement - la fonction se termine avec la valeur de retour
@@ -8575,6 +8591,14 @@ class JSEvaluator implements ASTVisitor<JSValue> {
           task.fail(errorValue);
           reject.call([errorValue]);
           // Only run pending tasks if task was suspended and is now running
+          if (task.state == AsyncTaskState.running) {
+            _asyncScheduler.runPendingTasks(this);
+          }
+        } else if (e is JSError) {
+          // Dart-side JS error (e.g. TypeError from immutable binding) - convert to proper JS error object
+          final errorValue = JSErrorObjectFactory.fromDartError(e);
+          task.fail(errorValue);
+          reject.call([errorValue]);
           if (task.state == AsyncTaskState.running) {
             _asyncScheduler.runPendingTasks(this);
           }
@@ -8614,6 +8638,14 @@ class JSEvaluator implements ASTVisitor<JSValue> {
 
     // Createe fonction async anonyme qui retourne une Promise
     final currentEnv = _currentContext().lexicalEnvironment;
+    final currentStrictMode = _currentContext().strictMode;
+
+    // For named function expressions, create an intermediate environment
+    // where the function name will be bound as an immutable binding
+    Environment closureEnv = currentEnv;
+    if (node.id != null) {
+      closureEnv = Environment(parent: currentEnv);
+    }
 
     // Calculate function length (number of params until first default or rest)
     int functionLength = 0;
@@ -8629,7 +8661,7 @@ class JSEvaluator implements ASTVisitor<JSValue> {
     if (node.isGenerator) {
       // Async generator expression: returns an async generator object
       functionValue = JSNativeFunction(
-        functionName: node.id?.name ?? 'anonymous',
+        functionName: node.id?.name ?? '',
         expectedArgs: functionLength,
         nativeImpl: (args) {
           // Return an async generator
@@ -8646,13 +8678,13 @@ class JSEvaluator implements ASTVisitor<JSValue> {
               isGenerator: true,
             ),
             args,
-            currentEnv,
+            closureEnv,
           );
         },
       );
     } else {
       final asyncFunction = JSNativeFunction(
-        functionName: node.id?.name ?? 'anonymous',
+        functionName: node.id?.name ?? '',
         expectedArgs: functionLength,
         isAsync: true, // Mark as async function
         nativeImpl: (args) {
@@ -8679,10 +8711,11 @@ class JSEvaluator implements ASTVisitor<JSValue> {
                     asyncTask,
                     node,
                     args,
-                    currentEnv,
+                    closureEnv,
                     resolve,
                     reject,
-                    _asyncFunctionThisBinding,
+                    thisBinding: _asyncFunctionThisBinding,
+                    strictMode: currentStrictMode,
                   );
                 });
 
@@ -8696,6 +8729,15 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       );
 
       functionValue = asyncFunction;
+    }
+
+    // Bind the function name in the intermediate environment
+    if (node.id != null) {
+      closureEnv.define(
+        node.id!.name,
+        functionValue,
+        BindingType.functionExprName,
+      );
     }
 
     return functionValue;
@@ -12380,7 +12422,11 @@ class JSEvaluator implements ASTVisitor<JSValue> {
       // If named function expression, bind it in an intermediate environment
       if (node.id != null) {
         final closureEnv = Environment(parent: currentEnv);
-        closureEnv.define(node.id!.name, generatorFunction, BindingType.const_);
+        closureEnv.define(
+          node.id!.name,
+          generatorFunction,
+          BindingType.functionExprName,
+        );
         // Update the function's closure environment
         // Note: JSNativeFunction doesn't have closure, but that's okay for generators
       }
@@ -12408,7 +12454,7 @@ class JSEvaluator implements ASTVisitor<JSValue> {
         inferredName: node.id!.name,
       );
       // Puis lier son nom dans l'environnement intermediaire
-      closureEnv.define(node.id!.name, function, BindingType.const_);
+      closureEnv.define(node.id!.name, function, BindingType.functionExprName);
       return function;
     } else {
       // Fonction anonyme
