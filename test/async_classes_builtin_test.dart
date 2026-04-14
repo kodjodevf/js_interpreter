@@ -93,5 +93,32 @@ void main() {
 
       expect(() => interpreter.eval(code), isNotNull);
     });
+
+    test('async generator yield* delegation', () async {
+      final result = await interpreter.evalAsync('''
+        async function* inner() {
+          yield 1;
+          yield 2;
+        }
+
+        async function* outer() {
+          yield 0;
+          yield* inner();
+          yield 3;
+        }
+
+        async function collect() {
+          const values = [];
+          for await (const value of outer()) {
+            values.push(value);
+          }
+          return values.join(',');
+        }
+
+        collect();
+      ''');
+
+      expect(result.toString(), equals('0,1,2,3'));
+    });
   });
 }

@@ -1679,7 +1679,7 @@ class _SegmenterInstance extends JSObject {
 
     // Make it iterable
     segments.setProperty(
-      JSSymbol.iterator.toString(),
+      JSSymbol.iterator.propertyKey,
       JSNativeFunction(
         functionName: '[Symbol.iterator]',
         nativeImpl: (args) {

@@ -8,7 +8,7 @@ abstract class JSIterator extends JSObject {
   JSIterator() : super() {
     // Iterators are themselves iterable (return this for Symbol.iterator)
     setProperty(
-      JSSymbol.iterator.toString(),
+      JSSymbol.iterator.propertyKey,
       JSNativeFunction(
         functionName: 'Symbol.iterator',
         nativeImpl: (args) => this,
@@ -253,20 +253,17 @@ extension JSIterableExtension on JSObject {
   /// Add Symbol.iterator to an object
   void makeIterable(JSIterator Function() iteratorFactory) {
     setProperty(
-      JSSymbol.iterator.toString(),
-      JSValueFactory.function('Symbol.iterator', (
-        context,
-        thisBinding,
-        arguments,
-      ) {
-        return iteratorFactory();
-      }),
+      JSSymbol.iterator.propertyKey,
+      JSNativeFunction(
+        functionName: 'Symbol.iterator',
+        nativeImpl: (args) => iteratorFactory(),
+      ),
     );
   }
 
   /// Verifies if the object is iterable
   bool get isIterable {
-    return hasProperty(JSSymbol.iterator.toString());
+    return hasProperty(JSSymbol.iterator.propertyKey);
   }
 
   /// Gets the iterator for this object
@@ -282,7 +279,7 @@ extension JSIterableExtension on JSObject {
     }
 
     if (this is JSMap) {
-      return JSMapIterator(this as JSMap, IteratorKind.valueKind);
+      return JSMapIterator(this as JSMap, IteratorKind.entries);
     }
 
     if (this is JSSet) {
@@ -309,9 +306,9 @@ extension JSStringIterableExtension on JSString {
 extension JSMapIterableExtension on JSMap {
   /// Initializes Symbol.iterator for maps
   void initializeIterator() {
-    // [Symbol.iterator]() for values by default
+    // [Symbol.iterator]() for entries by default
     setProperty(
-      JSSymbol.iterator.toString(),
+      JSSymbol.iterator.propertyKey,
       JSNativeFunction(
         functionName: 'Symbol.iterator',
         nativeImpl: (args) {
@@ -359,7 +356,7 @@ extension JSSetIterableExtension on JSSet {
   void initializeIterator() {
     // [Symbol.iterator]() for values by default
     setProperty(
-      JSSymbol.iterator.toString(),
+      JSSymbol.iterator.propertyKey,
       JSNativeFunction(
         functionName: 'Symbol.iterator',
         nativeImpl: (args) {
@@ -531,7 +528,7 @@ class IteratorUtils {
 
     if (!value.isObject) return false;
     final obj = value as JSObject;
-    return obj.hasProperty(JSSymbol.iterator.toString());
+    return obj.hasProperty(JSSymbol.iterator.propertyKey);
   }
 
   /// Gets the iterator for a value

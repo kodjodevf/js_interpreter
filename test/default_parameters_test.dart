@@ -64,5 +64,55 @@ void main() {
       final result2 = interpreter.eval('test()');
       expect(result2.toString(), equals('default'));
     });
+
+    test('direct eval in default parameters keeps a separate scope', () {
+      final result = interpreter.eval('''
+        (() => {
+          var c = "global";
+          var f;
+
+          f = function f(a = eval("var c = 1"), b = c, probe = () => c) {
+            return [b, probe(), c];
+          };
+          var first = f().toString();
+
+          f = function f(a = eval("f")) {
+            return a === f;
+          };
+          return [first, f(), c].toString();
+        })()
+      ''');
+
+      expect(result.toString(), equals('1,1,1,true,global'));
+    });
+
+    test('arrow parameter scope keeps eval vars separate from body vars', () {
+      final result = interpreter.eval('''
+        (() => {
+          var c = "global";
+          var f = (a = eval("var c = 1"), probe = () => c) => {
+            var c = 2;
+            return [c, probe()];
+          };
+          return [f().toString(), c].toString();
+        })()
+      ''');
+
+      expect(result.toString(), equals('2,1,global'));
+    });
+
+    test('nested default eval sees outer eval-created parameter bindings', () {
+      final result = interpreter.eval('''
+        (() => {
+          var c = "global";
+          var f = function(a = eval("var c = 1"), probe = (d = eval("c")) => d) {
+            return [probe(), c];
+          };
+          return [f().toString(), c].toString();
+        })()
+      ''');
+
+      expect(result.toString(), equals('1,1,global'));
+    });
   });
 }

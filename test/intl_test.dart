@@ -3,9 +3,14 @@ import 'package:js_interpreter/js_interpreter.dart';
 
 void main() {
   group('Intl API Tests', () {
+    late JSInterpreter interpreter;
+
+    setUp(() {
+      interpreter = JSInterpreter();
+    });
     group('Intl.NumberFormat', () {
       test('should format decimal numbers', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.NumberFormat('en-US');
           formatter.format(1234567.89);
         ''');
@@ -14,7 +19,7 @@ void main() {
       });
 
       test('should format currency', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.NumberFormat('en-US', {
             style: 'currency',
             currency: 'USD'
@@ -25,7 +30,7 @@ void main() {
       });
 
       test('should format percentages', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.NumberFormat('en-US', {
             style: 'percent'
           });
@@ -36,7 +41,7 @@ void main() {
       });
 
       test('should have resolvedOptions method', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.NumberFormat('en-US');
           const options = formatter.resolvedOptions();
           options.locale;
@@ -45,7 +50,7 @@ void main() {
       });
 
       test('should format with minimum and maximum fraction digits', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.NumberFormat('en-US', {
             minimumFractionDigits: 2,
             maximumFractionDigits: 4
@@ -56,7 +61,7 @@ void main() {
       });
 
       test('should format with minimum integer digits', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.NumberFormat('en-US', {
             minimumIntegerDigits: 4
           });
@@ -67,7 +72,7 @@ void main() {
       });
 
       test('should format negative numbers', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.NumberFormat('en-US');
           formatter.format(-9876.54);
         ''');
@@ -76,7 +81,7 @@ void main() {
       });
 
       test('should format zero correctly', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.NumberFormat('en-US', {
             minimumFractionDigits: 2
           });
@@ -87,7 +92,7 @@ void main() {
       });
 
       test('should format very large numbers', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.NumberFormat('en-US');
           formatter.format(999999999999);
         ''');
@@ -95,7 +100,7 @@ void main() {
       });
 
       test('should format currency with different currencies', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const eurFormatter = new Intl.NumberFormat('de-DE', {
             style: 'currency',
             currency: 'EUR'
@@ -106,7 +111,7 @@ void main() {
       });
 
       test('should use formatToParts', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.NumberFormat('en-US', {
             style: 'currency',
             currency: 'USD'
@@ -118,7 +123,7 @@ void main() {
       });
 
       test('should format with useGrouping false', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.NumberFormat('en-US', {
             useGrouping: false
           });
@@ -129,7 +134,7 @@ void main() {
       });
 
       test('should format scientific notation', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.NumberFormat('en-US', {
             notation: 'scientific'
           });
@@ -140,7 +145,7 @@ void main() {
       });
 
       test('should format compact notation', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.NumberFormat('en-US', {
             notation: 'compact'
           });
@@ -152,7 +157,7 @@ void main() {
 
     group('Intl.DateTimeFormat', () {
       test('should format dates', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const date = new Date(2024, 0, 15);
           const formatter = new Intl.DateTimeFormat('en-US');
           formatter.format(date);
@@ -162,7 +167,7 @@ void main() {
       });
 
       test('should format with dateStyle', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const date = new Date(2024, 0, 15);
           const formatter = new Intl.DateTimeFormat('en-US', {
             dateStyle: 'long'
@@ -173,7 +178,7 @@ void main() {
       });
 
       test('should have resolvedOptions method', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const formatter = new Intl.DateTimeFormat('en-US');
           const options = formatter.resolvedOptions();
           options.locale;
@@ -182,7 +187,7 @@ void main() {
       });
 
       test('should format with timeStyle', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const date = new Date(2024, 0, 15, 14, 30, 45);
           const formatter = new Intl.DateTimeFormat('en-US', {
             timeStyle: 'medium'
@@ -193,7 +198,7 @@ void main() {
       });
 
       test('should format with both dateStyle and timeStyle', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const date = new Date(2024, 5, 20, 9, 15, 0);
           const formatter = new Intl.DateTimeFormat('en-US', {
             dateStyle: 'short',
@@ -205,7 +210,7 @@ void main() {
       });
 
       test('should format with specific components', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const date = new Date(2024, 11, 25);
           const formatter = new Intl.DateTimeFormat('en-US', {
             weekday: 'long',
@@ -220,7 +225,7 @@ void main() {
       });
 
       test('should format weekday only', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const date = new Date(2024, 0, 1); // Monday
           const formatter = new Intl.DateTimeFormat('en-US', {
             weekday: 'long'
@@ -231,7 +236,7 @@ void main() {
       });
 
       test('should format time with hour12 option', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const date = new Date(2024, 0, 15, 14, 30);
           const formatter = new Intl.DateTimeFormat('en-US', {
             hour: 'numeric',
@@ -247,7 +252,7 @@ void main() {
       });
 
       test('should format time with 24-hour format', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const date = new Date(2024, 0, 15, 14, 30);
           const formatter = new Intl.DateTimeFormat('en-US', {
             hour: '2-digit',
@@ -261,7 +266,7 @@ void main() {
       });
 
       test('should format with different locales', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const date = new Date(2024, 2, 15);
           const formatter = new Intl.DateTimeFormat('en-US', {
             month: 'long'
@@ -272,7 +277,7 @@ void main() {
       });
 
       test('should use formatToParts', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const date = new Date(2024, 0, 15);
           const formatter = new Intl.DateTimeFormat('en-US');
           const parts = formatter.formatToParts(date);
@@ -282,7 +287,7 @@ void main() {
       });
 
       test('should format timestamps', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const timestamp = 1705334400000; // Jan 15, 2024
           const formatter = new Intl.DateTimeFormat('en-US');
           formatter.format(timestamp);
@@ -291,7 +296,7 @@ void main() {
       });
 
       test('should format era when specified', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const date = new Date(2024, 0, 15);
           const formatter = new Intl.DateTimeFormat('en-US', {
             era: 'long',
@@ -308,7 +313,7 @@ void main() {
 
     group('Intl.Collator', () {
       test('should compare strings', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const collator = new Intl.Collator('en-US');
           collator.compare('a', 'b');
         ''');
@@ -316,7 +321,7 @@ void main() {
       });
 
       test('should compare equal strings', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const collator = new Intl.Collator('en-US');
           collator.compare('hello', 'hello');
         ''');
@@ -324,7 +329,7 @@ void main() {
       });
 
       test('should handle numeric sorting', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const collator = new Intl.Collator('en-US', { numeric: true });
           const arr = ['2', '10', '1'];
           arr.sort((a, b) => collator.compare(a, b));
@@ -334,7 +339,7 @@ void main() {
       });
 
       test('should compare with case sensitivity', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const collator = new Intl.Collator('en-US', { sensitivity: 'case' });
           collator.compare('A', 'a') !== 0;
         ''');
@@ -342,7 +347,7 @@ void main() {
       });
 
       test('should compare case insensitively with base sensitivity', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const collator = new Intl.Collator('en-US', { sensitivity: 'base' });
           collator.compare('A', 'a');
         ''');
@@ -350,7 +355,7 @@ void main() {
       });
 
       test('should sort array of strings', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const collator = new Intl.Collator('en-US');
           const fruits = ['banana', 'apple', 'Cherry', 'date'];
           fruits.sort(collator.compare.bind(collator));
@@ -360,7 +365,7 @@ void main() {
       });
 
       test('should handle accent sensitivity', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const collator = new Intl.Collator('en-US', { sensitivity: 'accent' });
           collator.compare('e', 'é') !== 0;
         ''');
@@ -368,7 +373,7 @@ void main() {
       });
 
       test('should sort with ignorePunctuation', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const collator = new Intl.Collator('en-US', { ignorePunctuation: true });
           const cmp = collator.compare("can't", 'cant');
           // ignorePunctuation may not be fully supported
@@ -378,7 +383,7 @@ void main() {
       });
 
       test('should handle reverse order', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const collator = new Intl.Collator('en-US');
           const arr = ['c', 'a', 'b'];
           arr.sort((a, b) => -collator.compare(a, b));
@@ -388,7 +393,7 @@ void main() {
       });
 
       test('should have resolvedOptions', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const collator = new Intl.Collator('en-US', { numeric: true });
           const options = collator.resolvedOptions();
           options.numeric;
@@ -399,7 +404,7 @@ void main() {
 
     group('Intl.PluralRules', () {
       test('should return plural category', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rules = new Intl.PluralRules('en-US');
           rules.select(1);
         ''');
@@ -407,7 +412,7 @@ void main() {
       });
 
       test('should return other for multiple', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rules = new Intl.PluralRules('en-US');
           rules.select(5);
         ''');
@@ -415,7 +420,7 @@ void main() {
       });
 
       test('should handle zero', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rules = new Intl.PluralRules('en-US');
           rules.select(0);
         ''');
@@ -424,7 +429,7 @@ void main() {
       });
 
       test('should handle ordinal type', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rules = new Intl.PluralRules('en-US', { type: 'ordinal' });
           rules.select(1);
         ''');
@@ -432,7 +437,7 @@ void main() {
       });
 
       test('should handle ordinal 2nd', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rules = new Intl.PluralRules('en-US', { type: 'ordinal' });
           rules.select(2);
         ''');
@@ -440,7 +445,7 @@ void main() {
       });
 
       test('should handle ordinal 3rd', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rules = new Intl.PluralRules('en-US', { type: 'ordinal' });
           rules.select(3);
         ''');
@@ -448,7 +453,7 @@ void main() {
       });
 
       test('should handle decimal numbers', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rules = new Intl.PluralRules('en-US');
           rules.select(1.5);
         ''');
@@ -456,7 +461,7 @@ void main() {
       });
 
       test('should handle negative numbers', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rules = new Intl.PluralRules('en-US');
           rules.select(-1);
         ''');
@@ -464,7 +469,7 @@ void main() {
       });
 
       test('should have resolvedOptions', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rules = new Intl.PluralRules('en-US', { type: 'ordinal' });
           const options = rules.resolvedOptions();
           options.type;
@@ -473,7 +478,7 @@ void main() {
       });
 
       test('should handle plural categories for different numbers', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rules = new Intl.PluralRules('en-US');
           const results = [0, 1, 2, 5, 10, 21].map(n => rules.select(n));
           results.join(',');
@@ -485,7 +490,7 @@ void main() {
 
     group('Intl.RelativeTimeFormat', () {
       test('should format relative time in days', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US', { style: 'long' });
           rtf.format(-1, 'day');
         ''');
@@ -493,7 +498,7 @@ void main() {
       });
 
       test('should format relative time in future', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US', { style: 'long' });
           rtf.format(2, 'day');
         ''');
@@ -502,7 +507,7 @@ void main() {
       });
 
       test('should format months', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US');
           rtf.format(-3, 'month');
         ''');
@@ -511,7 +516,7 @@ void main() {
       });
 
       test('should format years in the past', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US', { style: 'long' });
           rtf.format(-1, 'year');
         ''');
@@ -522,7 +527,7 @@ void main() {
       });
 
       test('should format years in the future', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US', { style: 'long' });
           rtf.format(5, 'year');
         ''');
@@ -531,7 +536,7 @@ void main() {
       });
 
       test('should format hours', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US');
           rtf.format(-2, 'hour');
         ''');
@@ -540,7 +545,7 @@ void main() {
       });
 
       test('should format minutes', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US');
           rtf.format(30, 'minute');
         ''');
@@ -549,7 +554,7 @@ void main() {
       });
 
       test('should format seconds', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US');
           rtf.format(-45, 'second');
         ''');
@@ -558,7 +563,7 @@ void main() {
       });
 
       test('should format weeks', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US');
           rtf.format(2, 'week');
         ''');
@@ -567,7 +572,7 @@ void main() {
       });
 
       test('should use short style', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US', { style: 'short' });
           rtf.format(-1, 'day');
         ''');
@@ -575,7 +580,7 @@ void main() {
       });
 
       test('should use narrow style', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US', { style: 'narrow' });
           rtf.format(1, 'day');
         ''');
@@ -583,7 +588,7 @@ void main() {
       });
 
       test('should use formatToParts', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US');
           const parts = rtf.formatToParts(-1, 'day');
           parts.length > 0;
@@ -592,7 +597,7 @@ void main() {
       });
 
       test('should have resolvedOptions', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US', { style: 'short' });
           const options = rtf.resolvedOptions();
           options.style;
@@ -601,7 +606,7 @@ void main() {
       });
 
       test('should handle numeric always', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US', { numeric: 'always' });
           rtf.format(-1, 'day');
         ''');
@@ -609,7 +614,7 @@ void main() {
       });
 
       test('should handle quarters', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US');
           rtf.format(-2, 'quarter');
         ''');
@@ -620,7 +625,7 @@ void main() {
 
     group('Intl.ListFormat', () {
       test('should format conjunction list', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US', { type: 'conjunction' });
           lf.format(['apple', 'banana', 'cherry']);
         ''');
@@ -631,7 +636,7 @@ void main() {
       });
 
       test('should format disjunction list', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US', { type: 'disjunction' });
           lf.format(['apple', 'banana', 'cherry']);
         ''');
@@ -639,7 +644,7 @@ void main() {
       });
 
       test('should format two items', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US');
           lf.format(['apple', 'banana']);
         ''');
@@ -648,7 +653,7 @@ void main() {
       });
 
       test('should format single item', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US');
           lf.format(['apple']);
         ''');
@@ -656,7 +661,7 @@ void main() {
       });
 
       test('should format empty list', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US');
           lf.format([]);
         ''');
@@ -664,7 +669,7 @@ void main() {
       });
 
       test('should format with unit type', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US', { type: 'unit' });
           lf.format(['5 feet', '3 inches']);
         ''');
@@ -673,7 +678,7 @@ void main() {
       });
 
       test('should format with long style', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US', { style: 'long', type: 'conjunction' });
           lf.format(['one', 'two', 'three']);
         ''');
@@ -681,7 +686,7 @@ void main() {
       });
 
       test('should format with short style', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US', { style: 'short', type: 'conjunction' });
           lf.format(['a', 'b', 'c']);
         ''');
@@ -689,7 +694,7 @@ void main() {
       });
 
       test('should format with narrow style', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US', { style: 'narrow', type: 'unit' });
           lf.format(['1m', '2s']);
         ''');
@@ -697,7 +702,7 @@ void main() {
       });
 
       test('should use formatToParts', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US');
           const parts = lf.formatToParts(['a', 'b', 'c']);
           parts.length > 0;
@@ -706,7 +711,7 @@ void main() {
       });
 
       test('should have resolvedOptions', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US', { type: 'disjunction' });
           const options = lf.resolvedOptions();
           options.type;
@@ -715,7 +720,7 @@ void main() {
       });
 
       test('should format four items', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US', { type: 'conjunction' });
           lf.format(['a', 'b', 'c', 'd']);
         ''');
@@ -725,7 +730,7 @@ void main() {
       });
 
       test('should handle numbers converted to strings', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US');
           lf.format([1, 2, 3].map(String));
         ''');
@@ -737,7 +742,7 @@ void main() {
 
     group('Intl.Segmenter', () {
       test('should segment by grapheme', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const segmenter = new Intl.Segmenter('en-US', { granularity: 'grapheme' });
           const segments = segmenter.segment('hello');
           let count = 0;
@@ -750,7 +755,7 @@ void main() {
       });
 
       test('should segment by word', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const segmenter = new Intl.Segmenter('en-US', { granularity: 'word' });
           const segments = segmenter.segment('hello world');
           let words = [];
@@ -765,7 +770,7 @@ void main() {
       });
 
       test('should segment by sentence', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const segmenter = new Intl.Segmenter('en-US', { granularity: 'sentence' });
           const text = 'Hello world. How are you? I am fine.';
           const segments = segmenter.segment(text);
@@ -779,7 +784,7 @@ void main() {
       });
 
       test('should provide segment property', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const segmenter = new Intl.Segmenter('en-US', { granularity: 'word' });
           const segments = segmenter.segment('hello');
           let firstSegment = '';
@@ -793,7 +798,7 @@ void main() {
       });
 
       test('should provide index property', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const segmenter = new Intl.Segmenter('en-US', { granularity: 'grapheme' });
           const segments = segmenter.segment('abc');
           let indices = [];
@@ -806,7 +811,7 @@ void main() {
       });
 
       test('should segment emoji', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const segmenter = new Intl.Segmenter('en-US', { granularity: 'grapheme' });
           const segments = segmenter.segment('👨‍👩‍👧‍👦');
           let count = 0;
@@ -819,7 +824,7 @@ void main() {
       });
 
       test('should segment empty string', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const segmenter = new Intl.Segmenter('en-US', { granularity: 'word' });
           const segments = segmenter.segment('');
           let count = 0;
@@ -832,7 +837,7 @@ void main() {
       });
 
       test('should segment punctuation separately', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const segmenter = new Intl.Segmenter('en-US', { granularity: 'word' });
           const segments = segmenter.segment('hello, world!');
           let allSegments = [];
@@ -845,7 +850,7 @@ void main() {
       });
 
       test('should have resolvedOptions', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const segmenter = new Intl.Segmenter('en-US', { granularity: 'sentence' });
           const options = segmenter.resolvedOptions();
           options.granularity;
@@ -854,7 +859,7 @@ void main() {
       });
 
       test('should segment with containing method', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const segmenter = new Intl.Segmenter('en-US', { granularity: 'word' });
           const segments = segmenter.segment('hello world');
           const atZero = segments.containing(0);
@@ -864,7 +869,7 @@ void main() {
       });
 
       test('should segment multiline text', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const segmenter = new Intl.Segmenter('en-US', { granularity: 'sentence' });
           const text = 'First sentence.\\nSecond sentence.';
           const segments = segmenter.segment(text);
@@ -880,7 +885,7 @@ void main() {
 
     group('Intl Static Methods', () {
       test('should have getCanonicalLocales', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const locales = Intl.getCanonicalLocales(['EN-us', 'FR']);
           locales.join(',');
         ''');
@@ -888,7 +893,7 @@ void main() {
       });
 
       test('should have supportedValuesOf for currency', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const currencies = Intl.supportedValuesOf('currency');
           currencies.includes('USD');
         ''');
@@ -896,7 +901,7 @@ void main() {
       });
 
       test('should have supportedValuesOf for calendar', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const calendars = Intl.supportedValuesOf('calendar');
           calendars.includes('gregory');
         ''');
@@ -904,7 +909,7 @@ void main() {
       });
 
       test('should have supportedValuesOf for collation', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const collations = Intl.supportedValuesOf('collation');
           Array.isArray(collations);
         ''');
@@ -912,7 +917,7 @@ void main() {
       });
 
       test('should have supportedValuesOf for numberingSystem', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const systems = Intl.supportedValuesOf('numberingSystem');
           systems.includes('latn');
         ''');
@@ -920,7 +925,7 @@ void main() {
       });
 
       test('should have supportedValuesOf for timeZone', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const timeZones = Intl.supportedValuesOf('timeZone');
           timeZones.length > 0;
         ''');
@@ -928,7 +933,7 @@ void main() {
       });
 
       test('should have supportedValuesOf for unit', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const units = Intl.supportedValuesOf('unit');
           units.includes('meter') || units.includes('kilogram') || units.length >= 0;
         ''');
@@ -936,7 +941,7 @@ void main() {
       });
 
       test('getCanonicalLocales should normalize locales', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const locales = Intl.getCanonicalLocales(['en-us', 'EN-GB', 'fr-FR']);
           locales.length;
         ''');
@@ -944,7 +949,7 @@ void main() {
       });
 
       test('getCanonicalLocales should handle single locale', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const locales = Intl.getCanonicalLocales('en-US');
           Array.isArray(locales) && locales.length === 1;
         ''');
@@ -952,7 +957,7 @@ void main() {
       });
 
       test('getCanonicalLocales should handle multiple locales', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const locales = Intl.getCanonicalLocales(['en-US', 'fr-FR', 'de-DE']);
           locales.length;
         ''');
@@ -962,49 +967,49 @@ void main() {
 
     group('Intl Constructors', () {
       test('NumberFormat should be a constructor', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           typeof Intl.NumberFormat;
         ''');
         expect(result.toString(), equals('function'));
       });
 
       test('DateTimeFormat should be a constructor', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           typeof Intl.DateTimeFormat;
         ''');
         expect(result.toString(), equals('function'));
       });
 
       test('Collator should be a constructor', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           typeof Intl.Collator;
         ''');
         expect(result.toString(), equals('function'));
       });
 
       test('PluralRules should be a constructor', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           typeof Intl.PluralRules;
         ''');
         expect(result.toString(), equals('function'));
       });
 
       test('RelativeTimeFormat should be a constructor', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           typeof Intl.RelativeTimeFormat;
         ''');
         expect(result.toString(), equals('function'));
       });
 
       test('ListFormat should be a constructor', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           typeof Intl.ListFormat;
         ''');
         expect(result.toString(), equals('function'));
       });
 
       test('Segmenter should be a constructor', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           typeof Intl.Segmenter;
         ''');
         expect(result.toString(), equals('function'));
@@ -1013,7 +1018,7 @@ void main() {
 
     group('Complex Real-World Use Cases', () {
       test('should format price list with different currencies', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const prices = [
             { amount: 1234.56, currency: 'USD', locale: 'en-US' },
             { amount: 1234.56, currency: 'EUR', locale: 'de-DE' },
@@ -1034,7 +1039,7 @@ void main() {
       });
 
       test('should create a date range formatter', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           function formatDateRange(start, end, locale) {
             const fmt = new Intl.DateTimeFormat(locale, {
               month: 'short',
@@ -1053,7 +1058,7 @@ void main() {
       });
 
       test('should create pluralized messages', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           function formatItems(count, locale) {
             const pr = new Intl.PluralRules(locale);
             const category = pr.select(count);
@@ -1078,7 +1083,7 @@ void main() {
       });
 
       test('should sort names by locale', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const names = ['Müller', 'Mueller', 'Muller', 'miller'];
           const collator = new Intl.Collator('de-DE', { 
             sensitivity: 'base',
@@ -1092,7 +1097,7 @@ void main() {
       });
 
       test('should format relative time dynamically', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           function formatTimeDiff(seconds, locale) {
             const rtf = new Intl.RelativeTimeFormat(locale, { style: 'long' });
             
@@ -1124,7 +1129,7 @@ void main() {
       });
 
       test('should format shopping cart summary', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           function formatCartSummary(items, locale) {
             const listFmt = new Intl.ListFormat(locale, { 
               type: 'conjunction',
@@ -1158,7 +1163,7 @@ void main() {
       });
 
       test('should count words in text', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           function countWords(text, locale) {
             const segmenter = new Intl.Segmenter(locale, { granularity: 'word' });
             const segments = segmenter.segment(text);
@@ -1180,7 +1185,7 @@ void main() {
       });
 
       test('should format event schedule', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           function formatEventTime(date, locale) {
             const dateFmt = new Intl.DateTimeFormat(locale, {
               weekday: 'long',
@@ -1205,7 +1210,7 @@ void main() {
       });
 
       test('should format file sizes', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           function formatFileSize(bytes, locale) {
             const units = ['B', 'KB', 'MB', 'GB', 'TB'];
             let unitIndex = 0;
@@ -1236,7 +1241,7 @@ void main() {
       });
 
       test('should format duration', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           function formatDuration(totalSeconds, locale) {
             const hours = Math.floor(totalSeconds / 3600);
             const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -1259,7 +1264,7 @@ void main() {
       });
 
       test('should handle multiple formatters chained', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const data = [
             { date: new Date(2024, 0, 15), amount: 1250.50 },
             { date: new Date(2024, 1, 20), amount: 3400.75 },
@@ -1283,7 +1288,7 @@ void main() {
       });
 
       test('should create ordinal suffix function', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           function getOrdinal(n, locale) {
             const pr = new Intl.PluralRules(locale, { type: 'ordinal' });
             const suffixes = {
@@ -1312,7 +1317,7 @@ void main() {
       });
 
       test('should split text into sentences and count', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           function analyzeParagraph(text, locale) {
             const sentenceSegmenter = new Intl.Segmenter(locale, { granularity: 'sentence' });
             const wordSegmenter = new Intl.Segmenter(locale, { granularity: 'word' });
@@ -1341,7 +1346,7 @@ void main() {
       });
 
       test('should format percentage change', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           function formatChange(oldValue, newValue, locale) {
             const change = (newValue - oldValue) / oldValue;
             const numFmt = new Intl.NumberFormat(locale, {
@@ -1363,7 +1368,7 @@ void main() {
       });
 
       test('should create internationalized greeting', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           function greet(name, items, locale) {
             const listFmt = new Intl.ListFormat(locale, { 
               type: 'conjunction',
@@ -1387,7 +1392,7 @@ void main() {
       });
 
       test('should format invoice with multiple currencies', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           function formatInvoice(lineItems, currency, locale) {
             const numFmt = new Intl.NumberFormat(locale, {
               style: 'currency',
@@ -1436,7 +1441,7 @@ void main() {
 
     group('Edge Cases and Error Handling', () {
       test('should handle undefined locale gracefully', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const fmt = new Intl.NumberFormat(undefined);
           typeof fmt.format(1234) === 'string';
         ''');
@@ -1444,7 +1449,7 @@ void main() {
       });
 
       test('should handle empty options object', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const fmt = new Intl.NumberFormat('en-US', {});
           typeof fmt.format(1234) === 'string';
         ''');
@@ -1452,7 +1457,7 @@ void main() {
       });
 
       test('should handle null values in format', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const fmt = new Intl.NumberFormat('en-US');
           const result = fmt.format(0);
           typeof result === 'string';
@@ -1461,7 +1466,7 @@ void main() {
       });
 
       test('should handle NaN in NumberFormat', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const fmt = new Intl.NumberFormat('en-US');
           const result = fmt.format(NaN);
           result.includes('NaN') || result === 'NaN';
@@ -1470,7 +1475,7 @@ void main() {
       });
 
       test('should handle Infinity in NumberFormat', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const fmt = new Intl.NumberFormat('en-US');
           const result = fmt.format(Infinity);
           result.includes('∞') || result.includes('Infinity') || result.length > 0;
@@ -1479,7 +1484,7 @@ void main() {
       });
 
       test('should handle very small numbers', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const fmt = new Intl.NumberFormat('en-US', {
             minimumFractionDigits: 10
           });
@@ -1490,7 +1495,7 @@ void main() {
       });
 
       test('should handle locale array', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const fmt = new Intl.NumberFormat(['fr-FR', 'en-US']);
           typeof fmt.format(1234.56) === 'string';
         ''');
@@ -1498,7 +1503,7 @@ void main() {
       });
 
       test('should handle DateTimeFormat with valid date', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const fmt = new Intl.DateTimeFormat('en-US');
           const result = fmt.format(new Date(2024, 0, 15));
           result.length > 0;
@@ -1507,7 +1512,7 @@ void main() {
       });
 
       test('should handle Collator with empty strings', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const collator = new Intl.Collator('en-US');
           collator.compare('', '') === 0;
         ''');
@@ -1515,7 +1520,7 @@ void main() {
       });
 
       test('should handle RelativeTimeFormat with zero', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const rtf = new Intl.RelativeTimeFormat('en-US');
           const result = rtf.format(0, 'day');
           result.length > 0;
@@ -1524,7 +1529,7 @@ void main() {
       });
 
       test('should handle ListFormat with special characters', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const lf = new Intl.ListFormat('en-US');
           const result = lf.format(['<html>', '&amp;', '"quotes"']);
           result.includes('<html>') && result.includes('&amp;');
@@ -1533,7 +1538,7 @@ void main() {
       });
 
       test('should handle PluralRules with decimals', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const pr = new Intl.PluralRules('en-US');
           const results = [0.5, 1.0, 1.5, 2.0].map(n => pr.select(n));
           results.length === 4;
@@ -1542,7 +1547,7 @@ void main() {
       });
 
       test('should handle Unicode in Segmenter', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const segmenter = new Intl.Segmenter('en-US', { granularity: 'word' });
           const text = 'Hello 世界 مرحبا';
           const segments = segmenter.segment(text);
@@ -1556,7 +1561,7 @@ void main() {
       });
 
       test('should handle whitespace-only text in Segmenter', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const segmenter = new Intl.Segmenter('en-US', { granularity: 'word' });
           const segments = segmenter.segment('   ');
           let wordCount = 0;
@@ -1569,7 +1574,7 @@ void main() {
       });
 
       test('should handle multiple consecutive calls', () {
-        final result = JSEvaluator.evaluateString('''
+        final result = interpreter.eval('''
           const fmt = new Intl.NumberFormat('en-US');
           const results = [];
           for (let i = 0; i < 100; i++) {

@@ -3,8 +3,13 @@ import 'package:js_interpreter/js_interpreter.dart';
 
 void main() {
   group('Array Callback Methods Tests', () {
+    late JSInterpreter interpreter;
+
+    setUp(() {
+      interpreter = JSInterpreter();
+    });
     test('Array.prototype.forEach basic functionality', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var sum = 0;
         var arr = [1, 2, 3, 4];
         arr.forEach(function(item) {
@@ -18,7 +23,7 @@ void main() {
     });
 
     test('Array.prototype.map with transformation', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var arr = [1, 2, 3];
         arr.map(function(x) {
           return x * 2;
@@ -30,7 +35,7 @@ void main() {
     });
 
     test('Array.prototype.filter with condition', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var arr = [1, 2, 3, 4, 5];
         arr.filter(function(x) {
           return x > 2;
@@ -42,7 +47,7 @@ void main() {
     });
 
     test('Array.prototype.find returns first match', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var arr = [1, 2, 3, 4, 5];
         arr.find(function(x) {
           return x > 3;
@@ -54,7 +59,7 @@ void main() {
     });
 
     test('Array.prototype.find returns undefined when not found', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var arr = [1, 2, 3];
         arr.find(function(x) {
           return x > 10;
@@ -65,7 +70,7 @@ void main() {
     });
 
     test('Array.prototype.reduce with initial value', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var arr = [1, 2, 3, 4];
         arr.reduce(function(acc, x) {
           return acc + x;
@@ -77,7 +82,7 @@ void main() {
     });
 
     test('Array.prototype.reduce without initial value', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var arr = [1, 2, 3, 4];
         arr.reduce(function(acc, x) {
           return acc * x;
@@ -89,7 +94,7 @@ void main() {
     });
 
     test('Array callbacks with arrow functions', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var arr = [1, 2, 3];
         arr.map(x => x * 3);
       ''');
@@ -99,7 +104,7 @@ void main() {
     });
 
     test('Array callbacks with index parameter', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var arr = [10, 20, 30];
         arr.map(function(item, index) {
           return item + index;
@@ -111,7 +116,7 @@ void main() {
     });
 
     test('Array callbacks with this binding', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var arr = [1, 2, 3];
         var multiplier = { factor: 5 };
         arr.map(function(x) {
@@ -124,7 +129,7 @@ void main() {
     });
 
     test('Array.prototype.forEach with index and array parameters', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var results = [];
         var arr = ["a", "b"];
         arr.forEach(function(item, index, array) {
@@ -141,7 +146,7 @@ void main() {
       'Array.prototype.reduce error on empty array without initial value',
       () {
         expect(() {
-          JSEvaluator.evaluateString('''
+          interpreter.eval('''
           var arr = [];
           arr.reduce(function(acc, x) {
             return acc + x;

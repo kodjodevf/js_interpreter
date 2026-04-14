@@ -1,14 +1,19 @@
+import 'package:js_interpreter/js_interpreter.dart';
 import 'package:test/test.dart';
-import 'package:js_interpreter/src/evaluator/evaluator.dart';
 
 void main() {
   group('String Methods Complete Tests', () {
+    late JSInterpreter interpreter;
+
+    setUp(() {
+      interpreter = JSInterpreter();
+    });
     test('string length property', () {
       const code = '''
         var str = "Hello World";
         str.length;
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('11'));
     });
 
@@ -17,7 +22,7 @@ void main() {
         var str = "JavaScript";
         str.charAt(0) + str.charAt(4) + str.charAt(100);
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('JS'));
     });
 
@@ -26,7 +31,7 @@ void main() {
         var str = "ABC";
         str.charCodeAt(0);
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('65'));
     });
 
@@ -35,7 +40,7 @@ void main() {
         var str = "Hello World";
         str.substring(0, 5) + "|" + str.substring(6);
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('Hello|World'));
     });
 
@@ -44,7 +49,7 @@ void main() {
         var str = "Hello World";
         str.slice(0, 5) + "|" + str.slice(-5);
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('Hello|World'));
     });
 
@@ -57,7 +62,7 @@ void main() {
         console.log("First:", first, "Last:", last, "Not found:", notFound);
         first + "," + last + "," + notFound;
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('0,12,-1'));
     });
 
@@ -66,7 +71,7 @@ void main() {
         var str = "Hello World";
         str.toLowerCase() + "|" + str.toUpperCase();
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('hello world|HELLO WORLD'));
     });
 
@@ -77,7 +82,7 @@ void main() {
         console.log("Parts:", parts);
         parts.length;
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('4'));
     });
 
@@ -86,7 +91,7 @@ void main() {
         var str = "Hello World Hello";
         str.replace("Hello", "Hi");
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(
         result.toString(),
         equals('Hi World Hello'),
@@ -101,7 +106,7 @@ void main() {
         console.log("Has Hello:", hasHello, "Has xyz:", hasXyz);
         hasHello;
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('true'));
     });
 
@@ -113,7 +118,7 @@ void main() {
         console.log("Starts with Hello:", starts, "Ends with World:", ends);
         starts && ends;
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('true'));
     });
 
@@ -124,7 +129,7 @@ void main() {
         console.log("Original length:", str.length, "Trimmed length:", trimmed.length);
         trimmed;
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('Hello World'));
     });
 
@@ -133,7 +138,7 @@ void main() {
         var str = "Ha";
         str.repeat(3);
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('HaHaHa'));
     });
 
@@ -181,7 +186,7 @@ void main() {
         
         result.valid;
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('true'));
     });
 
@@ -197,7 +202,7 @@ void main() {
         console.log("Result:", processed);
         processed;
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('HELLO, JAVASCRIPT!'));
     });
 
@@ -208,7 +213,7 @@ void main() {
         console.log("Characters:", chars);
         chars.length;
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('3'));
     });
 
@@ -225,7 +230,7 @@ void main() {
         console.log("Empty string tests:", results.emptyLength, results.emptyCharAt, results.emptyIndexOf);
         results.emptyLength;
       ''';
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('0'));
     });
   });

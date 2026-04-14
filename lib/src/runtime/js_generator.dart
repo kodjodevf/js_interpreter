@@ -64,7 +64,7 @@ class JSGenerator extends JSObject {
     // Generators are iterable: Symbol.iterator returns this
     // Per ES6 spec: generators are their own iterators
     setProperty(
-      JSSymbol.iterator.toString(),
+      JSSymbol.iterator.propertyKey,
       JSNativeFunction(
         functionName: '[Symbol.iterator]',
         nativeImpl: (args) => this,
@@ -237,7 +237,7 @@ class JSAsyncGenerator extends JSObject {
 
     // Async generators are async iterable: Symbol.asyncIterator returns this
     setProperty(
-      JSSymbol.asyncIterator.toString(),
+      JSSymbol.asyncIterator.propertyKey,
       JSNativeFunction(
         functionName: '[Symbol.asyncIterator]',
         nativeImpl: (args) => this,

@@ -37,6 +37,7 @@ class ParseError extends Error {
 class JSParser {
   final List<Token> tokens;
   int _current = 0;
+  // ignore: prefer_final_fields
   bool _initialStrictMode =
       false; // Initial strict mode context (e.g., from eval caller)
 
@@ -44,7 +45,8 @@ class JSParser {
   bool _inAsyncContext = false;
   bool _inGeneratorContext = false;
   int _functionDepth; // Track function nesting (0 = top-level)
-  bool _inClassContext = false; // Track if we're parsing class-related code
+  bool _inClassContext; // Track if we're parsing class-related code
+  bool _inClassStaticBlock = false; // Track if inside a class static { } block
   final bool _allowTopLevelAwait;
 
   // Context tracking for break/continue validation
@@ -57,9 +59,11 @@ class JSParser {
     this.tokens, {
     bool initialStrictMode = false,
     int initialFunctionDepth = 0,
+    bool initialClassContext = false,
     bool allowTopLevelAwait = false,
   }) : _initialStrictMode = initialStrictMode,
        _functionDepth = initialFunctionDepth,
+       _inClassContext = initialClassContext,
        _allowTopLevelAwait = allowTopLevelAwait;
 
   /// Check if parameters are "simple" (no destructuring, defaults, or rest)
@@ -147,6 +151,9 @@ class JSParser {
     int column,
   ) {
     final seenNames = <String>{};
+    // In sloppy mode with simple params, duplicate names are allowed
+    final isSimple = _isSimpleParameterList(params);
+    final checkDuplicates = _isInStrictMode() || !isSimple;
 
     for (final param in params) {
       // Get all bound names from this parameter
@@ -154,7 +161,7 @@ class JSParser {
 
       for (final paramName in boundNames) {
         // Check for duplicate parameter names
-        if (seenNames.contains(paramName)) {
+        if (checkDuplicates && seenNames.contains(paramName)) {
           throw ParseError(
             'Identifier \'$paramName\' has already been declared',
             _peek(),
@@ -216,6 +223,12 @@ class JSParser {
     if (firstStmt is! ExpressionStatement) return false;
     final expr = firstStmt.expression;
     if (expr is! LiteralExpression) return false;
+    // Must match the exact source text, not the resolved value
+    // (escaped versions like 'use\u0020strict' are NOT directives)
+    final raw = expr.raw;
+    if (raw != null) {
+      return raw == "'use strict'" || raw == '"use strict"';
+    }
     return expr.value == 'use strict';
   }
 
@@ -224,14 +237,66 @@ class JSParser {
     List<Parameter> params,
     BlockStatement body,
     int line,
-    int column,
-  ) {
+    int column, {
+    String? functionName,
+  }) {
+    final isStrict = _hasUseStrictDirective(body) || _isInStrictMode();
     if (!_isSimpleParameterList(params) && _hasUseStrictDirective(body)) {
       throw LexerError(
         'SyntaxError: Illegal \'use strict\' directive in function with non-simple parameter list',
         line,
         column,
       );
+    }
+    if (isStrict) {
+      // ES5 13.1: Function name cannot be 'eval' or 'arguments' in strict mode
+      if (functionName == 'eval' || functionName == 'arguments') {
+        throw ParseError(
+          "Unexpected eval or arguments in strict mode",
+          Token(
+            type: TokenType.identifier,
+            lexeme: functionName!,
+            line: line,
+            column: column,
+            start: 0,
+            end: 0,
+          ),
+        );
+      }
+      // ES5 13.1: Param names cannot be 'eval' or 'arguments' in strict mode
+      // ES5 13.1: Duplicate param names not allowed in strict mode
+      final paramNames = <String>{};
+      for (final param in params) {
+        final name = param.name?.name;
+        if (name != null) {
+          if (name == 'eval' || name == 'arguments') {
+            throw ParseError(
+              "Unexpected eval or arguments in strict mode",
+              Token(
+                type: TokenType.identifier,
+                lexeme: name,
+                line: line,
+                column: column,
+                start: 0,
+                end: 0,
+              ),
+            );
+          }
+          if (!paramNames.add(name)) {
+            throw ParseError(
+              "Identifier '$name' has already been declared",
+              Token(
+                type: TokenType.identifier,
+                lexeme: name,
+                line: line,
+                column: column,
+                start: 0,
+                end: 0,
+              ),
+            );
+          }
+        }
+      }
     }
   }
 
@@ -648,6 +713,56 @@ class JSParser {
     }
   }
 
+  /// Reserved words that the lexer treats as identifiers (not keyword tokens)
+  static const _alwaysReservedIdentifiers = {'debugger', 'enum'};
+
+  /// FutureReservedWords that are only reserved in strict mode
+  static const _strictModeReservedWords = {
+    'implements',
+    'interface',
+    'package',
+    'private',
+    'protected',
+    'public',
+  };
+
+  /// Validate a binding identifier (variable name, parameter name, etc.)
+  /// Rejects always-reserved words and strict-mode FutureReservedWords.
+  void _validateBindingIdentifier(Token name) {
+    final lexeme = name.lexeme;
+
+    // Always-reserved words that the lexer treats as identifiers
+    if (_alwaysReservedIdentifiers.contains(lexeme)) {
+      throw ParseError('Unexpected reserved word', name);
+    }
+
+    // Escaped reserved words (lexer produced identifier with hasUnicodeEscape)
+    if (name.hasUnicodeEscape && name.type == TokenType.identifier) {
+      if (_alwaysReservedIdentifiers.contains(lexeme)) {
+        throw ParseError('Unexpected reserved word', name);
+      }
+      // Also check strict-mode reserved words when escaped
+      if (_isInStrictMode() && _strictModeReservedWords.contains(lexeme)) {
+        throw ParseError('Unexpected strict mode reserved word', name);
+      }
+    }
+
+    // Strict mode: FutureReservedWords cannot be binding identifiers
+    if (_isInStrictMode()) {
+      if (_strictModeReservedWords.contains(lexeme)) {
+        throw ParseError('Unexpected strict mode reserved word', name);
+      }
+      // 'let' and 'static' are also restricted in strict mode
+      if (lexeme == 'let' || lexeme == 'static') {
+        throw ParseError('Unexpected strict mode reserved word', name);
+      }
+      // 'yield' is restricted in strict mode
+      if (lexeme == 'yield') {
+        throw ParseError('Unexpected strict mode reserved word', name);
+      }
+    }
+  }
+
   // Track strict mode
   bool _strictMode = false;
 
@@ -661,6 +776,7 @@ class JSParser {
     String source, {
     bool initialStrictMode = false,
     int initialFunctionDepth = 0,
+    bool initialClassContext = false,
     bool allowTopLevelAwait = false,
   }) {
     final lexer = JSLexer(source);
@@ -669,6 +785,7 @@ class JSParser {
       tokens,
       initialStrictMode: initialStrictMode,
       initialFunctionDepth: initialFunctionDepth,
+      initialClassContext: initialClassContext,
       allowTopLevelAwait: allowTopLevelAwait,
     );
     return parser.parse();
@@ -770,6 +887,52 @@ class JSParser {
             _check(TokenType.keywordAsync)) &&
         _peekNext()?.type == TokenType.colon) {
       final labelToken = _advance();
+
+      // Check for escaped reserved words used as label name
+      if (labelToken.hasUnicodeEscape &&
+          labelToken.type == TokenType.identifier) {
+        final reservedWords = {
+          'break',
+          'case',
+          'catch',
+          'continue',
+          'debugger',
+          'default',
+          'delete',
+          'do',
+          'else',
+          'finally',
+          'for',
+          'function',
+          'if',
+          'in',
+          'instanceof',
+          'new',
+          'return',
+          'switch',
+          'this',
+          'throw',
+          'try',
+          'typeof',
+          'var',
+          'void',
+          'while',
+          'with',
+          'class',
+          'const',
+          'enum',
+          'export',
+          'extends',
+          'import',
+          'super',
+          'true',
+          'false',
+          'null',
+        };
+        if (reservedWords.contains(labelToken.lexeme)) {
+          throw ParseError('Unexpected reserved word', labelToken);
+        }
+      }
 
       // Check for escaped await/yield used as label in async/generator context
       _checkAwaitAsIdentifierInAsyncContext(labelToken);
@@ -1072,11 +1235,13 @@ class JSParser {
         if (_check(TokenType.identifier)) {
           name = _advance();
           _checkAwaitAsIdentifierInAsyncContext(name);
+          _validateBindingIdentifier(name);
         } else if (_check(TokenType.keywordAwait)) {
           name = _advance();
           _checkAwaitAsIdentifierInAsyncContext(name);
         } else if (_checkContextualKeyword()) {
           name = _advance();
+          _validateBindingIdentifier(name);
         } else {
           throw ParseError('Expected variable name', _peek());
         }
@@ -1086,6 +1251,17 @@ class JSParser {
           line: name.line,
           column: name.column,
         );
+      }
+
+      if (_isInStrictMode()) {
+        for (final name in _getBoundNamesFromPattern(id)) {
+          if (name == 'eval' || name == 'arguments') {
+            throw ParseError(
+              'SyntaxError: Unexpected eval or arguments in strict mode',
+              startToken,
+            );
+          }
+        }
       }
 
       Expression? init;
@@ -1135,14 +1311,16 @@ class JSParser {
           name = _advance();
           // Check for escaped await/yield in async/generator context
           _checkAwaitAsIdentifierInAsyncContext(name);
+          // Check for always-reserved words that lexer treats as identifiers
+          _validateBindingIdentifier(name);
         } else if (_check(TokenType.keywordAwait)) {
           // 'await' cannot be used as binding identifier in async context
           name = _advance();
           _checkAwaitAsIdentifierInAsyncContext(name);
         } else if (_check(TokenType.keywordYield)) {
-          // 'yield' cannot be used as binding identifier in generator context
+          // 'yield' cannot be used as binding identifier in generator or strict context
           name = _advance();
-          if (_inGeneratorContext) {
+          if (_inGeneratorContext || _isInStrictMode()) {
             throw LexerError(
               'SyntaxError: Unexpected reserved word',
               name.line,
@@ -1155,6 +1333,7 @@ class JSParser {
         } else if (_checkContextualKeyword()) {
           // Accept other contextual keywords (let, async, static, get, set, etc.)
           name = _advance();
+          _validateBindingIdentifier(name);
         } else if (_check(TokenType.keywordAs)) {
           // 'as' is allowed as a variable name (only reserved in import context)
           name = _advance();
@@ -1167,6 +1346,17 @@ class JSParser {
           line: name.line,
           column: name.column,
         );
+      }
+
+      if (_isInStrictMode()) {
+        for (final name in _getBoundNamesFromPattern(id)) {
+          if (name == 'eval' || name == 'arguments') {
+            throw ParseError(
+              'SyntaxError: Unexpected eval or arguments in strict mode',
+              previous,
+            );
+          }
+        }
       }
 
       Expression? init;
@@ -1482,7 +1672,74 @@ class JSParser {
         // as sequence operators (we want commas to separate declarations)
         initExpr = _assignmentExpression();
       }
-      declarations.add(VariableDeclarator(id: id, init: initExpr));
+
+      if (initExpr is BinaryExpression && initExpr.operator == 'in') {
+        final declarator = VariableDeclarator(id: id, init: initExpr.left);
+        _consume(TokenType.rightParen, 'Expected ")" after for-in expression');
+        final body = _loopBody();
+
+        leftSide = VariableDeclaration(
+          kind: kind,
+          declarations: [declarator],
+          line: kindToken.line,
+          column: kindToken.column,
+        );
+
+        return ForInStatement(
+          left: leftSide,
+          right: initExpr.right,
+          body: body,
+          line: previous.line,
+          column: previous.column,
+        );
+      }
+
+      final firstDeclarator = VariableDeclarator(id: id, init: initExpr);
+
+      if (_check(TokenType.keywordIn)) {
+        _advance(); // consume 'in'
+        final right = _expression();
+        _consume(TokenType.rightParen, 'Expected ")" after for-in expression');
+        final body = _loopBody();
+
+        leftSide = VariableDeclaration(
+          kind: kind,
+          declarations: [firstDeclarator],
+          line: kindToken.line,
+          column: kindToken.column,
+        );
+
+        return ForInStatement(
+          left: leftSide,
+          right: right,
+          body: body,
+          line: previous.line,
+          column: previous.column,
+        );
+      } else if (_check(TokenType.keywordOf)) {
+        _advance(); // consume 'of'
+        final right = _expression();
+        _consume(TokenType.rightParen, 'Expected ")" after for-of expression');
+        final body = _loopBody();
+
+        leftSide = VariableDeclaration(
+          kind: kind,
+          declarations: [firstDeclarator],
+          line: kindToken.line,
+          column: kindToken.column,
+        );
+
+        return ForOfStatement(
+          left: leftSide,
+          right: right,
+          body: body,
+          await: isAwait,
+          line: previous.line,
+          column: previous.column,
+        );
+      }
+
+      declarations.add(firstDeclarator);
 
       // Additional declarations (separated by commas)
       while (_match([TokenType.comma])) {
@@ -1796,15 +2053,6 @@ class JSParser {
       }
       final labelInfo = _labelStack[label]!;
 
-      // Break can only target IterationStatement or SwitchStatement
-      // ES5 strict requirement (test262 validates this)
-      if (!labelInfo.isLoopOrSwitch) {
-        throw ParseError(
-          'Illegal break statement: label must target a loop or switch statement',
-          previous,
-        );
-      }
-
       // Break cannot escape a function boundary
       if (labelInfo.functionDepth < _functionDepth) {
         throw ParseError(
@@ -1877,8 +2125,11 @@ class JSParser {
   ThrowStatement _throwStatement() {
     final throwToken = _previous();
 
-    // In JavaScript, there cannot be y avoir de nouvelle ligne entre throw et l'expression
-    // For simplicity, on assume qu'il n'y en a pas
+    // Per spec: throw [no LineTerminator here] Expression
+    // If there's a line terminator after throw, it's a SyntaxError
+    if (_peek().line > throwToken.line) {
+      throw ParseError('Illegal newline after throw', throwToken);
+    }
 
     final argument = _expression();
     _consumeSemicolonOrASI('Expected \';\' after throw statement');
@@ -2220,11 +2471,147 @@ class JSParser {
 
     _consume(TokenType.rightBrace, 'Expected \'}\'');
 
+    // Check for duplicate lexically-declared names (ES6 early error)
+    _checkBlockDuplicateNames(statements, start.line, start.column);
+
     return BlockStatement(
       body: statements,
       line: start.line,
       column: start.column,
     );
+  }
+
+  /// Check for duplicate lexically-declared names in a block statement.
+  /// Per spec: "It is a Syntax Error if the LexicallyDeclaredNames of
+  /// StatementList contains any duplicate entries."
+  /// Also: "It is a Syntax Error if any element of the LexicallyDeclaredNames
+  /// also occurs in the VarDeclaredNames of StatementList."
+  void _checkBlockDuplicateNames(
+    List<Statement> statements,
+    int line,
+    int column,
+  ) {
+    final lexicalNames = <String>{};
+    final varNames = <String>{};
+    for (final stmt in statements) {
+      final lexNames = _getLexicalNamesFromStatement(stmt);
+      for (final name in lexNames) {
+        if (!lexicalNames.add(name)) {
+          throw ParseError(
+            "Identifier '$name' has already been declared",
+            Token(
+              type: TokenType.identifier,
+              lexeme: name,
+              line: line,
+              column: column,
+              start: 0,
+              end: 0,
+            ),
+          );
+        }
+      }
+      final vNames = _getVarNamesFromStatement(stmt);
+      varNames.addAll(vNames);
+    }
+    // Cross-check: var names vs lexical names
+    for (final name in varNames) {
+      if (lexicalNames.contains(name)) {
+        throw ParseError(
+          "Identifier '$name' has already been declared",
+          Token(
+            type: TokenType.identifier,
+            lexeme: name,
+            line: line,
+            column: column,
+            start: 0,
+            end: 0,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Get lexically-declared names from a single statement.
+  List<String> _getLexicalNamesFromStatement(Statement stmt) {
+    final names = <String>[];
+    if (stmt is VariableDeclaration &&
+        (stmt.kind == 'let' || stmt.kind == 'const')) {
+      for (final decl in stmt.declarations) {
+        names.addAll(_getBoundNamesFromPattern(decl.id));
+      }
+    } else if (stmt is FunctionDeclaration) {
+      names.add(stmt.id.name);
+    } else if (stmt is ClassDeclaration) {
+      if (stmt.id != null) names.add(stmt.id!.name);
+    }
+    return names;
+  }
+
+  /// Get var-declared names from a single statement (recursively scans into sub-blocks).
+  List<String> _getVarNamesFromStatement(Statement stmt) {
+    final names = <String>[];
+    if (stmt is VariableDeclaration && stmt.kind == 'var') {
+      for (final decl in stmt.declarations) {
+        names.addAll(_getBoundNamesFromPattern(decl.id));
+      }
+    } else if (stmt is BlockStatement) {
+      // Var declarations hoist out of blocks
+      for (final s in stmt.body) {
+        names.addAll(_getVarNamesFromStatement(s));
+      }
+    } else if (stmt is IfStatement) {
+      names.addAll(_getVarNamesFromStatement(stmt.consequent));
+      if (stmt.alternate != null) {
+        names.addAll(_getVarNamesFromStatement(stmt.alternate!));
+      }
+    } else if (stmt is ForStatement) {
+      if (stmt.init is VariableDeclaration &&
+          (stmt.init as VariableDeclaration).kind == 'var') {
+        for (final decl in (stmt.init as VariableDeclaration).declarations) {
+          names.addAll(_getBoundNamesFromPattern(decl.id));
+        }
+      }
+      names.addAll(_getVarNamesFromStatement(stmt.body));
+    } else if (stmt is ForInStatement) {
+      if (stmt.left is VariableDeclaration &&
+          (stmt.left as VariableDeclaration).kind == 'var') {
+        for (final decl in (stmt.left as VariableDeclaration).declarations) {
+          names.addAll(_getBoundNamesFromPattern(decl.id));
+        }
+      }
+      names.addAll(_getVarNamesFromStatement(stmt.body));
+    } else if (stmt is ForOfStatement) {
+      if (stmt.left is VariableDeclaration &&
+          (stmt.left as VariableDeclaration).kind == 'var') {
+        for (final decl in (stmt.left as VariableDeclaration).declarations) {
+          names.addAll(_getBoundNamesFromPattern(decl.id));
+        }
+      }
+      names.addAll(_getVarNamesFromStatement(stmt.body));
+    } else if (stmt is WhileStatement) {
+      names.addAll(_getVarNamesFromStatement(stmt.body));
+    } else if (stmt is DoWhileStatement) {
+      names.addAll(_getVarNamesFromStatement(stmt.body));
+    } else if (stmt is SwitchStatement) {
+      for (final c in stmt.cases) {
+        for (final s in c.consequent) {
+          names.addAll(_getVarNamesFromStatement(s));
+        }
+      }
+    } else if (stmt is TryStatement) {
+      names.addAll(_getVarNamesFromStatement(stmt.block));
+      if (stmt.handler != null) {
+        names.addAll(_getVarNamesFromStatement(stmt.handler!.body));
+      }
+      if (stmt.finalizer != null) {
+        names.addAll(_getVarNamesFromStatement(stmt.finalizer!));
+      }
+    } else if (stmt is LabeledStatement) {
+      names.addAll(_getVarNamesFromStatement(stmt.body));
+    } else if (stmt is WithStatement) {
+      names.addAll(_getVarNamesFromStatement(stmt.body));
+    }
+    return names;
   }
 
   /// Parse an expression statement
@@ -2242,6 +2629,16 @@ class JSParser {
     }
 
     final expr = _expression();
+    if ((expr is ArrowFunctionExpression ||
+            expr is AsyncArrowFunctionExpression) &&
+        !_isAtEnd() &&
+        _peek().line > _previous().line) {
+      return ExpressionStatement(
+        expression: expr,
+        line: expr.line,
+        column: expr.column,
+      );
+    }
     _consumeSemicolonOrASI('Expected \';\' after expression');
 
     return ExpressionStatement(
@@ -2378,6 +2775,15 @@ class JSParser {
           right: right,
           line: operator.line,
           column: operator.column,
+        );
+      }
+
+      if (_isInStrictMode() &&
+          expr is IdentifierExpression &&
+          (expr.name == 'arguments' || expr.name == 'eval')) {
+        throw ParseError(
+          'SyntaxError: Unexpected eval or arguments in strict mode',
+          operator,
         );
       }
 
@@ -2906,7 +3312,16 @@ class JSParser {
   ) {
     var expr = left;
 
-    while (_match(operators)) {
+    while (true) {
+      if ((expr is ArrowFunctionExpression ||
+              expr is AsyncArrowFunctionExpression) &&
+          !_isAtEnd() &&
+          _peek().line > _previous().line) {
+        break;
+      }
+      if (!_match(operators)) {
+        break;
+      }
       final operator = _previous();
       final right = nextLevel();
       expr = BinaryExpression(
@@ -2999,8 +3414,11 @@ class JSParser {
   Expression _postfix() {
     var expr = _call();
 
-    if (_match([TokenType.increment, TokenType.decrement])) {
-      final operator = _previous();
+    // Per spec: [no LineTerminator here] before postfix ++/--
+    // If ++ or -- is on a new line, it's a prefix for the next statement (ASI applies)
+    if ((_check(TokenType.increment) || _check(TokenType.decrement)) &&
+        _peek().line == _previous().line) {
+      final operator = _advance();
       expr = UnaryExpression(
         operator: operator.lexeme,
         operand: expr,
@@ -3020,6 +3438,13 @@ class JSParser {
     var expr = _primary();
 
     while (true) {
+      if ((expr is ArrowFunctionExpression ||
+              expr is AsyncArrowFunctionExpression) &&
+          !_isAtEnd() &&
+          _peek().line > _previous().line) {
+        break;
+      }
+
       if (_match([TokenType.leftParen])) {
         // Function call: func()
         expr = _finishCall(expr);
@@ -3375,7 +3800,14 @@ class JSParser {
       // Check for new.target meta property
       if (_match([TokenType.dot])) {
         if (_check(TokenType.identifier) && _peek().lexeme == 'target') {
-          _advance(); // Consume 'target'
+          final targetToken = _advance(); // Consume 'target'
+          // new.target is only valid inside functions
+          if (_functionDepth == 0) {
+            throw ParseError(
+              "'new.target' expression is not allowed here",
+              targetToken,
+            );
+          }
           return MetaProperty(
             meta: 'new',
             property: 'target',
@@ -3487,6 +3919,7 @@ class JSParser {
       return LiteralExpression(
         value: token.literal,
         type: 'string',
+        raw: token.lexeme,
         line: token.line,
         column: token.column,
       );
@@ -3537,6 +3970,72 @@ class JSParser {
     if (_match([TokenType.identifier])) {
       final token = _previous();
 
+      // Always-reserved words that the lexer treats as identifiers
+      if (_alwaysReservedIdentifiers.contains(token.lexeme)) {
+        throw ParseError('Unexpected reserved word', token);
+      }
+
+      // Strict mode: reject FutureReservedWords as identifier references
+      if (_isInStrictMode()) {
+        if (_strictModeReservedWords.contains(token.lexeme)) {
+          throw ParseError('Unexpected strict mode reserved word', token);
+        }
+      }
+
+      // Check for escaped reserved words used as identifier reference
+      // Per spec: escaped keywords/literals that resolve to reserved words are SyntaxError
+      if (token.hasUnicodeEscape) {
+        final reservedWords = {
+          'break',
+          'case',
+          'catch',
+          'continue',
+          'debugger',
+          'default',
+          'delete',
+          'do',
+          'else',
+          'finally',
+          'for',
+          'function',
+          'if',
+          'in',
+          'instanceof',
+          'new',
+          'return',
+          'switch',
+          'this',
+          'throw',
+          'try',
+          'typeof',
+          'var',
+          'void',
+          'while',
+          'with',
+          'class',
+          'const',
+          'enum',
+          'export',
+          'extends',
+          'import',
+          'super',
+          'true',
+          'false',
+          'null',
+        };
+        if (reservedWords.contains(token.lexeme)) {
+          throw ParseError('Unexpected reserved word', token);
+        }
+        // Escaped strict mode FutureReservedWords
+        if (_isInStrictMode() &&
+            (_strictModeReservedWords.contains(token.lexeme) ||
+                token.lexeme == 'let' ||
+                token.lexeme == 'static' ||
+                token.lexeme == 'yield')) {
+          throw ParseError('Unexpected strict mode reserved word', token);
+        }
+      }
+
       // Check for escaped await/yield used as identifier reference in async/generator context
       _checkAwaitAsIdentifierInAsyncContext(token);
 
@@ -3561,6 +4060,14 @@ class JSParser {
         );
       }
 
+      // Check if we're in a class static block (await is forbidden there)
+      if (_inClassStaticBlock) {
+        throw ParseError(
+          'await is not a valid identifier reference in class static block',
+          token,
+        );
+      }
+
       return IdentifierExpression(
         name: token.lexeme,
         line: token.line,
@@ -3569,9 +4076,12 @@ class JSParser {
     }
 
     // yield is an identifier outside generator context
-    // In sloppy mode, it can even be used inside generator functions
+    // In strict mode, yield is a reserved word
     if (_match([TokenType.keywordYield])) {
       final token = _previous();
+      if (_isInStrictMode()) {
+        throw ParseError('Unexpected strict mode reserved word', token);
+      }
       return IdentifierExpression(
         name: token.lexeme,
         line: token.line,
@@ -3590,14 +4100,18 @@ class JSParser {
       );
     }
 
-    // 'static', 'get', 'set' can be identifiers in general contexts
+    // 'static', 'get', 'set', 'of' can be identifiers in general contexts
     // (not used as keywords outside of class methods)
+    // NOTE: 'in' is always reserved and must NOT be here
     if (_match([TokenType.keywordStatic]) ||
         _match([TokenType.keywordGet]) ||
         _match([TokenType.keywordSet]) ||
-        _match([TokenType.keywordOf]) ||
-        _match([TokenType.keywordIn])) {
+        _match([TokenType.keywordOf])) {
       final token = _previous();
+      // In strict mode, 'static' is a reserved word
+      if (_isInStrictMode() && token.lexeme == 'static') {
+        throw ParseError('Unexpected strict mode reserved word', token);
+      }
       return IdentifierExpression(
         name: token.lexeme,
         line: token.line,
@@ -4404,12 +4918,15 @@ class JSParser {
             );
 
             final oldFunctionDepth = _functionDepth;
+            final oldStaticBlock = _inClassStaticBlock;
             _functionDepth++; // Increment for method body parsing
+            _inClassStaticBlock = false;
 
             final body = _blockStatement();
             _inAsyncContext = oldAsyncContext;
             _inGeneratorContext = oldGeneratorContext;
             _functionDepth = oldFunctionDepth;
+            _inClassStaticBlock = oldStaticBlock;
 
             Expression functionExpr;
             if (isAsyncGenerator) {
@@ -4613,6 +5130,10 @@ class JSParser {
             );
           } else {
             // Shorthand {x} is equivalent to {x: x}
+            // But reserved words like 'this', 'in', etc. are not valid IdentifierReferences
+            if (_isReservedWordToken(token)) {
+              throw ParseError('Unexpected reserved word', token);
+            }
             final value = IdentifierExpression(
               name: token.lexeme,
               line: token.line,
@@ -4838,10 +5359,12 @@ class JSParser {
     final oldAsyncContext = _inAsyncContext;
     final oldGeneratorContext = _inGeneratorContext;
     final oldFunctionDepth = _functionDepth;
+    final oldStaticBlock = _inClassStaticBlock;
     _inAsyncContext = false;
     _inGeneratorContext =
         isGenerator; // Always set to correct value for this function
     _functionDepth++;
+    _inClassStaticBlock = false;
 
     // Parser le corps de la fonction
     final body = _blockStatement();
@@ -4850,6 +5373,7 @@ class JSParser {
     _inAsyncContext = oldAsyncContext;
     _inGeneratorContext = oldGeneratorContext;
     _functionDepth = oldFunctionDepth;
+    _inClassStaticBlock = oldStaticBlock;
 
     // ES6 14.1.2: Illegal to have "use strict" directive with non-simple parameters
     _validateStrictModeWithParams(
@@ -4857,6 +5381,7 @@ class JSParser {
       body,
       functionToken.line,
       functionToken.column,
+      functionName: id?.name,
     );
 
     return FunctionExpression(
@@ -4930,10 +5455,12 @@ class JSParser {
     final oldAsyncContext = _inAsyncContext;
     final oldGeneratorContext = _inGeneratorContext;
     final oldFunctionDepth = _functionDepth;
+    final oldStaticBlock = _inClassStaticBlock;
     _inAsyncContext = true;
     _inGeneratorContext =
         isGenerator; // Always set to correct value for this function
     _functionDepth++;
+    _inClassStaticBlock = false;
 
     // Parser le corps de la fonction
     final body = _blockStatement();
@@ -4942,6 +5469,7 @@ class JSParser {
     _inAsyncContext = oldAsyncContext;
     _inGeneratorContext = oldGeneratorContext;
     _functionDepth = oldFunctionDepth;
+    _inClassStaticBlock = oldStaticBlock;
 
     // ES6 14.1.2: Illegal to have "use strict" directive with non-simple parameters
     _validateStrictModeWithParams(
@@ -4949,6 +5477,7 @@ class JSParser {
       body,
       asyncToken.line,
       asyncToken.column,
+      functionName: id?.name,
     );
 
     // Validate that body doesn't contain super() calls outside class context
@@ -5053,10 +5582,12 @@ class JSParser {
     final oldAsyncContext = _inAsyncContext;
     final oldGeneratorContext = _inGeneratorContext;
     final oldFunctionDepth = _functionDepth;
+    final oldStaticBlock = _inClassStaticBlock;
     _inAsyncContext = false;
     _inGeneratorContext =
         isGenerator; // Always set to correct value for this function
     _functionDepth++;
+    _inClassStaticBlock = false;
 
     // Parser le corps de la fonction
     final body = _blockStatement();
@@ -5065,6 +5596,7 @@ class JSParser {
     _inAsyncContext = oldAsyncContext;
     _inGeneratorContext = oldGeneratorContext;
     _functionDepth = oldFunctionDepth;
+    _inClassStaticBlock = oldStaticBlock;
 
     // ES6 14.1.2: Illegal to have "use strict" directive with non-simple parameters
     _validateStrictModeWithParams(
@@ -5072,6 +5604,7 @@ class JSParser {
       body,
       functionToken.line,
       functionToken.column,
+      functionName: id.name,
     );
 
     // Validate that body doesn't contain super() calls outside class context
@@ -5183,10 +5716,12 @@ class JSParser {
     final oldAsyncContext = _inAsyncContext;
     final oldGeneratorContext = _inGeneratorContext;
     final oldFunctionDepth = _functionDepth;
+    final oldStaticBlock = _inClassStaticBlock;
     _inAsyncContext = true;
     _inGeneratorContext =
         isGenerator; // Always set to correct value for this function
     _functionDepth++;
+    _inClassStaticBlock = false;
 
     // Parser le corps de la fonction
     final body = _blockStatement();
@@ -5195,6 +5730,7 @@ class JSParser {
     _inAsyncContext = oldAsyncContext;
     _inGeneratorContext = oldGeneratorContext;
     _functionDepth = oldFunctionDepth;
+    _inClassStaticBlock = oldStaticBlock;
 
     // ES6 14.1.2: Illegal to have "use strict" directive with non-simple parameters
     _validateStrictModeWithParams(
@@ -5202,6 +5738,7 @@ class JSParser {
       body,
       asyncToken.line,
       asyncToken.column,
+      functionName: id.name,
     );
 
     // Validate that body doesn't contain super() calls or super.property outside class context
@@ -5263,7 +5800,55 @@ class JSParser {
         type == TokenType.keywordYield ||
         type == TokenType.keywordAwait ||
         type == TokenType.keywordLet ||
-        type == TokenType.keywordAsync;
+        type == TokenType.keywordAsync ||
+        type == TokenType.keywordStatic ||
+        type == TokenType.keywordGet ||
+        type == TokenType.keywordSet ||
+        type == TokenType.keywordOf;
+  }
+
+  /// Check if a token is a reserved word that cannot be an IdentifierReference
+  bool _isReservedWordToken(Token token) {
+    switch (token.type) {
+      case TokenType.keywordThis:
+      case TokenType.keywordSuper:
+      case TokenType.keywordTrue:
+      case TokenType.keywordFalse:
+      case TokenType.keywordNull:
+      case TokenType.keywordUndefined:
+      case TokenType.keywordIf:
+      case TokenType.keywordElse:
+      case TokenType.keywordFor:
+      case TokenType.keywordWhile:
+      case TokenType.keywordDo:
+      case TokenType.keywordReturn:
+      case TokenType.keywordBreak:
+      case TokenType.keywordContinue:
+      case TokenType.keywordSwitch:
+      case TokenType.keywordCase:
+      case TokenType.keywordDefault:
+      case TokenType.keywordTry:
+      case TokenType.keywordCatch:
+      case TokenType.keywordFinally:
+      case TokenType.keywordThrow:
+      case TokenType.keywordNew:
+      case TokenType.keywordVar:
+      case TokenType.keywordConst:
+      case TokenType.keywordExtends:
+      case TokenType.keywordClass:
+      case TokenType.keywordFunction:
+      case TokenType.keywordTypeof:
+      case TokenType.keywordInstanceof:
+      case TokenType.keywordIn:
+      case TokenType.keywordDelete:
+      case TokenType.keywordVoid:
+      case TokenType.keywordWith:
+      case TokenType.keywordExport:
+      case TokenType.keywordImport:
+        return true;
+      default:
+        return false;
+    }
   }
 
   /// Return the previous token
@@ -5280,8 +5865,8 @@ class JSParser {
     if (_isAtEnd()) return false;
     final type = _peek().type;
     // Keywords that can be used as arrow parameters
+    // NOTE: 'in' is always reserved and must NOT be here
     return type == TokenType.keywordOf ||
-        type == TokenType.keywordIn ||
         type == TokenType.keywordLet ||
         type == TokenType.keywordStatic ||
         type == TokenType.keywordGet ||
@@ -5295,13 +5880,13 @@ class JSParser {
     if (_isAtEnd()) return false;
     final type = _peek().type;
     // Contextual keywords that can be used as identifiers
+    // NOTE: 'in' is always reserved and must NOT be here
     return type == TokenType.keywordLet ||
         type == TokenType.keywordAsync ||
         type == TokenType.keywordStatic ||
         type == TokenType.keywordGet ||
         type == TokenType.keywordSet ||
-        type == TokenType.keywordOf ||
-        type == TokenType.keywordIn;
+        type == TokenType.keywordOf;
   }
 
   /// Parse an identifier or keyword to be used as an export/import name
@@ -5319,13 +5904,6 @@ class JSParser {
     }
 
     throw ParseError('Expected identifier', token);
-  }
-
-  /// Check the type of a token at a relative position
-  bool _checkAhead(TokenType type, int offset) {
-    final index = _current + offset;
-    if (index >= tokens.length) return false;
-    return tokens[index].type == type;
   }
 
   /// Advance and return le token courant
@@ -5475,7 +6053,9 @@ class JSParser {
 
     // Increment function depth for body parsing
     final oldFunctionDepth = _functionDepth;
+    final oldStaticBlock = _inClassStaticBlock;
     _functionDepth++;
+    _inClassStaticBlock = false;
 
     // Parser le body de la fonction
     dynamic body;
@@ -5502,6 +6082,7 @@ class JSParser {
 
     // Restore context
     _functionDepth = oldFunctionDepth;
+    _inClassStaticBlock = oldStaticBlock;
 
     return ArrowFunctionExpression(
       params: parameters,
@@ -5546,8 +6127,10 @@ class JSParser {
     // Set async context and increment function depth for body parsing
     final oldAsyncContext = _inAsyncContext;
     final oldFunctionDepth = _functionDepth;
+    final oldStaticBlock = _inClassStaticBlock;
     _inAsyncContext = true;
     _functionDepth++;
+    _inClassStaticBlock = false;
 
     // Parser le body de la fonction
     dynamic body;
@@ -5637,6 +6220,7 @@ class JSParser {
     // Restore context
     _inAsyncContext = oldAsyncContext;
     _functionDepth = oldFunctionDepth;
+    _inClassStaticBlock = oldStaticBlock;
 
     return AsyncArrowFunctionExpression(
       params: parameters,
@@ -5729,6 +6313,10 @@ class JSParser {
       for (final subExpr in expr.expressions) {
         if (subExpr is IdentifierExpression) {
           parameters.add(Parameter(nameOrPattern: subExpr));
+        } else if (subExpr is DestructuringAssignmentExpression) {
+          parameters.add(
+            Parameter(nameOrPattern: subExpr.left, defaultValue: subExpr.right),
+          );
         } else if (subExpr is AssignmentExpression) {
           // Parameter with default value: (a, b = 10) => or (a = 5, b = a + 1) =>
           if (subExpr.left is IdentifierExpression) {
@@ -5737,6 +6325,20 @@ class JSParser {
                 nameOrPattern: subExpr.left as IdentifierExpression,
                 defaultValue: subExpr.right,
               ),
+            );
+          } else if (subExpr.left is ArrayExpression) {
+            final pattern = _convertArrayExpressionToPattern(
+              subExpr.left as ArrayExpression,
+            );
+            parameters.add(
+              Parameter(nameOrPattern: pattern, defaultValue: subExpr.right),
+            );
+          } else if (subExpr.left is ObjectExpression) {
+            final pattern = _convertObjectExpressionToPattern(
+              subExpr.left as ObjectExpression,
+            );
+            parameters.add(
+              Parameter(nameOrPattern: pattern, defaultValue: subExpr.right),
             );
           } else {
             throw ParseError(
@@ -6473,7 +7075,10 @@ class JSParser {
           _advance(); // consume the static keyword
           // Bloc statique : static { ... }
           if (_check(TokenType.leftBrace)) {
+            final savedStaticBlock = _inClassStaticBlock;
+            _inClassStaticBlock = true;
             final body = _blockStatement();
+            _inClassStaticBlock = savedStaticBlock;
             return StaticBlockDeclaration(
               body: body,
               line: startToken.line,
@@ -6491,7 +7096,7 @@ class JSParser {
     // IMPORTANT: In JavaScript, "get" and "set" can also be method names!
     // If "get" or "set" is followed by "(", it's a method name, not a getter/setter.
     MethodKind? methodKind;
-    if (_checkGet() && !_checkAhead(TokenType.leftParen, 1)) {
+    if (_checkGet() && _isClassElementNameStart(_peekNext())) {
       final getToken = _advance(); // consommer 'get'
       // Validate that 'get' doesn't contain Unicode escapes
       if (getToken.hasUnicodeEscape) {
@@ -6501,7 +7106,7 @@ class JSParser {
         );
       }
       methodKind = MethodKind.get;
-    } else if (_checkSet() && !_checkAhead(TokenType.leftParen, 1)) {
+    } else if (_checkSet() && _isClassElementNameStart(_peekNext())) {
       final setToken = _advance(); // consommer 'set'
       // Validate that 'set' doesn't contain Unicode escapes
       if (setToken.hasUnicodeEscape) {
@@ -6633,10 +7238,12 @@ class JSParser {
       final oldAsyncContext = _inAsyncContext;
       final oldGeneratorContext = _inGeneratorContext;
       final oldFunctionDepth = _functionDepth;
+      final oldStaticBlock = _inClassStaticBlock;
       _inAsyncContext = isAsync; // Always set to correct value for this method
       _inGeneratorContext =
           isGenerator; // Always set to correct value for this method
       _functionDepth++; // Increment for method body parsing
+      _inClassStaticBlock = false;
 
       // Method body
       final body = _blockStatement();
@@ -6645,6 +7252,7 @@ class JSParser {
       _inAsyncContext = oldAsyncContext;
       _inGeneratorContext = oldGeneratorContext;
       _functionDepth = oldFunctionDepth;
+      _inClassStaticBlock = oldStaticBlock;
 
       // ES6 14.1.2: Illegal to have "use strict" directive with non-simple parameters
       _validateStrictModeWithParams(
@@ -7181,6 +7789,20 @@ class JSParser {
       TokenType.keywordVoid,
     };
     return allowedKeywordTypes.contains(token.type);
+  }
+
+  bool _isClassElementNameStart(Token? token) {
+    if (token == null) {
+      return false;
+    }
+
+    return token.type == TokenType.identifier ||
+        token.type == TokenType.privateIdentifier ||
+        token.type == TokenType.leftBracket ||
+        token.type == TokenType.string ||
+        token.type == TokenType.number ||
+        token.type == TokenType.bigint ||
+        _isKeywordAllowedAsMethodNameToken(token);
   }
 
   /// Parse function parameters with ES2017 trailing comma support

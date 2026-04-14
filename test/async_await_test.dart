@@ -17,9 +17,8 @@ void main() {
         }
       ''');
 
-      // Function declarations now return the function
-      // (necessary for ES2020 module exports)
-      expect(result, isA<JSFunction>());
+      // Per spec, function declarations have completion value "empty" (undefined)
+      expect(result, isA<JSUndefined>());
     });
 
     test('Async function expression parsing', () {

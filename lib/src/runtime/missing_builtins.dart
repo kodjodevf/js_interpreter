@@ -2,6 +2,7 @@
 library;
 
 import 'js_value.dart';
+import 'js_symbol.dart';
 import 'native_functions.dart';
 
 /// WeakRef constructor implementation
@@ -15,28 +16,11 @@ JSNativeFunction createWeakRefConstructor() {
 
       final target = args[0];
 
-      // WeakRef can only hold objects
-      if (target is! JSObject) {
-        throw JSTypeError('WeakRef target must be an object');
+      if (target is! JSObject && target is! JSSymbol) {
+        throw JSTypeError('WeakRef target must be an object or symbol');
       }
 
-      // Create WeakRef instance
-      final weakRef = JSObject();
-      weakRef.setInternalSlot('[[WeakRefTarget]]', target);
-
-      // Add deref method
-      weakRef.setProperty(
-        'deref',
-        JSNativeFunction(
-          functionName: 'deref',
-          nativeImpl: (derefArgs) {
-            final weakRefTarget = weakRef.getInternalSlot('[[WeakRefTarget]]');
-            return weakRefTarget ?? JSNull.instance;
-          },
-        ),
-      );
-
-      return weakRef;
+      return JSWeakRefObject(target);
     },
     expectedArgs: 1,
     isConstructor: true,
@@ -58,82 +42,7 @@ JSNativeFunction createFinalizationRegistryConstructor() {
         throw JSTypeError('FinalizationRegistry callback must be a function');
       }
 
-      // Create FinalizationRegistry instance
-      final registry = JSObject();
-      registry.setInternalSlot('[[FinalizationRegistryCallback]]', callback);
-      registry.setInternalSlot('[[FinalizationRegistryCells]]', <JSValue>[]);
-
-      // Add register method
-      registry.setProperty(
-        'register',
-        JSNativeFunction(
-          functionName: 'register',
-          nativeImpl: (registerArgs) {
-            if (registerArgs.isEmpty) {
-              throw JSTypeError(
-                'FinalizationRegistry.register requires a target',
-              );
-            }
-
-            final target = registerArgs[0];
-            if (target is! JSObject) {
-              throw JSTypeError(
-                'FinalizationRegistry target must be an object',
-              );
-            }
-
-            final heldValue = registerArgs.length > 1
-                ? registerArgs[1]
-                : JSNull.instance;
-            final unregisterToken = registerArgs.length > 2
-                ? registerArgs[2]
-                : JSNull.instance;
-
-            final cells =
-                registry.getInternalSlot('[[FinalizationRegistryCells]]')
-                    as List<JSValue>? ??
-                [];
-            final cell = JSObject();
-            cell.setInternalSlot('[[Target]]', target);
-            cell.setInternalSlot('[[HeldValue]]', heldValue);
-            cell.setInternalSlot('[[UnregisterToken]]', unregisterToken);
-            cells.add(cell);
-
-            return JSNull.instance;
-          },
-        ),
-      );
-
-      // Add unregister method
-      registry.setProperty(
-        'unregister',
-        JSNativeFunction(
-          functionName: 'unregister',
-          nativeImpl: (unregisterArgs) {
-            if (unregisterArgs.isEmpty) {
-              throw JSTypeError(
-                'FinalizationRegistry.unregister requires a token',
-              );
-            }
-
-            final token = unregisterArgs[0];
-            final cells =
-                registry.getInternalSlot('[[FinalizationRegistryCells]]')
-                    as List<JSValue>? ??
-                [];
-
-            // Remove cells with matching unregister token
-            cells.removeWhere((cell) {
-              if (cell is! JSObject) return false;
-              return cell.getInternalSlot('[[UnregisterToken]]') == token;
-            });
-
-            return JSNull.instance;
-          },
-        ),
-      );
-
-      return registry;
+      return JSFinalizationRegistryObject(callback);
     },
     expectedArgs: 1,
     isConstructor: true,

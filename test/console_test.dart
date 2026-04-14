@@ -1,8 +1,13 @@
+import 'package:js_interpreter/js_interpreter.dart';
 import 'package:test/test.dart';
-import 'package:js_interpreter/src/evaluator/evaluator.dart';
 
 void main() {
   group('Console Tests', () {
+    late JSInterpreter interpreter;
+
+    setUp(() {
+      interpreter = JSInterpreter();
+    });
     test('console.log() with various types', () {
       const code = '''
         console.log("Hello, World!");
@@ -19,7 +24,7 @@ void main() {
 
       // This test just verifies that console.log doesn't crash
       // L'output sera visible dans le terminal
-      expect(() => JSEvaluator.evaluateString(code), returnsNormally);
+      expect(() => interpreter.eval(code), returnsNormally);
     });
 
     test('console.error() and console.warn()', () {
@@ -28,7 +33,7 @@ void main() {
         console.warn("This is a warning");
       ''';
 
-      expect(() => JSEvaluator.evaluateString(code), returnsNormally);
+      expect(() => interpreter.eval(code), returnsNormally);
     });
 
     test('console methods are functions', () {
@@ -36,7 +41,7 @@ void main() {
         typeof console.log;
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('function'));
     });
 
@@ -46,7 +51,7 @@ void main() {
         result;
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.isUndefined, isTrue);
     });
 
@@ -56,7 +61,7 @@ void main() {
         console.log(arr);
       ''';
 
-      expect(() => JSEvaluator.evaluateString(code), returnsNormally);
+      expect(() => interpreter.eval(code), returnsNormally);
     });
 
     test('console.log() complex example', () {
@@ -73,7 +78,7 @@ void main() {
         }
       ''';
 
-      expect(() => JSEvaluator.evaluateString(code), returnsNormally);
+      expect(() => interpreter.eval(code), returnsNormally);
     });
   });
 }

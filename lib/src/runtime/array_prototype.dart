@@ -9,7 +9,7 @@ import 'iterator_protocol.dart';
 import 'js_symbol.dart';
 import 'js_regexp.dart';
 import 'date_object.dart';
-import '../evaluator/evaluator.dart';
+import 'js_runtime.dart';
 
 /// Array prototype with all methods
 class ArrayPrototype {
@@ -31,6 +31,29 @@ class ArrayPrototype {
   static bool isOriginalNative(String name, JSValue fn) {
     if (!_originalNatives.containsKey(name)) return false;
     return identical(fn, _originalNatives[name]);
+  }
+
+  static JSValue? _getOwnPrototypeValue(
+    JSObject obj,
+    String propertyName,
+    JSValue receiver,
+  ) {
+    final descriptor = obj.getOwnPropertyDescriptor(propertyName);
+    if (descriptor == null) {
+      return null;
+    }
+    if (descriptor.isAccessor) {
+      final getter = descriptor.getter;
+      if (getter == null) {
+        return JSValueFactory.undefined();
+      }
+      final runtime = JSRuntime.current;
+      if (runtime == null) {
+        return JSValueFactory.undefined();
+      }
+      return runtime.callFunction(getter, const <JSValue>[], receiver);
+    }
+    return descriptor.value ?? JSValueFactory.undefined();
   }
 
   /// Helper: Convert a numeric value to an integer, handling NaN and Infinity
@@ -313,13 +336,46 @@ class ArrayPrototype {
   }
 
   /// Array.prototype.slice(start?, end?)
-  static JSValue slice(List<JSValue> args, JSArray arr) {
-    final length = arr.length;
+  /// Supports being borrowed via Function.prototype.call/apply.
+  static JSValue slice(List<JSValue> args, [JSArray? arr]) {
+    JSValue thisObj;
+    List<JSValue> realArgs;
+
+    final isCallOnPrototype =
+        arr != null && identical(arr, JSArray.arrayPrototype);
+
+    if (isCallOnPrototype && args.isNotEmpty) {
+      thisObj = args[0];
+      realArgs = args.length > 1 ? args.sublist(1) : const <JSValue>[];
+    } else if (arr != null && args.isNotEmpty && identical(args[0], arr)) {
+      thisObj = arr;
+      realArgs = args.sublist(1);
+    } else if (arr != null) {
+      thisObj = arr;
+      realArgs = args;
+    } else if (args.isNotEmpty) {
+      thisObj = args[0];
+      realArgs = args.length > 1 ? args.sublist(1) : const <JSValue>[];
+    } else {
+      throw JSTypeError('Array.prototype.slice requires this binding');
+    }
+
+    if (thisObj.isNull || thisObj.isUndefined) {
+      throw JSTypeError('Array.prototype.slice called on null or undefined');
+    }
+
+    final dynamic targetObj = (thisObj is JSObject || thisObj is JSFunction)
+        ? thisObj
+        : thisObj.toObject();
+
+    final length = thisObj is JSArray
+        ? thisObj.length
+        : _toLength(targetObj.getProperty('length'));
     var start = 0;
     var end = length;
 
-    if (args.isNotEmpty) {
-      final startNum = args[0].toNumber();
+    if (realArgs.isNotEmpty) {
+      final startNum = realArgs[0].toNumber();
       if (!startNum.isNaN && !startNum.isInfinite) {
         start = startNum.truncate(); // ToInteger: truncate toward zero
       } else if (startNum.isNaN) {
@@ -332,8 +388,8 @@ class ArrayPrototype {
       if (start > length) start = length;
     }
 
-    if (args.length > 1) {
-      final endNum = args[1].toNumber();
+    if (realArgs.length > 1) {
+      final endNum = realArgs[1].toNumber();
       if (!endNum.isNaN && !endNum.isInfinite) {
         end = endNum.truncate(); // ToInteger: truncate toward zero
       } else if (endNum.isNaN) {
@@ -350,7 +406,10 @@ class ArrayPrototype {
       return JSValueFactory.array([]);
     }
 
-    final result = arr.elements.sublist(start, end);
+    final result = <JSValue>[];
+    for (var i = start; i < end; i++) {
+      result.add(targetObj.getProperty(i.toString()));
+    }
     return JSValueFactory.array(result);
   }
 
@@ -392,21 +451,52 @@ class ArrayPrototype {
   }
 
   /// Array.prototype.join(separator?)
-  static JSValue join(List<JSValue> args, JSArray arr) {
-    final separator = args.isNotEmpty ? args[0] : JSValueFactory.string(',');
+  /// Supports being borrowed via Function.prototype.call/apply.
+  static JSValue join(List<JSValue> args, [JSArray? arr]) {
+    JSValue thisObj;
+    List<JSValue> realArgs;
 
-    final elements = <String>[];
-    for (var i = 0; i < arr.length; i++) {
-      final element = arr.getProperty(i.toString());
-      // According to ECMAScript, undefined and null become empty strings
+    if (args.isNotEmpty && (args[0] is JSObject || args[0] is JSFunction)) {
+      thisObj = args[0];
+      realArgs = args.sublist(1);
+    } else if (arr != null) {
+      thisObj = arr;
+      realArgs = args;
+    } else {
+      return JSValueFactory.string('');
+    }
+
+    final separator = realArgs.isNotEmpty
+        ? realArgs[0]
+        : JSValueFactory.string(',');
+    final pieces = <String>[];
+
+    int length = 0;
+    if (thisObj is JSArray) {
+      length = thisObj.length;
+    } else if (thisObj is JSObject) {
+      length = thisObj.getProperty('length').toNumber().toInt();
+    } else if (thisObj is JSFunction) {
+      length = thisObj.getProperty('length').toNumber().toInt();
+    }
+
+    for (var i = 0; i < length; i++) {
+      JSValue element = JSValueFactory.undefined();
+      if (thisObj is JSObject) {
+        element = thisObj.getProperty(i.toString());
+      } else if (thisObj is JSFunction) {
+        element = thisObj.getProperty(i.toString());
+      }
+
       if (element.isUndefined || element.isNull) {
-        elements.add('');
+        pieces.add('');
       } else {
-        elements.add(JSConversion.jsToString(element));
+        pieces.add(JSConversion.jsToString(element));
       }
     }
+
     return JSValueFactory.string(
-      elements.join(JSConversion.jsToString(separator)),
+      pieces.join(JSConversion.jsToString(separator)),
     );
   }
 
@@ -1193,15 +1283,15 @@ class ArrayPrototype {
     }
 
     // Use the custom comparison function
-    final evaluator = JSEvaluator.currentInstance;
-    if (evaluator == null) {
-      throw JSError('No evaluator available for function execution');
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No runtime available for function execution');
     }
 
     arr.elements.sort((a, b) {
       try {
         // Appeler compareFn(a, b)
-        final result = evaluator.callFunction(compareFn, [a, b]);
+        final result = runtime.callFunction(compareFn, [a, b]);
 
         // The result must be a number
         if (result.isNumber) {
@@ -2672,18 +2762,18 @@ class ArrayPrototype {
   ) {
     // Check if it's a native function
     if (function is JSNativeFunction) {
-      return function.nativeImpl(args);
+      return function.callWithThis(args, thisBinding);
     }
 
-    // Use the current evaluator to execute JavaScript functions
-    final evaluator = JSEvaluator.currentInstance;
-    if (evaluator == null) {
-      throw JSError('No evaluator available for function execution');
+    // Use the current runtime to execute JavaScript functions
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No runtime available for function execution');
     }
 
     try {
       // Appeler la fonction JavaScript avec le bon contexte this
-      return evaluator.callFunction(function, args, thisBinding);
+      return runtime.callFunction(function, args, thisBinding);
     } catch (e) {
       // If it's a JSException (JavaScript exception), propagate it as-is
       if (e is JSException) {
@@ -2770,7 +2860,7 @@ class ArrayPrototype {
     // List of native methods that are handled in the switch below
     // These must NOT be looked up from Array.prototype first
     // Symbol.iterator is included here since it's handled in the default block
-    final symbolIteratorKey = JSSymbol.iterator.toString();
+    final symbolIteratorKey = JSSymbol.iterator.propertyKey;
     final nativeMethods = {
       'length',
       'push',
@@ -2818,7 +2908,7 @@ class ArrayPrototype {
     // This allows overriding built-in methods like Array.prototype.toString = Object.prototype.toString
     final arrayProto = JSArray.arrayPrototype;
     if (arrayProto != null && !nativeMethods.contains(propertyName)) {
-      final protoProp = arrayProto.getOwnPropertyDirect(propertyName);
+      final protoProp = _getOwnPrototypeValue(arrayProto, propertyName, arr);
       if (protoProp != null && !protoProp.isUndefined) {
         return protoProp;
       }
@@ -2827,7 +2917,7 @@ class ArrayPrototype {
     // For native methods, check if they've been overridden on Array.prototype
     // The prototype property takes precedence over native implementation
     if (arrayProto != null && nativeMethods.contains(propertyName)) {
-      final protoProp = arrayProto.getOwnPropertyDirect(propertyName);
+      final protoProp = _getOwnPrototypeValue(arrayProto, propertyName, arr);
       if (protoProp != null && !protoProp.isUndefined) {
         // Check if this is NOT the original native function we registered
         // If it's different, it means user overrode it (e.g., Array.prototype.toString = Object.prototype.toString)
@@ -2883,6 +2973,7 @@ class ArrayPrototype {
         return JSNativeFunction(
           functionName: 'slice',
           nativeImpl: (args) => slice(args, arr),
+          hasContextBound: false,
         );
       case 'splice':
         return JSNativeFunction(
@@ -2893,7 +2984,7 @@ class ArrayPrototype {
         return JSNativeFunction(
           functionName: 'join',
           nativeImpl: (args) => join(args, arr),
-          hasContextBound: true,
+          hasContextBound: false,
         );
       case 'toString':
         return JSNativeFunction(
@@ -3070,11 +3161,44 @@ class ArrayPrototype {
         );
       default:
         // Check for Symbol.iterator
-        if (propertyName == JSSymbol.iterator.toString()) {
+        if (propertyName == JSSymbol.iterator.propertyKey) {
+          final proto = JSArray.arrayPrototype;
+          if (proto != null) {
+            final existing = proto.getOwnPropertyDescriptor(propertyName);
+            if (existing != null && existing.value != null) {
+              return existing.value!;
+            }
+
+            final iteratorFn = JSNativeFunction(
+              functionName: 'Symbol.iterator',
+              nativeImpl: (args) {
+                final receiver = args.isNotEmpty ? args[0] : arr;
+                if (receiver is JSArray) {
+                  return JSArrayIterator(receiver, IteratorKind.valueKind);
+                }
+                return JSArrayIterator(arr, IteratorKind.valueKind);
+              },
+            );
+            proto.defineProperty(
+              propertyName,
+              PropertyDescriptor(
+                value: iteratorFn,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+              ),
+            );
+            proto.registerSymbolKey(propertyName, JSSymbol.iterator);
+            return iteratorFn;
+          }
+
           return JSNativeFunction(
             functionName: 'Symbol.iterator',
             nativeImpl: (args) {
-              // Return an iterator for the array
+              final receiver = args.isNotEmpty ? args[0] : arr;
+              if (receiver is JSArray) {
+                return JSArrayIterator(receiver, IteratorKind.valueKind);
+              }
               return JSArrayIterator(arr, IteratorKind.valueKind);
             },
           );

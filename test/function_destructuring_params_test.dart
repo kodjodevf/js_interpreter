@@ -51,6 +51,20 @@ void main() {
       expect(result.toNumber(), equals(60));
     });
 
+    test('arrow parameters support destructuring defaults in a list', () {
+      final js = JSInterpreter();
+      expect(
+        () => js.eval('''
+        var fn = (c, [a, b] = [1, 2], d) => [c, a, b, d];
+        var result = fn(10, undefined, 20).toString();
+      '''),
+        returnsNormally,
+      );
+
+      final result = js.eval('result');
+      expect(result.toString(), equals('10,1,2,20'));
+    });
+
     test('onstructor pattern', () {
       final js = JSInterpreter();
       expect(

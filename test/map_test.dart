@@ -130,14 +130,13 @@ void main() {
       expect(interpreter.eval('map.size').primitiveValue, equals(3));
     });
 
-    test('Map chaining (set returns undefined)', () {
+    test('Map chaining (set returns the map)', () {
       interpreter.eval('''
         const map = new Map();
         const result = map.set('a', 1);
       ''');
 
-      // set should return undefined, not the map itself
-      expect(interpreter.eval('result').isUndefined, equals(true));
+      expect(interpreter.eval('result === map').toBoolean(), equals(true));
       expect(interpreter.eval('map.get("a")').primitiveValue, equals(1));
     });
 

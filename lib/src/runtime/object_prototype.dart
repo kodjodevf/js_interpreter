@@ -3,9 +3,10 @@
 library;
 
 import 'js_value.dart';
+import 'js_symbol.dart';
 import 'environment.dart';
 import 'native_functions.dart';
-import '../evaluator/evaluator.dart';
+import 'js_runtime.dart';
 
 /// Object Prototype - methods available on all objects
 class ObjectPrototype {
@@ -42,7 +43,7 @@ class ObjectPrototype {
     }
 
     final thisValue = args[0];
-    final property = args[1].toString();
+    final property = ObjectGlobal._toPropertyKey(args[1]);
 
     // Handle JSClass and JSFunction objects which have getOwnPropertyDescriptor
     if (thisValue is JSClass || thisValue is JSFunction) {
@@ -77,7 +78,7 @@ class ObjectPrototype {
     }
 
     final thisValue = args[0];
-    final property = args[1].toString();
+    final property = ObjectGlobal._toPropertyKey(args[1]);
 
     if (thisValue is! JSObject && thisValue is! JSFunction) {
       return JSValueFactory.boolean(false);
@@ -134,6 +135,16 @@ class ObjectPrototype {
 
 /// Global Object with its static methods
 class ObjectGlobal {
+  static String _toPropertyKey(JSValue value) {
+    if (value is JSSymbol) {
+      return value.propertyKey;
+    }
+    if (value is JSSymbolObject) {
+      return value.primitiveValue.propertyKey;
+    }
+    return value.toString();
+  }
+
   /// Object.keys(obj) - Returns an array of enumerable keys of the object
   static JSValue keys(List<JSValue> args, Environment env) {
     if (args.isEmpty) {
@@ -268,9 +279,8 @@ class ObjectGlobal {
 
         // ES6: Also copy symbol properties
         for (final symbol in sourceObj.getSymbolKeys()) {
-          final stringKey = symbol.toString();
-          final value = sourceObj.getProperty(stringKey);
-          targetObj.setPropertyWithSymbol(stringKey, value, symbol);
+          final value = sourceObj.getPropertyBySymbol(symbol);
+          targetObj.setPropertyWithSymbol(symbol.propertyKey, value, symbol);
         }
       }
     }
@@ -543,8 +553,18 @@ class ObjectGlobal {
       return funcProto ?? JSValueFactory.nullValue();
     }
 
-    // For functions, return Function.prototype
+    // For functions, honor an explicit [[Prototype]] before falling back to
+    // Function.prototype.
     if (obj is JSFunction) {
+      if (obj.containsOwnProperty('__proto__')) {
+        final explicitProto = obj.getProperty('__proto__');
+        if (explicitProto is JSObject || explicitProto is JSFunction) {
+          return explicitProto;
+        }
+        if (explicitProto.isNull) {
+          return JSValueFactory.nullValue();
+        }
+      }
       final funcProto = JSFunction.functionPrototype;
       return funcProto ?? JSValueFactory.nullValue();
     }
@@ -696,7 +716,7 @@ class ObjectGlobal {
     }
 
     final obj = args[0];
-    final property = args[1].toString();
+    final property = _toPropertyKey(args[1]);
     final descriptorArg = args[2];
 
     // Accept JSObject and JSFunction (functions are objects in JS)
@@ -706,11 +726,30 @@ class ObjectGlobal {
 
     JSObject? jsObj;
     JSFunction? jsFunc;
+    PropertyDescriptor? existingDescriptor;
 
     if (obj is JSObject) {
       jsObj = obj;
+      existingDescriptor = jsObj.getOwnPropertyDescriptor(property);
     } else if (obj is JSFunction) {
       jsFunc = obj;
+      existingDescriptor = jsFunc.getOwnPropertyDescriptor(property);
+    }
+
+    if (existingDescriptor == null) {
+      final runtime = JSRuntime.current;
+      final globalThis = runtime?.getGlobal('globalThis');
+      if (runtime != null && obj is JSObject && identical(obj, globalThis)) {
+        final globalValue = runtime.getGlobal(property);
+        if (!globalValue.isUndefined) {
+          existingDescriptor = PropertyDescriptor(
+            value: globalValue,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          );
+        }
+      }
     }
 
     // Create the descriptor from the passed object
@@ -725,16 +764,20 @@ class ObjectGlobal {
       final value = descObj.getProperty('value');
       final hasValue = descObj.hasProperty('value');
 
-      // ES6: defaults are false for all flags if not specified
-      final configurable = descObj.hasProperty('configurable')
+      final hasConfigurable = descObj.hasProperty('configurable');
+      final hasEnumerable = descObj.hasProperty('enumerable');
+      final hasWritable = descObj.hasProperty('writable');
+
+      // Preserve existing fields when omitted for an existing property.
+      final configurable = hasConfigurable
           ? descObj.getProperty('configurable').toBoolean()
-          : false;
-      final enumerable = descObj.hasProperty('enumerable')
+          : (existingDescriptor?.configurable ?? false);
+      final enumerable = hasEnumerable
           ? descObj.getProperty('enumerable').toBoolean()
-          : false;
-      final writable = descObj.hasProperty('writable')
+          : (existingDescriptor?.enumerable ?? false);
+      final writable = hasWritable
           ? descObj.getProperty('writable').toBoolean()
-          : false;
+          : (existingDescriptor?.writable ?? false);
 
       if (getter.type == JSValueType.function ||
           setter.type == JSValueType.function) {
@@ -751,13 +794,22 @@ class ObjectGlobal {
           hasValueProperty: false,
         );
       } else {
+        final effectiveValue = hasValue
+            ? value
+            : (existingDescriptor != null && !existingDescriptor.isAccessor
+                  ? existingDescriptor.value
+                  : null);
+        final effectiveHasValue =
+            hasValue ||
+            (existingDescriptor != null && !existingDescriptor.isAccessor);
+
         // Data property (even if value is undefined)
         descriptor = PropertyDescriptor(
-          value: value,
+          value: effectiveValue,
           writable: writable,
           configurable: configurable,
           enumerable: enumerable,
-          hasValueProperty: hasValue,
+          hasValueProperty: effectiveHasValue,
         );
       }
     } else {
@@ -843,10 +895,13 @@ class ObjectGlobal {
           } else {
             // Data property (even if value is not defined, we create the descriptor)
             descriptor = PropertyDescriptor(
-              value: value.isUndefined ? JSValueFactory.undefined() : value,
+              value: descObj.hasProperty('value')
+                  ? (value.isUndefined ? JSValueFactory.undefined() : value)
+                  : null,
               writable: writable,
               configurable: configurable,
               enumerable: enumerable,
+              hasValueProperty: descObj.hasProperty('value'),
             );
           }
 
@@ -866,7 +921,7 @@ class ObjectGlobal {
     }
 
     final obj = args[0];
-    final property = args[1].toString();
+    final property = _toPropertyKey(args[1]);
 
     PropertyDescriptor? descriptor;
 
@@ -1076,8 +1131,10 @@ class ObjectGlobal {
 
     // ES6: Retrieve all tracked symbol keys from the object
     if (obj is JSObject) {
-      // Access the _symbolKeys map to get all symbol properties
-      // The map contains string keys to JSSymbol instances
+      for (final symbol in obj.getSymbolKeys()) {
+        symbolsArray.elements.add(symbol);
+      }
+    } else if (obj is JSFunction) {
       for (final symbol in obj.getSymbolKeys()) {
         symbolsArray.elements.add(symbol);
       }
@@ -1164,9 +1221,9 @@ class ObjectGlobal {
 
     // Try to get current evaluator instance for JS functions
     try {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
-        return evaluator.callFunction(function, args, thisBinding);
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        return runtime.callFunction(function, args, thisBinding);
       }
     } catch (e) {
       // Fallback: throw an error
@@ -1217,7 +1274,7 @@ class ObjectGlobal {
 
     // IMPORTANT: Add the constructor property to Object.prototype
     // so that all objects have access to their constructor
-    JSObject.objectPrototype.setProperty('constructor', objectConstructor);
+    JSObject.objectPrototype.defineConstructorProperty(objectConstructor);
 
     // Static methods of Object with wrappers for the environment
     objectConstructor.setProperty(

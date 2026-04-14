@@ -121,18 +121,15 @@ void main() {
         }, throwsA(predicate((e) => e.toString().contains('is not iterable'))));
       });
 
-      test('should throw error for non-object destructuring', () {
-        expect(
-          () {
-            interpreter.eval('{x, y} = 42;');
-          },
-          throwsA(
-            predicate(
-              (e) => e.toString().contains('Cannot destructure non-object'),
-            ),
-          ),
-        );
-      });
+      test(
+        'should not throw error for non-object destructuring (numbers are coercible)',
+        () {
+          // Per spec, only null/undefined are not object-coercible
+          // Numbers wrap to Number objects, so {x, y} = 42 gives undefined for x and y
+          final result = interpreter.eval('var x, y; ({x, y} = 42);');
+          expect(result.toString(), equals('42'));
+        },
+      );
 
       test('should throw error for null destructuring', () {
         expect(() {

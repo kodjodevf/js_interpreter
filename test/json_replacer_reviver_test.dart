@@ -307,6 +307,28 @@ void main() {
         );
         expect(jsonStr, contains('"name":"test"'));
       });
+
+      test('should call Date.toJSON before replacer logic', () {
+        final result = interpreter.eval('''
+          var seen = null;
+          var json = JSON.stringify({
+            now: new Date("2023-01-01T00:00:00.000Z")
+          }, function(key, value) {
+            if (key === 'now') {
+              seen = value;
+            }
+            return value;
+          });
+          JSON.stringify({ seen, json });
+        ''');
+
+        final jsonStr = result.toString();
+        expect(jsonStr, contains('"seen":"2023-01-01T00:00:00.000Z"'));
+        expect(
+          jsonStr,
+          contains('"json":"{\\"now\\":\\"2023-01-01T00:00:00.000Z\\"}"'),
+        );
+      });
     });
 
     group('Performance and Stress Tests', () {

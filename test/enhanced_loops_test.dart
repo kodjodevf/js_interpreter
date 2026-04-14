@@ -34,6 +34,36 @@ void main() {
         expect(result.toString(), equals('0,1,2'));
       });
 
+      test('does not enumerate inherited built-in constructors', () {
+        final result = interpreter.eval('''
+          var prototypes = [
+            Object.prototype,
+            Function.prototype,
+            Number.prototype,
+            String.prototype,
+            Array.prototype,
+            RegExp.prototype,
+            Date.prototype,
+            Map.prototype,
+            Set.prototype,
+            WeakMap.prototype,
+            WeakSet.prototype,
+            Promise.prototype
+          ];
+          var leaks = [];
+          for (var i = 0; i < prototypes.length; i++) {
+            var obj = Object.create(prototypes[i]);
+            for (var key in obj) {
+              if (key === 'constructor') {
+                leaks.push(i);
+              }
+            }
+          }
+          leaks.length;
+        ''');
+        expect(result.toNumber(), equals(0));
+      });
+
       test('works with break and continue', () {
         final result = interpreter.eval('''
           var obj = {a: 1, b: 2, c: 3, d: 4};

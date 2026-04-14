@@ -3,9 +3,9 @@
 library;
 
 import 'js_value.dart';
+import 'js_runtime.dart';
 import 'environment.dart';
 import 'native_functions.dart';
-import '../evaluator/evaluator.dart';
 
 /// Callback to execute a JavaScript function with 'this' support
 typedef FunctionExecutor =
@@ -352,6 +352,8 @@ class JSBoundFunction extends JSFunction {
       originalName = (originalFunction as JSClass)
           .getProperty('name')
           .toString();
+    } else if (originalFunction is JSNativeFunction) {
+      originalName = (originalFunction as JSNativeFunction).functionName;
     } else if (originalFunction is JSFunction) {
       originalName = (originalFunction as JSFunction).functionName;
     } else {
@@ -365,6 +367,9 @@ class JSBoundFunction extends JSFunction {
       // For classes, get parameter count from constructor
       final constructor = (originalFunction as JSClass).constructor;
       originalCount = constructor?.parameterCount ?? 0;
+    } else if (originalFunction is JSNativeFunction) {
+      final expectedArgs = (originalFunction as JSNativeFunction).expectedArgs;
+      originalCount = expectedArgs >= 0 ? expectedArgs : 0;
     } else if (originalFunction is JSFunction) {
       originalCount = (originalFunction as JSFunction).parameterCount;
     } else {
@@ -374,7 +379,7 @@ class JSBoundFunction extends JSFunction {
 
     // Prototype object for bound functions
     _boundPrototype = JSObject();
-    _boundPrototype.setProperty('constructor', this);
+    _boundPrototype.defineConstructorProperty(this);
   }
 
   @override
@@ -385,9 +390,9 @@ class JSBoundFunction extends JSFunction {
       if (descriptor != null) {
         // If there's a getter, execute it
         if (descriptor.getter != null) {
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
-            return evaluator.callFunction(descriptor.getter!, [], this);
+          final runtime = JSRuntime.current;
+          if (runtime != null) {
+            return runtime.callFunction(descriptor.getter!, [], this);
           }
         }
         // If there's a setter but no getter, return undefined (ES6 spec)
@@ -438,6 +443,7 @@ class JSBoundFunction extends JSFunction {
     return false;
   }
 
+  @override
   List<String> getPropertyNames({bool enumerableOnly = false}) {
     return ['length', 'name', 'prototype'];
   }
@@ -666,16 +672,14 @@ class DynamicFunction extends JSFunction {
   final List<String> parameterNames;
   final String bodyCode;
   final bool isStrict;
-  final JSEvaluator evaluator;
 
   DynamicFunction({
     required this.parameterNames,
     required this.bodyCode,
     required this.isStrict,
-    required this.evaluator,
   }) : super(
          null, // declaration (will be parsed on demand)
-         evaluator.globalEnvironment, // closureEnvironment
+         Environment.global(), // closureEnvironment
          strictMode: isStrict,
        );
 
@@ -693,16 +697,28 @@ class DynamicFunction extends JSFunction {
 
   /// Execute this function with the given arguments
   JSValue execute(List<JSValue> args, JSValue? thisBinding) {
-    return evaluator.executeDynamicFunction(this, args, thisBinding);
+    // Use JSRuntime.current to evaluate the dynamic function body
+    final runtime = JSRuntime.current;
+    if (runtime != null) {
+      // Build the function wrapper code and eval it
+      final params = parameterNames.join(', ');
+      final fullCode = '(function($params) { $bodyCode })';
+      final fn = runtime.evalCode(fullCode);
+      return runtime.callFunction(fn, args, thisBinding);
+    }
+    throw JSError('No active runtime for dynamic function execution');
   }
 }
 
 /// Global Function object with constructor and static methods
 class FunctionGlobal {
   /// Function() constructor - creates a new function from code
-  static JSValue constructor(List<JSValue> args, Environment env) {
-    // Capture the current evaluator's global environment for GetFunctionRealm
-    final currentEvaluator = JSEvaluator.currentInstance;
+  static JSValue constructor(
+    List<JSValue> args,
+    Environment env, {
+    JSRuntime? realmRuntime,
+  }) {
+    final currentRuntime = realmRuntime ?? JSRuntime.current;
 
     if (args.isEmpty) {
       // new Function() without arguments returns an empty function
@@ -712,9 +728,8 @@ class FunctionGlobal {
         isConstructor:
             true, // Functions created via Function() are constructors
       );
-      // Store realm reference for GetFunctionRealm implementation
-      if (currentEvaluator != null) {
-        func.setInternalSlot('Realm', currentEvaluator);
+      if (currentRuntime != null) {
+        func.setInternalSlot('Realm', currentRuntime);
       }
       return func;
     }
@@ -764,47 +779,41 @@ class FunctionGlobal {
       }
     }
 
-    // Parse and execute the function body dynamically using the evaluator
-    if (currentEvaluator != null) {
-      // Create JSFunction that will parse and execute the body when called
-      final func = DynamicFunction(
-        parameterNames: parameters,
-        bodyCode: body,
-        isStrict: isStrictMode,
-        evaluator: currentEvaluator,
-      );
-      // Store realm reference for GetFunctionRealm implementation
-      func.setInternalSlot('Realm', currentEvaluator);
-      return func;
-    }
-
-    // Fallback: return a function that returns undefined
-    final func = JSNativeFunction(
-      functionName: 'anonymous',
-      nativeImpl: (callArgs) => JSValueFactory.undefined(),
-      isConstructor: true,
+    final func = DynamicFunction(
+      parameterNames: parameters,
+      bodyCode: body,
+      isStrict: isStrictMode,
     );
-    if (currentEvaluator != null) {
-      func.setInternalSlot('Realm', currentEvaluator);
+    if (currentRuntime != null) {
+      func.setInternalSlot('Realm', currentRuntime);
     }
     return func;
   }
 
   /// Creates the global Function object
   static JSFunction createFunctionGlobal() {
-    final func = JSNativeFunction(
+    late final JSNativeFunction func;
+    func = JSNativeFunction(
       functionName: 'Function',
-      nativeImpl: (args) => constructor(args, Environment.global()),
+      nativeImpl: (args) => constructor(
+        args,
+        Environment.global(),
+        realmRuntime: func.getInternalSlot('Realm') as JSRuntime?,
+      ),
       expectedArgs: 1,
       isConstructor: true, // Function is a constructor
     );
+    final currentRuntime = JSRuntime.current;
+    if (currentRuntime != null) {
+      func.setInternalSlot('Realm', currentRuntime);
+    }
 
     // Create Function.prototype with call, apply, bind methods
     final prototype = _createFunctionPrototypeObject();
     func.setProperty('prototype', prototype);
 
     // Set Function.prototype.constructor to point back to Function
-    prototype.setProperty('constructor', func);
+    prototype.defineConstructorProperty(func);
 
     // Set the static reference to Function.prototype on JSFunction
     JSFunction.setFunctionPrototype(prototype);

@@ -63,6 +63,56 @@ void main() {
         ''');
         expect(result.toNumber(), equals(3)); // 1+2
       });
+
+      test('for..in accepts initialized var declaration', () {
+        final result = interpreter.eval('''
+          var keys = [];
+          for (var key = 2 in {x: 1, y: 2}) {
+            keys.push(key);
+          }
+          keys.toString();
+        ''');
+        expect(result.toString(), equals('x,y'));
+      });
+
+      test('for..in assigns through member expression targets', () {
+        final result = interpreter.eval('''
+          var holder = { key: '' };
+          var keys = [];
+          for (holder.key in {x: 1, y: 2}) {
+            keys.push(holder.key);
+          }
+          keys.toString();
+        ''');
+        expect(result.toString(), equals('x,y'));
+      });
+
+      test('for..in assigns through computed member targets', () {
+        final result = interpreter.eval('''
+          var holder = [''];
+          var keys = [];
+          for (holder[0] in {x: 1, y: 2}) {
+            keys.push(holder[0]);
+          }
+          keys.toString();
+        ''');
+        expect(result.toString(), equals('x,y'));
+      });
+
+      test('for..in own non-enumerable properties shadow prototypes', () {
+        final result = interpreter.eval('''
+          var a = { y: 2, '1': 3 };
+          Object.defineProperty(a, 'x', { value: 1 });
+          var b = { x: 3 };
+          Object.setPrototypeOf(a, b);
+          var keys = [];
+          for (var key in a) {
+            keys.push(key);
+          }
+          keys.toString();
+        ''');
+        expect(result.toString(), equals('1,y'));
+      });
     });
 
     group('for..of Advanced Features', () {

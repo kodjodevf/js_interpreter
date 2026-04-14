@@ -84,6 +84,63 @@ void main() {
       expect(() => interpreter.eval(code), returnsNormally);
     });
 
+    test('class fields named get and methods named static parse', () {
+      final code = '''
+        class MyClass {
+          get = () => "123";
+          static() {
+            return 42;
+          }
+        }
+
+        const instance = new MyClass();
+        instance.get() + ':' + instance.static();
+      ''';
+
+      expect(() => interpreter.eval(code), returnsNormally);
+    });
+
+    test('named class expression keeps its inner binding', () {
+      final result = interpreter.eval('''
+        var E1 = class E {
+          static F() {
+            return E;
+          }
+        };
+        E1 === E1.F();
+      ''');
+
+      expect(result.toBoolean(), isTrue);
+    });
+
+    test('static field initializers can read class name and this', () {
+      final result = interpreter.eval('''
+        class S {
+          static x = 42;
+          static y = S.x;
+          static z = this.x;
+        }
+
+        [S.x, S.y, S.z].join(':');
+      ''');
+
+      expect(result.toString(), equals('42:42:42'));
+    });
+
+    test('class getter name includes get prefix', () {
+      final result = interpreter.eval('''
+        class C {
+          get y() {
+            return 12;
+          }
+        }
+
+        Object.getOwnPropertyDescriptor(C.prototype, 'y').get.name;
+      ''');
+
+      expect(result.toString(), equals('get y'));
+    });
+
     test('computed properties parsing', () {
       final code = '''
         const methodName = "dynamicMethod";

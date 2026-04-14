@@ -87,6 +87,38 @@ void main() {
     print('Delete result: $result');
   });
 
+  test('delete on null property access throws TypeError', () {
+    final interpreter = JSInterpreter();
+
+    final result = interpreter.eval('''
+      var ok = false;
+      try {
+        delete null.a;
+      } catch (e) {
+        ok = e instanceof TypeError;
+      }
+      ok;
+    ''');
+
+    expect(result.toBoolean(), isTrue);
+  });
+
+  test('delete on super property throws ReferenceError', () {
+    final interpreter = JSInterpreter();
+
+    final result = interpreter.eval('''
+      var ok = false;
+      try {
+        ({ f() { delete super.a; } }).f();
+      } catch (e) {
+        ok = e instanceof ReferenceError;
+      }
+      ok;
+    ''');
+
+    expect(result.toBoolean(), isTrue);
+  });
+
   test('use strict - duplicate parameter names should fail', () {
     final interpreter = JSInterpreter();
 
@@ -141,5 +173,34 @@ void main() {
     final result = interpreter.eval(code);
     print('With statement result: $result');
     expect(result.toString(), equals('with not allowed'));
+  });
+
+  test('use strict - direct eval cannot declare arguments', () {
+    final interpreter = JSInterpreter();
+
+    expect(
+      () => interpreter.eval('''
+        (function() {
+          "use strict";
+          eval("var arguments");
+        })();
+      '''),
+      throwsA(predicate((error) => error.toString().contains('SyntaxError'))),
+    );
+  });
+
+  test('use strict - named function expression binding is immutable', () {
+    final interpreter = JSInterpreter();
+
+    expect(
+      () => interpreter.eval('''
+        const fn = function inner() {
+          "use strict";
+          inner = 1;
+        };
+        fn();
+      '''),
+      throwsA(predicate((error) => error.toString().contains('TypeError'))),
+    );
   });
 }

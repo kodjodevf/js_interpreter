@@ -7,6 +7,32 @@ import 'package:js_interpreter/js_interpreter.dart';
 
 /// JavaScript JSON Object implementation
 class JSONObject {
+  static String _formatJsonSyntaxError(FormatException error, String source) {
+    var offset = error.offset;
+    if (offset != null && offset >= 0 && source.isNotEmpty) {
+      var index = offset;
+      if (index >= source.length) {
+        index = source.length - 1;
+      }
+      if (error.message == 'Unrecognized string escape' && index > 0) {
+        index -= 1;
+      }
+
+      var line = 1;
+      var column = 1;
+      for (var i = 0; i < index; i++) {
+        if (source.codeUnitAt(i) == 0x0A) {
+          line += 1;
+          column = 1;
+        } else {
+          column += 1;
+        }
+      }
+      return '${error.message}:$line:$column';
+    }
+    return error.message;
+  }
+
   /// ES2019: Custom JSON stringify that properly escapes unpaired surrogates
   static String _customJsonStringify(dynamic value, String? spacer, int depth) {
     if (value == null) {
@@ -161,12 +187,7 @@ class JSONObject {
         expectedArgs: 2,
         nativeImpl: (args) {
           if (args.isEmpty) {
-            final evaluator = JSEvaluator.currentInstance;
-            if (evaluator != null) {
-              evaluator.throwJSSyntaxError('Unexpected end of JSON input');
-            } else {
-              throw JSError('SyntaxError: Unexpected end of JSON input');
-            }
+            throw JSSyntaxError('Unexpected end of JSON input');
           }
 
           final text = args[0].toString();
@@ -181,19 +202,16 @@ class JSONObject {
             }
 
             return jsValue;
+          } on FormatException catch (e) {
+            throw JSSyntaxError(_formatJsonSyntaxError(e, text));
           } catch (e) {
-            final evaluator = JSEvaluator.currentInstance;
-            if (evaluator != null) {
-              // Extract the actual error message from Dart's jsonDecode error
-              String errorMsg = e.toString();
-              // Clean up the error message if it has 'FormatException:' prefix
-              if (errorMsg.contains('FormatException:')) {
-                errorMsg = errorMsg.replaceFirst('FormatException: ', '');
-              }
-              evaluator.throwJSSyntaxError(errorMsg);
-            } else {
-              throw JSError('SyntaxError: $e');
+            // Extract the actual error message from Dart's jsonDecode error
+            String errorMsg = e.toString();
+            // Clean up the error message if it has 'FormatException:' prefix
+            if (errorMsg.contains('FormatException:')) {
+              errorMsg = errorMsg.replaceFirst('FormatException: ', '');
             }
+            throw JSSyntaxError(errorMsg);
           }
         },
       ),
@@ -322,6 +340,26 @@ class JSONObject {
     return _jsValueToDartRecursive(jsValue, replacer, '', visited);
   }
 
+  static JSValue _applyToJsonIfPresent(JSValue value, String key) {
+    if (value is! JSObject || !value.hasProperty('toJSON')) {
+      return value;
+    }
+
+    try {
+      final toJson = value.getProperty('toJSON');
+      if (toJson is JSNativeFunction) {
+        return toJson.nativeImpl([JSValueFactory.string(key)]);
+      }
+      if (toJson is JSFunction && _functionExecutor != null) {
+        return _functionExecutor!(toJson, [JSValueFactory.string(key)]);
+      }
+    } catch (_) {
+      return value;
+    }
+
+    return value;
+  }
+
   /// Convert JSValue to native Dart types (public API)
   /// Recursively converts JSObjects to Maps, JSArrays to Lists, etc.
   static dynamic jsValueToDart(JSValue jsValue) {
@@ -361,7 +399,10 @@ class JSONObject {
       final List<dynamic> result = [];
       final length = jsValue.length;
       for (int i = 0; i < length; i++) {
-        final element = jsValue.getProperty(i.toString());
+        final element = _applyToJsonIfPresent(
+          jsValue.getProperty(i.toString()),
+          i.toString(),
+        );
 
         // Apply replacer function to each element
         JSValue processedElement = element;
@@ -436,7 +477,10 @@ class JSONObject {
 
       // Process each allowed property
       for (final propKey in keysToProcess) {
-        final value = jsValue.getProperty(propKey);
+        final value = _applyToJsonIfPresent(
+          jsValue.getProperty(propKey),
+          propKey,
+        );
 
         // Apply replacer function to property
         JSValue processedValue = value;

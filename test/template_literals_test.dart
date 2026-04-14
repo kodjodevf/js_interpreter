@@ -132,6 +132,25 @@ void main() {
         final result = interpreter.eval(r'`Hello ${name}!\nWelcome!`');
         expect(result.toString(), equals('Hello Alice!\nWelcome!'));
       });
+
+      test('should support String.raw tagged templates', () {
+        final result = interpreter.eval(r'String.raw`abc${123}d`');
+        expect(result.toString(), equals('abc123d'));
+      });
+
+      test('should preserve this for method tagged templates', () {
+        interpreter.eval('''
+          var obj = {
+            prefix: "x",
+            tag(strings, value) {
+              return this.prefix + strings[0] + value + strings[1];
+            }
+          };
+        ''');
+
+        final result = interpreter.eval(r'obj.tag`a${1}b`');
+        expect(result.toString(), equals('xa1b'));
+      });
     });
 
     group('Template Literals Integration', () {

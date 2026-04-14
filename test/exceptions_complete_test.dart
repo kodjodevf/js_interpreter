@@ -153,6 +153,24 @@ void main() {
         ''');
         expect(result.toString(), equals("finally"));
       });
+
+      test('break executes finally inside loops', () {
+        final result = interpreter.eval('''
+          (function() {
+            let text = "";
+            for (;;) {
+              try {
+                text += "t";
+                break;
+              } finally {
+                text += "f";
+              }
+            }
+            return text;
+          })()
+        ''');
+        expect(result.toString(), equals("tf"));
+      });
     });
 
     group('nested try/catch', () {

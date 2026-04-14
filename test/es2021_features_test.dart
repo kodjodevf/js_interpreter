@@ -353,7 +353,7 @@ void main() {
         const error = new AggregateError([]);
         error.message;
       ''');
-      expect(result.toString(), 'All promises were rejected');
+      expect(result.toString(), '');
     });
 
     test('AggregateError errors can be accessed', () {

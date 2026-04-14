@@ -113,6 +113,21 @@ void main() {
         final result = interpreter.eval(code);
         expect(result.toNumber(), equals(120));
       });
+
+      test(
+        'should keep named function expression binding immutable in sloppy mode',
+        () {
+          const code = '''
+          const fn = function inner() {
+            inner = 1;
+            return inner === fn;
+          };
+          fn();
+        ''';
+          final result = interpreter.eval(code);
+          expect(result.toBoolean(), isTrue);
+        },
+      );
     });
 
     group('Arrow functions', () {

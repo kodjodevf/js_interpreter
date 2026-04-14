@@ -4,6 +4,8 @@
 /// all JavaScript values.
 library;
 
+import 'dart:collection';
+
 import 'date_object.dart';
 import 'error_object.dart';
 import 'js_regexp.dart';
@@ -15,7 +17,7 @@ import 'iterator_protocol.dart';
 import 'environment.dart';
 import 'function_prototype.dart';
 import 'prototype_manager.dart';
-import '../evaluator/evaluator.dart';
+import 'js_runtime.dart';
 import '../parser/ast_nodes.dart';
 
 /// Base JavaScript types according to ECMAScript
@@ -210,13 +212,33 @@ class JSNumber extends JSValue {
   String toString() {
     if (value.isNaN) return 'NaN';
     if (value.isInfinite) return value.isNegative ? '-Infinity' : 'Infinity';
-    // Check if it's a safe integer (can be represented exactly as int)
-    // Only truncate for values within safe integer range to avoid overflow
-    if (value == value.truncateToDouble() && value.abs() <= 9007199254740991) {
-      // Number.MAX_SAFE_INTEGER
-      return value.truncate().toString();
+    if (value == 0) return '0';
+    if (value == value.truncateToDouble() && value.abs() < 1e21) {
+      final raw = value.toString();
+      if (raw.contains('e') || raw.contains('E')) {
+        return _expandExponentialInteger(raw);
+      }
+      return raw.endsWith('.0') ? raw.substring(0, raw.length - 2) : raw;
     }
     return value.toString();
+  }
+
+  static String _expandExponentialInteger(String raw) {
+    final parts = raw.toLowerCase().split('e');
+    if (parts.length != 2) {
+      return raw;
+    }
+
+    final mantissa = parts[0];
+    final exponent = int.parse(parts[1]);
+    final negative = mantissa.startsWith('-');
+    final digits = mantissa.replaceAll('-', '').replaceAll('.', '');
+    final decimalDigits = mantissa.contains('.')
+        ? mantissa.length - mantissa.indexOf('.') - 1
+        : 0;
+    final zeros = exponent - decimalDigits;
+    final expanded = zeros >= 0 ? digits + ('0' * zeros) : digits;
+    return negative ? '-$expanded' : expanded;
   }
 
   @override
@@ -455,6 +477,14 @@ class JSException extends JSError implements Exception {
       if (!name.isUndefined) {
         return name.toString();
       }
+      // Check constructor.name for user-defined error constructors
+      final ctor = value.getProperty('constructor');
+      if (ctor is JSFunction) {
+        final ctorName = ctor.getProperty('name');
+        if (!ctorName.isUndefined) {
+          return ctorName.toString();
+        }
+      }
     }
     return 'Error';
   }
@@ -487,7 +517,7 @@ class PropertyDescriptor {
   });
 
   bool get isAccessor => getter != null || setter != null;
-  bool get isData => value != null;
+  bool get isData => !isAccessor;
 }
 
 /// Mapped arguments object for non-strict functions with simple parameters
@@ -667,12 +697,10 @@ class JSObject extends JSValue {
       }
 
       // Check if object has a Symbol.toStringTag
-      final toStringTagKey = JSSymbol.toStringTag.toString();
-      if (value._symbolKeys.containsKey(toStringTagKey)) {
-        final tag = value._symbolKeys[toStringTagKey];
-        if (tag != null && tag.isString) {
-          return tag.toString();
-        }
+      final toStringTagKey = JSSymbol.toStringTag.propertyKey;
+      final tagValue = value.getProperty(toStringTagKey);
+      if (tagValue is JSString && tagValue.toString().isNotEmpty) {
+        return tagValue.toString();
       }
 
       // Check if object has an internal [[Class]] slot (for prototypes)
@@ -742,26 +770,28 @@ class JSObject extends JSValue {
         // New version (with thisBinding) for call/apply
         if (args.length >= 2) {
           final thisObj = args[0]; // First argument is 'this'
-          final propName = args[1]
-              .toString(); // Second argument is the property name
+          final propName = _toPropertyKeyString(
+            args[1],
+          ); // Second argument is the property name
 
           if (thisObj is JSObject) {
-            final result = thisObj.hasOwnProperty(propName);
-            return JSValueFactory.boolean(result);
+            return JSValueFactory.boolean(
+              thisObj.getOwnPropertyDescriptor(propName) != null,
+            );
           } else if (thisObj is JSNativeFunction) {
             // JSNativeFunction has special hasOwnProperty that tracks deleted props
             final result = thisObj.hasOwnProperty(propName);
             return JSValueFactory.boolean(result);
           } else if (thisObj is JSFunction) {
-            // Functions are objects - check their direct properties
-            final result = thisObj._properties.containsKey(propName);
-            return JSValueFactory.boolean(result);
+            return JSValueFactory.boolean(
+              thisObj.getOwnPropertyDescriptor(propName) != null,
+            );
           }
         }
 
         // Old version (without thisBinding) for direct compatibility
         if (args.length == 1) {
-          final propName = args[0].toString();
+          final propName = _toPropertyKeyString(args[0]);
           final result = hasOwnProperty(propName);
           return JSValueFactory.boolean(result);
         }
@@ -825,7 +855,7 @@ class JSObject extends JSValue {
         if (args.length < 2) return JSValueFactory.boolean(false);
 
         final thisValue = args[0];
-        final propName = args[1].toString();
+        final propName = _toPropertyKeyString(args[1]);
 
         if (thisValue is! JSObject && thisValue is! JSFunction) {
           return JSValueFactory.boolean(false);
@@ -875,6 +905,19 @@ class JSObject extends JSValue {
     _isArgumentsObject = true;
   }
 
+  /// Defines the standard prototype `constructor` property.
+  void defineConstructorProperty(JSValue constructor) {
+    defineProperty(
+      'constructor',
+      PropertyDescriptor(
+        value: constructor,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+  }
+
   @override
   double toNumber() {
     // Delegate to JSConversion.jsToNumber which has access to the evaluator
@@ -888,12 +931,12 @@ class JSObject extends JSValue {
       }
 
       // Get appropriate prototype from global constructor
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
         JSObject? prototype;
         try {
           final constructorName = jsError.name;
-          final constructor = evaluator.globalEnvironment.get(constructorName);
+          final constructor = runtime.getGlobal(constructorName);
           if (constructor is JSFunction && constructor is JSObject) {
             final proto = constructor.getProperty('prototype');
             if (proto is JSObject) {
@@ -949,11 +992,11 @@ class JSObject extends JSValue {
       // ES6 Spec: Cannot add new properties to non-extensible objects
       // In strict mode: throw TypeError
       // In non-strict mode: silently ignore (fail silently)
-      final evaluator = JSEvaluator.currentInstance;
+      final runtime = JSRuntime.current;
       bool isStrictMode = false;
-      if (evaluator != null) {
+      if (runtime != null) {
         try {
-          isStrictMode = evaluator.isCurrentlyInStrictMode();
+          isStrictMode = runtime.isStrictMode();
         } catch (_) {
           // If we can't determine strict mode, default to true for safety
           isStrictMode = true;
@@ -972,11 +1015,11 @@ class JSObject extends JSValue {
         existingDescriptor.isData &&
         !existingDescriptor.writable) {
       // Property is read-only - should throw in strict mode
-      final evaluator = JSEvaluator.currentInstance;
+      final runtime = JSRuntime.current;
       bool isStrictMode = false;
-      if (evaluator != null) {
+      if (runtime != null) {
         try {
-          isStrictMode = evaluator.isCurrentlyInStrictMode();
+          isStrictMode = runtime.isStrictMode();
         } catch (_) {
           // If we can't determine strict mode, default to true for safety
           isStrictMode = true;
@@ -995,10 +1038,14 @@ class JSObject extends JSValue {
       final descriptor = _accessorProperties[name]!;
       if (descriptor.setter != null) {
         // Call the setter with the right context
-        final evaluator = JSEvaluator.currentInstance;
-        if (evaluator != null) {
+        final runtime = JSRuntime.current;
+        if (runtime != null) {
+          final outerStack = _captureRuntimeStack(runtime);
           try {
-            evaluator.callFunction(descriptor.setter!, [value], this);
+            runtime.callFunction(descriptor.setter!, [value], this);
+          } on JSException catch (e) {
+            _appendCapturedStack(e.value, outerStack);
+            rethrow;
           } on JSError catch (jsError) {
             // Convert Dart JSError to JSException for JavaScript
             if (jsError is JSException) {
@@ -1009,9 +1056,7 @@ class JSObject extends JSValue {
             JSObject? prototype;
             try {
               final constructorName = jsError.name;
-              final constructor = evaluator.globalEnvironment.get(
-                constructorName,
-              );
+              final constructor = runtime.getGlobal(constructorName);
               if (constructor is JSFunction && constructor is JSObject) {
                 final proto = constructor.getProperty('prototype');
                 if (proto is JSObject) {
@@ -1025,7 +1070,17 @@ class JSObject extends JSValue {
               jsError,
               prototype,
             );
+            _appendCapturedStack(errorValue, outerStack);
             throw JSException(errorValue);
+          } catch (e) {
+            try {
+              final dynamic signal = e;
+              final dynamic thrownValue = signal.value;
+              if (thrownValue is JSValue) {
+                _appendCapturedStack(thrownValue, outerStack);
+              }
+            } catch (_) {}
+            rethrow;
           }
           return; // Exit after calling the setter
         } else {
@@ -1037,6 +1092,13 @@ class JSObject extends JSValue {
         // In strict mode, this should throw an error
         throw JSTypeError('Cannot set property $name which has only a getter');
       }
+    }
+
+    // If an own property already exists, OrdinarySet updates it directly and
+    // does not consult inherited setters or inherited writability.
+    if (existingDescriptor != null) {
+      _properties[name] = value;
+      return;
     }
 
     // 2. Check setters in the prototype chain
@@ -1060,11 +1122,11 @@ class JSObject extends JSValue {
           // Found a non-writable data property in prototype chain
           // In strict mode, throw TypeError
           // In non-strict mode, silently ignore
-          final evaluator = JSEvaluator.currentInstance;
+          final runtime = JSRuntime.current;
           bool isStrictMode = false;
-          if (evaluator != null) {
+          if (runtime != null) {
             try {
-              isStrictMode = evaluator.isCurrentlyInStrictMode();
+              isStrictMode = runtime.isStrictMode();
             } catch (_) {
               isStrictMode = false;
             }
@@ -1079,10 +1141,10 @@ class JSObject extends JSValue {
           final descriptor = current._accessorProperties[name]!;
           if (descriptor.setter != null) {
             // Call the inherited setter with 'this' pointing to original object
-            final evaluator = JSEvaluator.currentInstance;
-            if (evaluator != null) {
+            final runtime = JSRuntime.current;
+            if (runtime != null) {
               try {
-                evaluator.callFunction(descriptor.setter!, [value], this);
+                runtime.callFunction(descriptor.setter!, [value], this);
               } on JSError catch (jsError) {
                 // Convert Dart JSError to JSException for JavaScript
                 if (jsError is JSException) {
@@ -1093,9 +1155,7 @@ class JSObject extends JSValue {
                 JSObject? prototype;
                 try {
                   final constructorName = jsError.name;
-                  final constructor = evaluator.globalEnvironment.get(
-                    constructorName,
-                  );
+                  final constructor = runtime.getGlobal(constructorName);
                   if (constructor is JSFunction && constructor is JSObject) {
                     final proto = constructor.getProperty('prototype');
                     if (proto is JSObject) {
@@ -1139,10 +1199,11 @@ class JSObject extends JSValue {
 
   /// ES6: Sets a property with a symbol key and tracks the symbol
   void setPropertyWithSymbol(String stringKey, JSValue value, JSSymbol symbol) {
+    final key = symbol.propertyKey;
     // Track the symbol for Object.getOwnPropertySymbols()
-    _symbolKeys[stringKey] = symbol;
-    // Set the property normally
-    setProperty(stringKey, value);
+    _symbolKeys[key] = symbol;
+    // Set the property using the unique key
+    setProperty(key, value);
   }
 
   /// ES6: Returns all symbol keys tracked on this object (not including prototype chain)
@@ -1151,10 +1212,49 @@ class JSObject extends JSValue {
     return _symbolKeys.values;
   }
 
+  /// Register a symbol key for tracking (used when defineProperty is called with a symbol key)
+  void registerSymbolKey(String propertyKey, JSSymbol symbol) {
+    _symbolKeys[propertyKey] = symbol;
+  }
+
+  static String _toPropertyKeyString(JSValue value) {
+    if (value is JSSymbol) {
+      return value.propertyKey;
+    }
+    return value.toString();
+  }
+
+  static String? _captureRuntimeStack(JSRuntime runtime) {
+    try {
+      final dynamic dynamicRuntime = runtime;
+      final captured = dynamicRuntime.captureCurrentStackTrace();
+      if (captured is String && captured.isNotEmpty) {
+        return captured;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  static void _appendCapturedStack(JSValue thrownValue, String? outerStack) {
+    if (outerStack == null || outerStack.isEmpty) {
+      return;
+    }
+    if (thrownValue is! JSObject) {
+      return;
+    }
+    final stackValue = thrownValue.getProperty('stack');
+    final existing = stackValue.isUndefined ? '' : stackValue.toString();
+    if (existing.contains(outerStack)) {
+      return;
+    }
+    final merged = existing.isEmpty ? outerStack : '$existing\n$outerStack';
+    thrownValue.setProperty('stack', JSString(merged));
+  }
+
   /// ES6: Gets a property value using a symbol key
   JSValue getPropertyBySymbol(JSSymbol symbol) {
-    final stringKey = symbol.toString();
-    return getProperty(stringKey);
+    final key = symbol.propertyKey;
+    return getProperty(key);
   }
 
   /// Get a property
@@ -1177,22 +1277,37 @@ class JSObject extends JSValue {
       final descriptor = _accessorProperties[name]!;
       if (descriptor.getter != null) {
         // Check for circular references
-        if (JSEvaluator.isGetterCycle(this, name)) {
+        final runtime = JSRuntime.current;
+        if (runtime != null && runtime.isGetterCycle(this, name)) {
           return JSValueFactory.undefined(); // Return undefined to avoid the cycle
         }
 
         // Call the getter with the right context
-        final evaluator = JSEvaluator.currentInstance;
-        if (evaluator != null) {
+        if (runtime != null) {
+          final outerStack = _captureRuntimeStack(runtime);
           try {
             // Mark this getter as active
-            JSEvaluator.markGetterActive(this, name);
-            final result = evaluator.callFunction(descriptor.getter!, [], this);
+            runtime.markGetterActive(this, name);
+            final result = runtime.callFunction(descriptor.getter!, [], this);
             return result;
+          } on JSException catch (e) {
+            _appendCapturedStack(e.value, outerStack);
+            rethrow;
+          } catch (e) {
+            try {
+              final dynamic signal = e;
+              final dynamic thrownValue = signal.value;
+              if (thrownValue is JSValue) {
+                _appendCapturedStack(thrownValue, outerStack);
+              }
+            } catch (_) {}
+            rethrow;
           } finally {
             // Unmark getter as inactive
-            JSEvaluator.unmarkGetterActive(this, name);
+            runtime.unmarkGetterActive(this, name);
           }
+        } else if (descriptor.getter is JSNativeFunction) {
+          return (descriptor.getter as JSNativeFunction).nativeImpl(const []);
         } else {
           throw JSError('No evaluator available for getter execution');
         }
@@ -1213,21 +1328,23 @@ class JSObject extends JSValue {
         final descriptor = current._accessorProperties[name]!;
         if (descriptor.getter != null) {
           // Check for circular references
-          if (JSEvaluator.isGetterCycle(this, name)) {
+          final runtime = JSRuntime.current;
+          if (runtime != null && runtime.isGetterCycle(this, name)) {
             return JSValueFactory.undefined();
           }
 
           // Call getter with 'this' pointing to original object
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
+          if (runtime != null) {
             try {
               // Mark this getter as active
-              JSEvaluator.markGetterActive(this, name);
-              return evaluator.callFunction(descriptor.getter!, [], this);
+              runtime.markGetterActive(this, name);
+              return runtime.callFunction(descriptor.getter!, [], this);
             } finally {
               // Unmark getter as inactive
-              JSEvaluator.unmarkGetterActive(this, name);
+              runtime.unmarkGetterActive(this, name);
             }
+          } else if (descriptor.getter is JSNativeFunction) {
+            return (descriptor.getter as JSNativeFunction).nativeImpl(const []);
           } else {
             throw JSError(
               'No evaluator available for inherited getter execution',
@@ -1342,15 +1459,30 @@ class JSObject extends JSValue {
       // For non-configurable properties, we can only make limited changes per ES6
       // We can change writable from true to false only
 
+      if (existingDescriptor.isAccessor != descriptor.isAccessor) {
+        throw JSTypeError('Cannot redefine non-configurable property: $name');
+      }
+
       // Check if trying to change configurable or enumerable
       if (descriptor.configurable ||
           (descriptor.enumerable != existingDescriptor.enumerable)) {
         throw JSTypeError('Cannot redefine non-configurable property: $name');
       }
 
-      // For data properties, we can only change writable from true to false
-      if (!existingDescriptor.isAccessor && descriptor.hasValueProperty) {
-        // Trying to change the value - not allowed
+      if (existingDescriptor.isAccessor) {
+        if ((descriptor.getter != null &&
+                !identical(descriptor.getter, existingDescriptor.getter)) ||
+            (descriptor.setter != null &&
+                !identical(descriptor.setter, existingDescriptor.setter))) {
+          throw JSTypeError('Cannot redefine non-configurable property: $name');
+        }
+      }
+
+      // For non-configurable data properties, value changes remain allowed as
+      // long as the property is still writable.
+      if (!existingDescriptor.isAccessor &&
+          descriptor.hasValueProperty &&
+          !existingDescriptor.writable) {
         throw JSTypeError('Cannot redefine non-configurable property: $name');
       }
 
@@ -1492,13 +1624,15 @@ class JSObject extends JSValue {
           nativeImpl: (args) {
             if (args.length < 2) return JSValueFactory.boolean(false);
             final thisObj = args[0]; // First argument is 'this'
-            final propName = args[1]
-                .toString(); // Second argument is the property name
+            final propName = _toPropertyKeyString(
+              args[1],
+            ); // Second argument is the property name
 
             // Handle JSObject (regular objects)
             if (thisObj is JSObject) {
-              final result = thisObj.hasOwnProperty(propName);
-              return JSValueFactory.boolean(result);
+              return JSValueFactory.boolean(
+                thisObj.getOwnPropertyDescriptor(propName) != null,
+              );
             }
 
             // Handle JSClass (classes have getOwnPropertyDescriptor)
@@ -1538,9 +1672,20 @@ class JSObject extends JSValue {
         return JSNativeFunction(
           functionName: 'propertyIsEnumerable',
           nativeImpl: (args) {
-            if (args.isEmpty) return JSValueFactory.boolean(false);
-            final propName = args[0].toString();
-            return JSValueFactory.boolean(hasOwnProperty(propName));
+            if (args.length < 2) return JSValueFactory.boolean(false);
+            final thisObj = args[0];
+            final propName = _toPropertyKeyString(args[1]);
+
+            PropertyDescriptor? descriptor;
+            if (thisObj is JSObject) {
+              descriptor = thisObj.getOwnPropertyDescriptor(propName);
+            } else if (thisObj is JSFunction) {
+              descriptor = thisObj.getOwnPropertyDescriptor(propName);
+            }
+
+            return JSValueFactory.boolean(
+              descriptor != null && descriptor.enumerable,
+            );
           },
         );
 
@@ -1777,11 +1922,12 @@ class JSObject extends JSValue {
         if (obj._symbolKeys.containsKey(key)) continue; // Exclure les symboles
 
         final descriptor = obj._propertyDescriptors[key];
+        if (visited.contains(key)) {
+          continue;
+        }
+        visited.add(key);
         if (descriptor == null || descriptor.enumerable) {
-          if (!visited.contains(key)) {
-            ownNames.add(key);
-            visited.add(key);
-          }
+          ownNames.add(key);
         }
       }
 
@@ -1790,11 +1936,12 @@ class JSObject extends JSValue {
         if (obj._symbolKeys.containsKey(key)) continue; // Exclure les symboles
 
         final descriptor = obj._accessorProperties[key];
+        if (visited.contains(key)) {
+          continue;
+        }
+        visited.add(key);
         if (descriptor != null && descriptor.enumerable) {
-          if (!visited.contains(key)) {
-            ownNames.add(key);
-            visited.add(key);
-          }
+          ownNames.add(key);
         }
       }
 
@@ -1912,6 +2059,8 @@ class JSFunction extends JSValue {
   // Propertetes ECMAScript pour les fonctions
   late final Map<String, JSValue> _properties;
   final Map<String, PropertyDescriptor> _propertyDescriptors = {};
+  final Map<String, PropertyDescriptor> _accessorProperties = {};
+  final Map<String, JSSymbol> _symbolKeys = {};
   late final String _name;
   late final int _length;
   late JSObject? _prototype; // Changed to nullable for method definitions
@@ -1991,7 +2140,14 @@ class JSFunction extends JSValue {
 
   void _initializeFunctionProperties([String? inferredName]) {
     // Nom de la fonction
-    if (declaration?.id?.name != null) {
+    if (declaration is MethodDefinition) {
+      final key = (declaration as MethodDefinition).key;
+      if (key is IdentifierExpression) {
+        _name = key.name;
+      } else {
+        _name = inferredName ?? 'anonymous';
+      }
+    } else if (declaration?.id?.name != null) {
       _name = declaration.id.name;
     } else {
       // Use inferred name if provided (ES6 function name inference)
@@ -2103,6 +2259,63 @@ class JSFunction extends JSValue {
 
   // Acces aux propertes de fonction
 
+  JSValue? _getOwnFunctionPrototypeLink(JSFunction function) {
+    if (function.containsOwnProperty('__proto__')) {
+      final explicitProto = function._properties['__proto__'];
+      if (explicitProto is JSObject || explicitProto is JSFunction) {
+        return explicitProto;
+      }
+      if (explicitProto != null && explicitProto.isNull) {
+        return null;
+      }
+    }
+    return JSFunction.functionPrototype;
+  }
+
+  JSValue _resolveInheritedDescriptor(
+    PropertyDescriptor descriptor,
+    JSValue receiver,
+  ) {
+    if (descriptor.isAccessor) {
+      final getter = descriptor.getter;
+      if (getter == null) {
+        return JSValueFactory.undefined();
+      }
+      final runtime = JSRuntime.current;
+      if (runtime == null) {
+        return JSValueFactory.undefined();
+      }
+      return runtime.callFunction(getter, [], receiver);
+    }
+    return descriptor.value ?? JSValueFactory.undefined();
+  }
+
+  JSValue _getInheritedPropertyWithReceiver(String name, JSValue receiver) {
+    JSValue? current = _getOwnFunctionPrototypeLink(this);
+    while (current != null) {
+      if (current is JSObject) {
+        final descriptor = current.getOwnPropertyDescriptor(name);
+        if (descriptor != null) {
+          return _resolveInheritedDescriptor(descriptor, receiver);
+        }
+        current = current.getPrototype();
+        continue;
+      }
+
+      if (current is JSFunction) {
+        final descriptor = current.getOwnPropertyDescriptor(name);
+        if (descriptor != null) {
+          return _resolveInheritedDescriptor(descriptor, receiver);
+        }
+        current = _getOwnFunctionPrototypeLink(current);
+        continue;
+      }
+
+      break;
+    }
+    return JSValueFactory.undefined();
+  }
+
   JSValue getProperty(String name) {
     // First check if the property has an accessor (getter/setter)
     final descriptor = _propertyDescriptors[name];
@@ -2110,10 +2323,10 @@ class JSFunction extends JSValue {
         descriptor.isAccessor &&
         descriptor.getter != null) {
       // Call the getter with 'this' pointing to the function object
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
         try {
-          return evaluator.callFunction(descriptor.getter!, [], this);
+          return runtime.callFunction(descriptor.getter!, [], this);
         } catch (e) {
           // If getter throws, propagate the error
           rethrow;
@@ -2131,17 +2344,17 @@ class JSFunction extends JSValue {
     // Per ES5 strict mode: accessing .caller when the CALLER is strict mode also throws
     // This check needs to happen via the evaluator's call stack
     if (name == 'caller') {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
         try {
           // This will throw TypeError if caller is a strict mode function
-          final caller = evaluator.getCurrentCaller(this);
-          return caller ?? JSValueFactory.nullValue();
+          final caller = runtime.getCurrentCaller(this);
+          return caller ?? JSValueFactory.undefined();
         } on JSTypeError {
           rethrow;
         }
       }
-      return JSValueFactory.nullValue();
+      return JSValueFactory.undefined();
     }
 
     // Then check if the property is actually present (might have been deleted)
@@ -2157,6 +2370,10 @@ class JSFunction extends JSValue {
         return JSValueFactory.undefined();
       case 'name':
         return JSValueFactory.undefined();
+      case 'lineNumber':
+        return JSValueFactory.number(declaration.line.toDouble());
+      case 'columnNumber':
+        return JSValueFactory.number(declaration.column.toDouble());
       case 'prototype':
         return JSValueFactory.undefined();
       case 'toString':
@@ -2204,13 +2421,9 @@ class JSFunction extends JSValue {
           },
         );
       default:
-        // Check Function.prototype for inherited properties
-        final funcProto = JSFunction.functionPrototype;
-        if (funcProto != null) {
-          final protoProp = funcProto.getProperty(name);
-          if (!protoProp.isUndefined) {
-            return protoProp;
-          }
+        final inherited = _getInheritedPropertyWithReceiver(name, this);
+        if (!inherited.isUndefined) {
+          return inherited;
         }
         // Search dans les propertes personnalisees
         return _properties[name] ?? JSValueFactory.undefined();
@@ -2226,10 +2439,11 @@ class JSFunction extends JSValue {
   JSNativeFunction _createCallMethod() {
     return JSNativeFunction(
       functionName: 'call',
+      hasContextBound: true,
       nativeImpl: (args) {
         // function.call(thisArg, ...args)
-        final evaluator = JSEvaluator.currentInstance;
-        if (evaluator == null) {
+        final runtime = JSRuntime.current;
+        if (runtime == null) {
           throw JSError('No evaluator available for function.call');
         }
 
@@ -2238,7 +2452,7 @@ class JSFunction extends JSValue {
         final functionArgs = args.length > 1 ? args.sublist(1) : <JSValue>[];
 
         // Don't wrap JS errors - let TypeError, ReferenceError etc propagate
-        return evaluator.callFunction(this, functionArgs, thisArg);
+        return runtime.callFunction(this, functionArgs, thisArg);
       },
     );
   }
@@ -2246,10 +2460,11 @@ class JSFunction extends JSValue {
   JSNativeFunction _createApplyMethod() {
     return JSNativeFunction(
       functionName: 'apply',
+      hasContextBound: true,
       nativeImpl: (args) {
         // function.apply(thisArg, argsArray)
-        final evaluator = JSEvaluator.currentInstance;
-        if (evaluator == null) {
+        final runtime = JSRuntime.current;
+        if (runtime == null) {
           throw JSError('No evaluator available for function.apply');
         }
 
@@ -2290,7 +2505,7 @@ class JSFunction extends JSValue {
         }
 
         // Don't wrap JS errors - let TypeError, ReferenceError etc propagate
-        return evaluator.callFunction(this, functionArgs, thisArg);
+        return runtime.callFunction(this, functionArgs, thisArg);
       },
     );
   }
@@ -2298,6 +2513,7 @@ class JSFunction extends JSValue {
   JSNativeFunction _createBindMethod() {
     return JSNativeFunction(
       functionName: 'bind',
+      hasContextBound: true,
       nativeImpl: (args) {
         // function.bind(thisArg, ...boundArgs)
         final thisArg = args.isNotEmpty ? args[0] : JSValueFactory.undefined();
@@ -2319,10 +2535,10 @@ class JSFunction extends JSValue {
         final descriptor = _propertyDescriptors[name];
         if (descriptor != null && !descriptor.writable) {
           // Non-writable property - in strict mode throw, in non-strict silently ignore
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
+          final runtime = JSRuntime.current;
+          if (runtime != null) {
             try {
-              final isStrictMode = evaluator.isCurrentlyInStrictMode();
+              final isStrictMode = runtime.isStrictMode();
               if (isStrictMode) {
                 throw JSTypeError(
                   'Cannot assign to read only property \'$name\'',
@@ -2353,11 +2569,11 @@ class JSFunction extends JSValue {
           // Accessor property without setter - cannot be set
           // In strict mode, throw TypeError
           // In non-strict mode, silently ignore
-          final evaluator = JSEvaluator.currentInstance;
+          final runtime = JSRuntime.current;
           bool isStrictMode = false;
-          if (evaluator != null) {
+          if (runtime != null) {
             try {
-              isStrictMode = evaluator.isCurrentlyInStrictMode();
+              isStrictMode = runtime.isStrictMode();
             } catch (_) {
               // Default to non-strict for functions (to match JS behavior)
               isStrictMode = false;
@@ -2372,9 +2588,9 @@ class JSFunction extends JSValue {
         }
         // If there's a setter, call it
         if (descriptor.setter != null) {
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
-            evaluator.callFunction(descriptor.setter!, [value], this);
+          final runtime = JSRuntime.current;
+          if (runtime != null) {
+            runtime.callFunction(descriptor.setter!, [value], this);
             return;
           }
         }
@@ -2383,11 +2599,11 @@ class JSFunction extends JSValue {
       if (!descriptor.writable) {
         // In strict mode, throw TypeError
         // In non-strict mode, silently ignore
-        final evaluator = JSEvaluator.currentInstance;
+        final runtime = JSRuntime.current;
         bool isStrictMode = false;
-        if (evaluator != null) {
+        if (runtime != null) {
           try {
-            isStrictMode = evaluator.isCurrentlyInStrictMode();
+            isStrictMode = runtime.isStrictMode();
           } catch (_) {
             isStrictMode = false;
           }
@@ -2404,8 +2620,12 @@ class JSFunction extends JSValue {
   /// Define a property with a complete descriptor (Object.defineProperty)
   void defineProperty(String name, PropertyDescriptor descriptor) {
     _propertyDescriptors[name] = descriptor;
-    if (descriptor.value != null) {
+    if (descriptor.isAccessor) {
+      _accessorProperties[name] = descriptor;
+      _properties.remove(name);
+    } else if (descriptor.value != null) {
       _properties[name] = descriptor.value!;
+      _accessorProperties.remove(name);
     }
   }
 
@@ -2413,6 +2633,16 @@ class JSFunction extends JSValue {
   bool removeOwnProperty(String name) {
     _propertyDescriptors.remove(name);
     return _properties.remove(name) != null;
+  }
+
+  /// Register a symbol key for tracking
+  void registerSymbolKey(String propertyKey, JSSymbol symbol) {
+    _symbolKeys[propertyKey] = symbol;
+  }
+
+  /// Get all symbol keys tracked on this function
+  Iterable<JSSymbol> getSymbolKeys() {
+    return _symbolKeys.values;
   }
 
   /// Delete a property from this function (ES5 [[Delete]])
@@ -2428,6 +2658,21 @@ class JSFunction extends JSValue {
     }
     // If property doesn't exist, deletion succeeds
     return true;
+  }
+
+  /// Get all own property names (excluding symbol keys)
+  List<String> getPropertyNames({bool enumerableOnly = false}) {
+    final allKeys = {..._properties.keys, ..._accessorProperties.keys};
+    final result = <String>[];
+    for (final key in allKeys) {
+      if (_symbolKeys.containsKey(key)) continue;
+      if (enumerableOnly) {
+        final desc = getOwnPropertyDescriptor(key);
+        if (desc != null && !desc.enumerable) continue;
+      }
+      result.add(key);
+    }
+    return result;
   }
 
   /// Obtient le descripteur de properte pour a property donnee
@@ -2501,7 +2746,7 @@ class JSFunction extends JSValue {
       return sourceText!;
     }
     // Fallback pour les fonctions natives ou sans source
-    return 'function ${declaration?.id?.name ?? 'anonymous'}() { [native code] }';
+    return 'function $functionName() { [native code] }';
   }
 
   @override
@@ -2517,7 +2762,9 @@ class JSFunction extends JSValue {
   /// Per ES spec: function.length is the count of parameters before
   /// the first one with a default value or a rest parameter
   int get parameterCount {
-    final params = declaration?.params;
+    final params = declaration is MethodDefinition
+        ? (declaration as MethodDefinition).value.params
+        : declaration?.params;
     if (params == null) return 0;
 
     int count = 0;
@@ -2668,11 +2915,11 @@ class JSClass extends JSValue {
             }
           } else {
             // For computed property names, evaluate the expression to get the key
-            final evaluator = JSEvaluator.currentInstance;
-            if (evaluator != null) {
+            final runtime = JSRuntime.current;
+            if (runtime != null) {
               // Errors during evaluation of computed property names MUST be propagated
               // per ES6 spec: ClassFieldDefinitionEvaluation must propagate abrupt completions
-              final keyValue = member.key.accept(evaluator);
+              final keyValue = runtime.evalASTNode(member.key);
               fieldName = keyValue.toString();
             } else {
               continue;
@@ -2684,10 +2931,10 @@ class JSClass extends JSValue {
           // Evaluate the initializer if present
           JSValue initialValue = JSValueFactory.undefined();
           if (member.initializer != null) {
-            final evaluator = JSEvaluator.currentInstance;
-            if (evaluator != null) {
+            final runtime = JSRuntime.current;
+            if (runtime != null) {
               try {
-                initialValue = member.initializer!.accept(evaluator);
+                initialValue = runtime.evalASTNode(member.initializer!);
               } catch (e) {
                 // On d'erreur, utiliser undefined
               }
@@ -2716,11 +2963,11 @@ class JSClass extends JSValue {
 
           if (member.computed) {
             // Propertete computed: [expression] - evaluer l'expression pour obtenir le nom
-            final evaluator = JSEvaluator.currentInstance;
-            if (evaluator != null) {
+            final runtime = JSRuntime.current;
+            if (runtime != null) {
               // For computed property names, errors MUST be propagated
               // This includes ReferenceError for unresolvable identifiers
-              final computedKey = member.key.accept(evaluator);
+              final computedKey = runtime.evalASTNode(member.key);
 
               // ToPropertyKey conversion - must handle Symbols and throw TypeError if not convertible
               if (computedKey is JSSymbol) {
@@ -2889,11 +3136,11 @@ class JSClass extends JSValue {
 
         // ES2022: Handle StaticBlockDeclaration (static initialization blocks)
         if (member is StaticBlockDeclaration) {
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
+          final runtime = JSRuntime.current;
+          if (runtime != null) {
             try {
               // Execute the static block with the class as 'this' context
-              evaluator.executeStaticBlock(member.body, this);
+              runtime.executeStaticBlock(member.body, this);
             } catch (e) {
               // Propagate errors from static block execution
               rethrow;
@@ -2964,10 +3211,10 @@ class JSClass extends JSValue {
           final descriptor = _accessorProperties[name]!;
           if (descriptor.getter != null) {
             // Call the getter with the right context
-            final evaluator = JSEvaluator.currentInstance;
-            if (evaluator != null) {
+            final runtime = JSRuntime.current;
+            if (runtime != null) {
               try {
-                return evaluator.callFunction(descriptor.getter!, [], this);
+                return runtime.callFunction(descriptor.getter!, [], this);
               } catch (e) {
                 throw JSError('Error calling getter for property $name: $e');
               }
@@ -3004,6 +3251,13 @@ class JSClass extends JSValue {
           }
         }
 
+        if (superFunction != null) {
+          final superStaticMethod = superFunction!.getProperty(name);
+          if (!superStaticMethod.isUndefined) {
+            return superStaticMethod;
+          }
+        }
+
         return JSValueFactory.undefined();
     }
   }
@@ -3014,10 +3268,10 @@ class JSClass extends JSValue {
       final descriptor = _accessorProperties[name]!;
       if (descriptor.setter != null) {
         // Call the setter with the right context
-        final evaluator = JSEvaluator.currentInstance;
-        if (evaluator != null) {
+        final runtime = JSRuntime.current;
+        if (runtime != null) {
           try {
-            evaluator.callFunction(descriptor.setter!, [value], this);
+            runtime.callFunction(descriptor.setter!, [value], this);
             return; // Exit after calling the setter
           } catch (e) {
             throw JSError('Error calling setter for property $name: $e');
@@ -3087,11 +3341,11 @@ class JSClass extends JSValue {
 
     // Appeler le constructor s'il existe
     if (_constructor != null) {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
         // Appeler le constructor avec 'this' lie a l'instance
         // Do NOT catch JS exceptions here - let them propagate
-        final result = evaluator.callFunction(_constructor!, args, instance);
+        final result = runtime.callFunction(_constructor!, args, instance);
 
         // If le constructor returns an object, le return a la place de l'instance
         if (result.isObject && !result.isNull) {
@@ -3103,8 +3357,8 @@ class JSClass extends JSValue {
     } else if (superClass != null) {
       // If pas de constructor mais il y a une superclass, appeler le constructor de la superclass
       // C'est le comportement by default en JavaScript ES6 pour les classes derivees
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
         // Appeler le constructor de la superclass avec l'instance actuelle
         // Do NOT catch JS exceptions here - let them propagate
         final result = superClass!.construct(args, instance);
@@ -3117,14 +3371,19 @@ class JSClass extends JSValue {
     } else if (superFunction != null) {
       // If pas de constructor mais il y a a function native parent, l'appeler
       // C'est le comportement by default pour les classes qui etendent Promise, Array, etc.
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
         // Call the native superfunction with the instance as 'this' context
         // Do NOT catch exceptions - let them propagate
         if (superFunction is JSNativeFunction) {
-          (superFunction as JSNativeFunction).callWithThis(args, instance);
+          JSNativeFunction.withConstructorCall(
+            () => (superFunction as JSNativeFunction).callWithThis(
+              args,
+              instance,
+            ),
+          );
         } else {
-          evaluator.callFunction(superFunction as JSFunction, args, instance);
+          runtime.callFunction(superFunction as JSFunction, args, instance);
         }
       }
     }
@@ -3378,22 +3637,18 @@ class JSArray extends JSObject {
         final descriptor = _accessorProperties[name]!;
         if (descriptor.getter != null) {
           // Check for circular references
-          if (JSEvaluator.isGetterCycle(this, name)) {
+          final runtime = JSRuntime.current;
+          if (runtime != null && runtime.isGetterCycle(this, name)) {
             return JSValueFactory.undefined();
           }
           // Call the getter with the right context
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
+          if (runtime != null) {
             try {
-              JSEvaluator.markGetterActive(this, name);
-              final result = evaluator.callFunction(
-                descriptor.getter!,
-                [],
-                this,
-              );
+              runtime.markGetterActive(this, name);
+              final result = runtime.callFunction(descriptor.getter!, [], this);
               return result;
             } finally {
-              JSEvaluator.unmarkGetterActive(this, name);
+              runtime.unmarkGetterActive(this, name);
             }
           }
         }
@@ -3415,6 +3670,30 @@ class JSArray extends JSObject {
       // Valid index with value, return element directly
       return value;
     }
+    if (name == 'length') {
+      return ArrayPrototype.length(this);
+    }
+    if (_accessorProperties.containsKey(name)) {
+      final descriptor = _accessorProperties[name]!;
+      if (descriptor.getter != null) {
+        final runtime = JSRuntime.current;
+        if (runtime != null) {
+          try {
+            runtime.markGetterActive(this, name);
+            return runtime.callFunction(descriptor.getter!, [], this);
+          } finally {
+            runtime.unmarkGetterActive(this, name);
+          }
+        }
+      }
+      return JSValueFactory.undefined();
+    }
+
+    final ownProperty = getOwnPropertyDirect(name);
+    if (ownProperty != null) {
+      return ownProperty;
+    }
+
     // Use ArrayPrototype pour all propertes
     return ArrayPrototype.getArrayProperty(this, name);
   }
@@ -3475,12 +3754,12 @@ class JSArray extends JSObject {
             !val.isNull &&
             !val.isUndefined &&
             val is! JSNumberObject) {
-          final evaluator = JSEvaluator.currentInstance;
+          final runtime = JSRuntime.current;
           JSValue? primitiveResult;
 
           // Try Symbol.toPrimitive first (ES2015+)
-          if (evaluator != null) {
-            final toPrimSymbolKey = JSSymbol.symbolToPrimitive.toString();
+          if (runtime != null) {
+            final toPrimSymbolKey = JSSymbol.symbolToPrimitive.propertyKey;
             final toPrimitiveProp = val.getProperty(toPrimSymbolKey);
             if (toPrimitiveProp is JSNativeFunction) {
               final result = toPrimitiveProp.call([
@@ -3494,7 +3773,7 @@ class JSArray extends JSObject {
               }
             } else if (toPrimitiveProp is JSFunction) {
               try {
-                final result = evaluator.callFunction(toPrimitiveProp, [
+                final result = runtime.callFunction(toPrimitiveProp, [
                   JSValueFactory.string('number'),
                 ], val);
                 if (result is! JSObject ||
@@ -3510,7 +3789,7 @@ class JSArray extends JSObject {
                 JSObject? prototype;
                 try {
                   final constructorName = jsError.name;
-                  final ctor = evaluator.globalEnvironment.get(constructorName);
+                  final ctor = runtime.getGlobal(constructorName);
                   if (ctor is JSFunction && ctor is JSObject) {
                     final proto = ctor.getProperty('prototype');
                     if (proto is JSObject) {
@@ -3538,9 +3817,8 @@ class JSArray extends JSObject {
                       result is JSUndefined)) {
                 primitiveResult = result;
               }
-            } else if (valueOfProp is JSFunction &&
-                JSEvaluator.currentInstance != null) {
-              final result = JSEvaluator.currentInstance!.callFunction(
+            } else if (valueOfProp is JSFunction && JSRuntime.current != null) {
+              final result = JSRuntime.current!.callFunction(
                 valueOfProp,
                 [],
                 val,
@@ -3565,8 +3843,8 @@ class JSArray extends JSObject {
                 primitiveResult = result;
               }
             } else if (toStringProp is JSFunction &&
-                JSEvaluator.currentInstance != null) {
-              final result = JSEvaluator.currentInstance!.callFunction(
+                JSRuntime.current != null) {
+              final result = JSRuntime.current!.callFunction(
                 toStringProp,
                 [],
                 val,
@@ -3633,6 +3911,7 @@ class JSArray extends JSObject {
         // ES spec: If a non-configurable property is encountered, stop deletion
         // and set length to the index after the non-configurable property
         int actualNewLength = newLength;
+        bool deletionBlocked = false;
         for (int i = _elements.length - 1; i >= newLength; i--) {
           final propName = i.toString();
           if (_propertyDescriptors.containsKey(propName)) {
@@ -3640,6 +3919,7 @@ class JSArray extends JSObject {
             if (!descriptor.configurable) {
               // Cannot delete this property - stop here
               actualNewLength = i + 1;
+              deletionBlocked = true;
               break;
             }
           }
@@ -3652,6 +3932,12 @@ class JSArray extends JSObject {
         // Clean up sparse elements beyond the new length
         if (_sparseElements != null) {
           _sparseElements!.removeWhere((key, _) => key >= actualNewLength);
+        }
+
+        if (deletionBlocked) {
+          throw JSTypeError(
+            'Cannot delete property ${(actualNewLength - 1).toString()} of array',
+          );
         }
       } else if (newLength > length) {
         // For les grandes longueurs, on ne pre-alloue pas
@@ -3799,12 +4085,12 @@ class JSArray extends JSObject {
               !val.isNull &&
               !val.isUndefined &&
               val is! JSNumberObject) {
-            final evaluator = JSEvaluator.currentInstance;
+            final runtime = JSRuntime.current;
             JSValue? primitiveResult;
 
             // Try Symbol.toPrimitive first (ES2015+)
-            if (evaluator != null) {
-              final toPrimSymbolKey = JSSymbol.symbolToPrimitive.toString();
+            if (runtime != null) {
+              final toPrimSymbolKey = JSSymbol.symbolToPrimitive.propertyKey;
               final toPrimitiveProp = val.getProperty(toPrimSymbolKey);
               if (toPrimitiveProp is JSNativeFunction) {
                 final result = toPrimitiveProp.call([
@@ -3818,7 +4104,7 @@ class JSArray extends JSObject {
                 }
               } else if (toPrimitiveProp is JSFunction) {
                 try {
-                  final result = evaluator.callFunction(toPrimitiveProp, [
+                  final result = runtime.callFunction(toPrimitiveProp, [
                     JSValueFactory.string('number'),
                   ], val);
                   if (result is! JSObject ||
@@ -3844,8 +4130,8 @@ class JSArray extends JSObject {
                   primitiveResult = result;
                 }
               } else if (valueOfProp is JSFunction &&
-                  JSEvaluator.currentInstance != null) {
-                final result = JSEvaluator.currentInstance!.callFunction(
+                  JSRuntime.current != null) {
+                final result = JSRuntime.current!.callFunction(
                   valueOfProp,
                   [],
                   val,
@@ -3870,8 +4156,8 @@ class JSArray extends JSObject {
                   primitiveResult = result;
                 }
               } else if (toStringProp is JSFunction &&
-                  JSEvaluator.currentInstance != null) {
-                final result = JSEvaluator.currentInstance!.callFunction(
+                  JSRuntime.current != null) {
+                final result = JSRuntime.current!.callFunction(
                   toStringProp,
                   [],
                   val,
@@ -4045,6 +4331,10 @@ class JSArray extends JSObject {
       }
     }
 
+    if (!enumerableOnly) {
+      names.add('length');
+    }
+
     // Add les propertes personnalisees
     names.addAll(super.getPropertyNames(enumerableOnly: enumerableOnly));
 
@@ -4063,7 +4353,25 @@ class JSArray extends JSObject {
     }
 
     // Add les propertes heritees enumerables (mais pas Object.prototype)
-    final visited = <String>{};
+    final visited = <String>{...names};
+
+    for (final key in _properties.keys) {
+      if (_symbolKeys.containsKey(key)) continue;
+      visited.add(key);
+      final descriptor = _propertyDescriptors[key];
+      if (descriptor == null || descriptor.enumerable) {
+        names.add(key);
+      }
+    }
+
+    for (final key in _accessorProperties.keys) {
+      if (_symbolKeys.containsKey(key)) continue;
+      if (!visited.add(key)) continue;
+      final descriptor = _accessorProperties[key];
+      if (descriptor != null && descriptor.enumerable) {
+        names.add(key);
+      }
+    }
 
     void collectInheritedProperties(JSObject obj) {
       if (obj._prototype != null && obj._prototype is JSObject) {
@@ -4417,7 +4725,7 @@ class JSMap extends JSObject {
   /// Add ou mettre a jour une paire cle-valeur
   JSValue set(JSValue key, JSValue value) {
     _map[key] = value;
-    return JSValueFactory.undefined(); // Returns undefined comme en JS standard
+    return this;
   }
 
   /// Recuperer la valeur associee a une cle
@@ -4506,6 +4814,27 @@ class MapPrototype {
     return map.clear();
   }
 
+  /// Map.prototype.forEach(callback, thisArg)
+  static JSValue forEach(List<JSValue> args, JSMap map) {
+    if (args.isEmpty) {
+      throw JSTypeError('Map.prototype.forEach requires 1 argument');
+    }
+
+    final callback = args[0];
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('Map.prototype.forEach called without runtime context');
+    }
+
+    final thisArg = args.length > 1 ? args[1] : JSValueFactory.undefined();
+    final entries = map.entries.toList(growable: false);
+    for (final entry in entries) {
+      runtime.callFunction(callback, [entry.value, entry.key, map], thisArg);
+    }
+
+    return JSValueFactory.undefined();
+  }
+
   /// Get a property of the object Map
   static JSValue getMapProperty(JSMap map, String name) {
     // First check if it's one of the special Map properties
@@ -4534,6 +4863,12 @@ class MapPrototype {
         return JSNativeFunction(
           functionName: 'clear',
           nativeImpl: (args) => clear(args, map),
+        );
+      case 'forEach':
+        return JSNativeFunction(
+          functionName: 'forEach',
+          hasContextBound: true,
+          nativeImpl: (args) => forEach(args, map),
         );
       case 'size':
         return JSValueFactory.number(map.size.toDouble());
@@ -4691,23 +5026,48 @@ class SetPrototype {
   }
 }
 
+class _WeakMapEntry {
+  final JSValue key;
+  JSValue value;
+
+  _WeakMapEntry(this.key, this.value);
+}
+
 /// WeakMap implementation - Map with weak references to keys
 class JSWeakMap extends JSObject {
-  // Using Expando for weak references - Dart's Expando provides weak key references
-  final Expando<JSValue> _map = Expando<JSValue>();
+  final List<_WeakMapEntry> _entries = <_WeakMapEntry>[];
 
   JSWeakMap() : super() {
-    // Initialize prototype methods
+    JSRuntime.current?.registerWeakMap(this);
     _initializePrototype();
   }
 
-  // Public method to set a value (used by constructor)
-  void setValue(JSObject key, JSValue value) {
-    _map[key] = value;
+  bool _isWeakKey(JSValue key) => key is JSObject || key is JSSymbol;
+
+  int _findEntryIndex(JSValue key) =>
+      _entries.indexWhere((entry) => identical(entry.key, key));
+
+  void purgeCollectedEntries([JSRuntime? runtime]) {
+    final activeRuntime = runtime ?? JSRuntime.current;
+    if (activeRuntime == null) {
+      return;
+    }
+    _entries.removeWhere((entry) => !activeRuntime.isValueReachable(entry.key));
+  }
+
+  void setValue(JSValue key, JSValue value) {
+    if (!_isWeakKey(key)) {
+      throw JSTypeError('WeakMap keys must be objects or symbols');
+    }
+    final index = _findEntryIndex(key);
+    if (index >= 0) {
+      _entries[index].value = value;
+    } else {
+      _entries.add(_WeakMapEntry(key, value));
+    }
   }
 
   void _initializePrototype() {
-    // WeakMap.prototype.set(key, value)
     _properties['set'] = JSNativeFunction(
       functionName: 'set',
       nativeImpl: (args) {
@@ -4718,18 +5078,16 @@ class JSWeakMap extends JSObject {
         }
 
         final key = args[0];
-        if (key is! JSObject) {
-          throw JSTypeError('WeakMap keys must be objects');
+        if (!_isWeakKey(key)) {
+          throw JSTypeError('WeakMap keys must be objects or symbols');
         }
 
         final value = args.length > 1 ? args[1] : JSValueFactory.undefined();
-        _map[key] = value;
-
+        setValue(key, value);
         return this;
       },
     );
 
-    // WeakMap.prototype.get(key)
     _properties['get'] = JSNativeFunction(
       functionName: 'get',
       nativeImpl: (args) {
@@ -4738,15 +5096,19 @@ class JSWeakMap extends JSObject {
         }
 
         final key = args[0];
-        if (key is! JSObject) {
-          throw JSTypeError('WeakMap keys must be objects');
+        if (!_isWeakKey(key)) {
+          return JSValueFactory.undefined();
         }
 
-        return _map[key] ?? JSValueFactory.undefined();
+        purgeCollectedEntries();
+        final index = _findEntryIndex(key);
+        if (index < 0) {
+          return JSValueFactory.undefined();
+        }
+        return _entries[index].value;
       },
     );
 
-    // WeakMap.prototype.has(key)
     _properties['has'] = JSNativeFunction(
       functionName: 'has',
       nativeImpl: (args) {
@@ -4755,15 +5117,15 @@ class JSWeakMap extends JSObject {
         }
 
         final key = args[0];
-        if (key is! JSObject) {
-          throw JSTypeError('WeakMap keys must be objects');
+        if (!_isWeakKey(key)) {
+          return JSValueFactory.boolean(false);
         }
 
-        return JSValueFactory.boolean(_map[key] != null);
+        purgeCollectedEntries();
+        return JSValueFactory.boolean(_findEntryIndex(key) >= 0);
       },
     );
 
-    // WeakMap.prototype.delete(key)
     _properties['delete'] = JSNativeFunction(
       functionName: 'delete',
       nativeImpl: (args) {
@@ -4772,13 +5134,16 @@ class JSWeakMap extends JSObject {
         }
 
         final key = args[0];
-        if (key is! JSObject) {
-          throw JSTypeError('WeakMap keys must be objects');
+        if (!_isWeakKey(key)) {
+          return JSValueFactory.boolean(false);
         }
 
-        final hadKey = _map[key] != null;
-        _map[key] = null; // Remove the entry
-
+        purgeCollectedEntries();
+        final index = _findEntryIndex(key);
+        final hadKey = index >= 0;
+        if (hadKey) {
+          _entries.removeAt(index);
+        }
         return JSValueFactory.boolean(hadKey);
       },
     );
@@ -4790,6 +5155,108 @@ class JSWeakMap extends JSObject {
   @override
   bool equals(JSValue other) {
     return identical(this, other);
+  }
+}
+
+class JSWeakRefObject extends JSObject {
+  JSValue? _target;
+
+  JSWeakRefObject(JSValue target) : _target = target, super() {
+    JSRuntime.current?.registerWeakRef(this);
+    _properties['deref'] = JSNativeFunction(
+      functionName: 'deref',
+      nativeImpl: (args) => deref(),
+    );
+  }
+
+  JSValue deref() {
+    final target = _target;
+    if (target == null) {
+      return JSUndefined.instance;
+    }
+
+    final runtime = JSRuntime.current;
+    if (runtime != null && !runtime.isValueReachable(target)) {
+      _target = null;
+      return JSUndefined.instance;
+    }
+    return target;
+  }
+
+  void clearIfCollected([JSRuntime? runtime]) {
+    final activeRuntime = runtime ?? JSRuntime.current;
+    final target = _target;
+    if (activeRuntime == null || target == null) {
+      return;
+    }
+    if (!activeRuntime.isValueReachable(target)) {
+      _target = null;
+    }
+  }
+}
+
+class _FinalizationRegistryCell {
+  final JSValue target;
+  final JSValue heldValue;
+  final JSValue unregisterToken;
+
+  _FinalizationRegistryCell(this.target, this.heldValue, this.unregisterToken);
+}
+
+class JSFinalizationRegistryObject extends JSObject {
+  final JSValue _callback;
+  final List<_FinalizationRegistryCell> _cells = <_FinalizationRegistryCell>[];
+
+  JSFinalizationRegistryObject(this._callback) : super() {
+    JSRuntime.current?.registerFinalizationRegistry(this);
+    _properties['register'] = JSNativeFunction(
+      functionName: 'register',
+      nativeImpl: (args) {
+        if (args.isEmpty) {
+          throw JSTypeError('FinalizationRegistry.register requires a target');
+        }
+        final target = args[0];
+        if (target is! JSObject) {
+          throw JSTypeError('FinalizationRegistry target must be an object');
+        }
+        final heldValue = args.length > 1 ? args[1] : JSUndefined.instance;
+        final unregisterToken = args.length > 2
+            ? args[2]
+            : JSUndefined.instance;
+        _cells.add(
+          _FinalizationRegistryCell(target, heldValue, unregisterToken),
+        );
+        return JSUndefined.instance;
+      },
+    );
+
+    _properties['unregister'] = JSNativeFunction(
+      functionName: 'unregister',
+      nativeImpl: (args) {
+        if (args.isEmpty) {
+          throw JSTypeError('FinalizationRegistry.unregister requires a token');
+        }
+        final token = args[0];
+        final before = _cells.length;
+        _cells.removeWhere((cell) => identical(cell.unregisterToken, token));
+        return JSBoolean(before != _cells.length);
+      },
+    );
+  }
+
+  void collectGarbage(JSRuntime runtime) {
+    final collected = <_FinalizationRegistryCell>[];
+    _cells.removeWhere((cell) {
+      final shouldCollect = !runtime.isValueReachable(cell.target);
+      if (shouldCollect) {
+        collected.add(cell);
+      }
+      return shouldCollect;
+    });
+
+    for (final cell in collected) {
+      runtime.callFunction(_callback, [cell.heldValue], JSUndefined.instance);
+    }
   }
 }
 
@@ -4895,14 +5362,24 @@ class JSProxy extends JSObject {
     super.setPrototype(prototype);
   }
 
+  dynamic get _targetObject {
+    if (_target is JSFunction) {
+      return _target as JSFunction;
+    }
+    if (_target is JSObject) {
+      return _target as JSObject;
+    }
+    return null;
+  }
+
   @override
   JSValue getProperty(String name) {
     // Check if handler has a 'get' trap
     final getTrap = _handler.getProperty('get');
     if (getTrap is JSFunction) {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
-        return evaluator.callFunction(getTrap, [
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        return runtime.callFunction(getTrap, [
           _target,
           JSValueFactory.string(name),
           this,
@@ -4911,16 +5388,9 @@ class JSProxy extends JSObject {
     }
 
     // Default behavior: delegate to target
-    if (_target is JSObject) {
-      return _target.getProperty(name);
-    }
-
-    // Handle function targets (JSFunction, JSNativeFunction, etc.)
-    if (_target is JSFunction) {
-      return _target.getProperty(name);
-    }
-    if (_target is JSNativeFunction) {
-      return _target.getProperty(name);
+    final targetObject = _targetObject;
+    if (targetObject != null) {
+      return targetObject.getProperty(name);
     }
 
     return JSValueFactory.undefined();
@@ -4931,9 +5401,9 @@ class JSProxy extends JSObject {
     // Check if handler has a 'set' trap
     final setTrap = _handler.getProperty('set');
     if (setTrap is JSFunction) {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
-        final result = evaluator.callFunction(setTrap, [
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        final result = runtime.callFunction(setTrap, [
           _target,
           JSValueFactory.string(name),
           value,
@@ -4947,12 +5417,9 @@ class JSProxy extends JSObject {
     }
 
     // Default behavior: delegate to target
-    if (_target is JSObject) {
-      _target.setProperty(name, value);
-    } else if (_target is JSFunction) {
-      _target.setProperty(name, value);
-    } else if (_target is JSNativeFunction) {
-      _target.setProperty(name, value);
+    final targetObject = _targetObject;
+    if (targetObject != null) {
+      targetObject.setProperty(name, value);
     }
   }
 
@@ -4961,9 +5428,9 @@ class JSProxy extends JSObject {
     // Check if handler has a 'has' trap
     final hasTrap = _handler.getProperty('has');
     if (hasTrap is JSFunction) {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
-        final result = evaluator.callFunction(hasTrap, [
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        final result = runtime.callFunction(hasTrap, [
           _target,
           JSValueFactory.string(name),
         ], _handler);
@@ -4972,12 +5439,9 @@ class JSProxy extends JSObject {
     }
 
     // Default behavior: delegate to target
-    if (_target is JSObject) {
-      return _target.hasProperty(name);
-    } else if (_target is JSFunction) {
-      return _target.hasProperty(name);
-    } else if (_target is JSNativeFunction) {
-      return _target.hasProperty(name);
+    final targetObject = _targetObject;
+    if (targetObject != null) {
+      return targetObject.hasProperty(name);
     }
     return false;
   }
@@ -4987,9 +5451,9 @@ class JSProxy extends JSObject {
     // Check if handler has a 'deleteProperty' trap
     final deleteTrap = _handler.getProperty('deleteProperty');
     if (deleteTrap is JSFunction) {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
-        final result = evaluator.callFunction(deleteTrap, [
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        final result = runtime.callFunction(deleteTrap, [
           _target,
           JSValueFactory.string(name),
         ], _handler);
@@ -5001,12 +5465,9 @@ class JSProxy extends JSObject {
     }
 
     // Default behavior: delegate to target
-    if (_target is JSObject) {
-      return _target.deleteProperty(name);
-    } else if (_target is JSFunction) {
-      return _target.deleteProperty(name);
-    } else if (_target is JSNativeFunction) {
-      return _target.deleteProperty(name);
+    final targetObject = _targetObject;
+    if (targetObject != null) {
+      return targetObject.deleteProperty(name);
     }
     return false;
   }
@@ -5015,10 +5476,10 @@ class JSProxy extends JSObject {
     // Check if handler has an 'apply' trap
     final applyTrap = _handler.getProperty('apply');
     if (applyTrap is JSFunction) {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
         try {
-          return evaluator.callFunction(applyTrap, [
+          return runtime.callFunction(applyTrap, [
             _target,
             this,
             JSValueFactory.array(args),
@@ -5031,13 +5492,9 @@ class JSProxy extends JSObject {
 
     // Default behavior: delegate to target
     if (_target is JSFunction) {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
-        return evaluator.callFunction(
-          _target,
-          args,
-          JSValueFactory.undefined(),
-        );
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        return runtime.callFunction(_target, args, JSValueFactory.undefined());
       }
     }
 
@@ -5048,10 +5505,10 @@ class JSProxy extends JSObject {
     // Check if handler has a 'construct' trap
     final constructTrap = _handler.getProperty('construct');
     if (constructTrap is JSFunction) {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
         try {
-          final result = evaluator.callFunction(constructTrap, [
+          final result = runtime.callFunction(constructTrap, [
             _target,
             JSValueFactory.array(args),
           ], _handler);
@@ -5070,16 +5527,16 @@ class JSProxy extends JSObject {
 
     // Default behavior: delegate to target
     if (_target is JSFunction) {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
         // Create new object and call function as constructor
         final newObject = JSObject();
-        final prototypeValue = _target.getProperty('prototype');
+        final prototypeValue = (_target as JSFunction).getProperty('prototype');
         if (prototypeValue is JSObject) {
           newObject.setPrototype(prototypeValue);
         }
         newObject.setProperty('constructor', _target);
-        evaluator.callFunction(_target, args, newObject);
+        runtime.callFunction(_target, args, newObject);
         return newObject;
       }
     }
@@ -5092,9 +5549,9 @@ class JSProxy extends JSObject {
     // Check if handler has a 'getPrototypeOf' trap
     final getPrototypeTrap = _handler.getProperty('getPrototypeOf');
     if (getPrototypeTrap is JSFunction) {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
-        final result = evaluator.callFunction(getPrototypeTrap, [
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        final result = runtime.callFunction(getPrototypeTrap, [
           _target,
         ], _handler);
         if (result is JSObject || result.type == JSValueType.nullType) {
@@ -5107,8 +5564,9 @@ class JSProxy extends JSObject {
     }
 
     // Default behavior: delegate to target
-    if (_target is JSObject) {
-      return _target.getPrototype();
+    final targetObject = _targetObject;
+    if (targetObject != null) {
+      return targetObject.getPrototype();
     }
     return null;
   }
@@ -5118,9 +5576,9 @@ class JSProxy extends JSObject {
     // Check if handler has a 'setPrototypeOf' trap
     final setPrototypeTrap = _handler.getProperty('setPrototypeOf');
     if (setPrototypeTrap is JSFunction) {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
-        final result = evaluator.callFunction(setPrototypeTrap, [
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        final result = runtime.callFunction(setPrototypeTrap, [
           _target,
           prototype ?? JSValueFactory.nullValue(),
         ], _handler);
@@ -5132,21 +5590,61 @@ class JSProxy extends JSObject {
     }
 
     // Default behavior: delegate to target
-    if (_target is JSObject) {
-      _target.setPrototype(prototype);
+    final targetObject = _targetObject;
+    if (targetObject != null) {
+      targetObject.setPrototype(prototype);
     }
+  }
+
+  @override
+  PropertyDescriptor? getOwnPropertyDescriptor(String name) {
+    final descriptorTrap = _handler.getProperty('getOwnPropertyDescriptor');
+    if (descriptorTrap is JSFunction) {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        final result = runtime.callFunction(descriptorTrap, [
+          _target,
+          JSValueFactory.string(name),
+        ], _handler);
+        if (result.isUndefined || result.isNull) {
+          return null;
+        }
+        if (result is! JSObject) {
+          throw JSTypeError(
+            'Proxy getOwnPropertyDescriptor trap must return an object or undefined',
+          );
+        }
+
+        final hasValue = result.getOwnPropertyDescriptor('value') != null;
+        final getter = result.getProperty('get');
+        final setter = result.getProperty('set');
+        return PropertyDescriptor(
+          value: hasValue ? result.getProperty('value') : null,
+          getter: getter is JSFunction ? getter : null,
+          setter: setter is JSFunction ? setter : null,
+          enumerable: result.getProperty('enumerable').toBoolean(),
+          configurable: result.getProperty('configurable').toBoolean(),
+          writable: result.getProperty('writable').toBoolean(),
+          hasValueProperty: hasValue,
+        );
+      }
+    }
+
+    final targetObject = _targetObject;
+    if (targetObject != null) {
+      return targetObject.getOwnPropertyDescriptor(name);
+    }
+    return null;
   }
 
   List<String> getOwnPropertyNames() {
     // Check if handler has an 'ownKeys' trap
     final ownKeysTrap = _handler.getProperty('ownKeys');
     if (ownKeysTrap is JSFunction) {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
         try {
-          final result = evaluator.callFunction(ownKeysTrap, [
-            _target,
-          ], _handler);
+          final result = runtime.callFunction(ownKeysTrap, [_target], _handler);
           if (result is JSArray) {
             return result.elements
                 .whereType<JSString>()
@@ -5164,11 +5662,35 @@ class JSProxy extends JSObject {
     }
 
     // Default behavior: delegate to target
-    if (_target is JSObject) {
-      return _target.getPropertyNames();
+    final targetObject = _targetObject;
+    if (targetObject != null) {
+      return targetObject.getPropertyNames();
     }
     // For function targets, return an empty list (functions don't enumerate properties this way)
     return [];
+  }
+
+  @override
+  List<String> getForInPropertyNames() {
+    final names = <String>[];
+    final visited = <String>{};
+
+    for (final key in getOwnPropertyNames()) {
+      if (visited.add(key)) {
+        names.add(key);
+      }
+    }
+
+    final prototype = getPrototype();
+    if (prototype != null && prototype != JSObject.objectPrototype) {
+      for (final key in prototype.getForInPropertyNames()) {
+        if (visited.add(key)) {
+          names.add(key);
+        }
+      }
+    }
+
+    return names;
   }
 
   @override
@@ -5346,9 +5868,9 @@ class JSReflect extends JSObject {
             throw JSTypeError('Reflect.apply argumentsList must be an array');
           }
 
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
-            return evaluator.callFunction(
+          final runtime = JSRuntime.current;
+          if (runtime != null) {
+            return runtime.callFunction(
               target,
               argumentsList.elements,
               thisArg,
@@ -5393,8 +5915,8 @@ class JSReflect extends JSObject {
             );
           }
 
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
+          final runtime = JSRuntime.current;
+          if (runtime != null) {
             // Create new object
             final newObject = JSObject();
 
@@ -5405,10 +5927,12 @@ class JSReflect extends JSObject {
               // Call the constructor with no prototype pre-set
               // The constructor will validate the executor and throw if invalid
               try {
-                evaluator.callFunction(
-                  target,
-                  argumentsList.elements,
-                  newObject,
+                JSNativeFunction.withConstructorCall(
+                  () => runtime.callFunction(
+                    target,
+                    argumentsList.elements,
+                    newObject,
+                  ),
                 );
               } on JSTypeError catch (e) {
                 // Convert Dart JSTypeError to JavaScript TypeError
@@ -5438,10 +5962,12 @@ class JSReflect extends JSObject {
                 newObject.setPrototype(prototypeValue);
               }
               try {
-                evaluator.callFunction(
-                  target,
-                  argumentsList.elements,
-                  newObject,
+                JSNativeFunction.withConstructorCall(
+                  () => runtime.callFunction(
+                    target,
+                    argumentsList.elements,
+                    newObject,
+                  ),
                 );
               } on JSTypeError catch (e) {
                 // Convert Dart JSTypeError to JavaScript TypeError
@@ -5634,11 +6160,11 @@ class JSBooleanObject extends JSObject {
     // When comparing a Boolean object with another value using ==,
     // convert this to its primitive value first (ToPrimitive)
     if (other is JSBoolean) {
-      return primitiveValue == other.value;
-    } else if (other is JSBooleanObject) {
+      return JSBoolean(primitiveValue).equals(other);
+    }
+    if (other is JSBooleanObject) {
       return primitiveValue == other.primitiveValue;
     }
-    // For other types, convert both to primitives and compare
     return JSBoolean(primitiveValue).equals(other);
   }
 }
@@ -5647,7 +6173,6 @@ class JSNumberObject extends JSObject {
   @override
   final double primitiveValue;
 
-  // Static prototype for all Number objects
   static JSObject? _numberPrototype;
 
   static void setNumberPrototype(JSObject prototype) {
@@ -5655,7 +6180,6 @@ class JSNumberObject extends JSObject {
     if (manager != null) {
       manager.setNumberPrototype(prototype);
     }
-    // Always set static as fallback
     _numberPrototype = prototype;
   }
 
@@ -5667,7 +6191,7 @@ class JSNumberObject extends JSObject {
     return _numberPrototype;
   }
 
-  JSNumberObject(this.primitiveValue) {
+  JSNumberObject(this.primitiveValue) : super() {
     // Set the prototype to Number.prototype if available
     final proto = numberPrototype;
     if (proto != null) {
@@ -5714,6 +6238,7 @@ class JSValueFactory {
   static JSValue nullValue() => JSNull.instance;
   static JSValue boolean(bool value) => JSBoolean(value);
   static JSValue number(num value) => JSNumber(value.toDouble());
+
   static JSValue bigint(BigInt value) => JSBigInt(value);
   static JSValue symbol([String? description]) =>
       JSSymbol(description) as JSValue;
@@ -5904,7 +6429,125 @@ class JSPromise extends JSObject {
     }
   }
 
+  void _fulfillDirect(JSValue value) {
+    if (_state != PromiseState.pending) {
+      return;
+    }
+    _state = PromiseState.fulfilled;
+    _value = value;
+    _settle();
+  }
+
+  void _rejectDirect(JSValue reason) {
+    if (_state != PromiseState.pending) {
+      return;
+    }
+    _state = PromiseState.rejected;
+    _reason = reason;
+    _settle();
+  }
+
+  void _resolveChainedValue(JSValue value) {
+    if (_state != PromiseState.pending) {
+      return;
+    }
+
+    if (identical(this, value)) {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        final typeErrorCtor = runtime.getGlobal('TypeError');
+        if (typeErrorCtor is JSFunction) {
+          try {
+            _rejectDirect(
+              runtime.callFunction(typeErrorCtor, [
+                JSValueFactory.string('Chaining cycle detected for promise'),
+              ]),
+            );
+            return;
+          } catch (_) {}
+        }
+      }
+      _rejectDirect(
+        JSValueFactory.object({
+          'name': JSValueFactory.string('TypeError'),
+          'message': JSValueFactory.string(
+            'Chaining cycle detected for promise',
+          ),
+        }),
+      );
+      return;
+    }
+
+    if (value is JSObject || value is JSFunction) {
+      JSValue thenValue;
+      try {
+        thenValue = (value as dynamic).getProperty('then') as JSValue;
+      } catch (e) {
+        _rejectDirect(PromisePrototype._errorToPromiseRejection(e));
+        return;
+      }
+
+      if (thenValue is JSFunction) {
+        var settled = false;
+        final runtime = JSRuntime.current;
+        final resolveThenable = JSNativeFunction(
+          functionName: '',
+          expectedArgs: 1,
+          nativeImpl: (args) {
+            if (!settled) {
+              settled = true;
+              _resolveChainedValue(
+                args.isNotEmpty ? args[0] : JSValueFactory.undefined(),
+              );
+            }
+            return JSValueFactory.undefined();
+          },
+        );
+        final rejectThenable = JSNativeFunction(
+          functionName: '',
+          expectedArgs: 1,
+          nativeImpl: (args) {
+            if (!settled) {
+              settled = true;
+              _rejectDirect(
+                args.isNotEmpty ? args[0] : JSValueFactory.undefined(),
+              );
+            }
+            return JSValueFactory.undefined();
+          },
+        );
+
+        void invokeThen() {
+          try {
+            if (runtime != null) {
+              runtime.callFunction(thenValue, [
+                resolveThenable,
+                rejectThenable,
+              ], value);
+            }
+          } catch (e) {
+            if (!settled) {
+              settled = true;
+              _rejectDirect(PromisePrototype._errorToPromiseRejection(e));
+            }
+          }
+        }
+
+        if (runtime != null) {
+          runtime.enqueueMicrotask(invokeThen);
+        } else {
+          invokeThen();
+        }
+        return;
+      }
+    }
+
+    _fulfillDirect(value);
+  }
+
   void _executeExecutor(JSFunction executor) {
+    var alreadyResolved = false;
+
     // Create resolve and reject functions
     // Per ES6 spec, both have length = 1
     // Note: Resolve and reject are NOT constructors
@@ -5912,11 +6555,13 @@ class JSPromise extends JSObject {
       functionName: '', // Anonymous function per spec
       expectedArgs: 1, // Length property = 1
       nativeImpl: (args) {
-        if (_state == PromiseState.pending) {
-          _state = PromiseState.fulfilled;
-          _value = args.isNotEmpty ? args[0] : JSValueFactory.undefined();
-          _settle();
+        if (alreadyResolved) {
+          return JSValueFactory.undefined();
         }
+        alreadyResolved = true;
+        _resolveChainedValue(
+          args.isNotEmpty ? args[0] : JSValueFactory.undefined(),
+        );
         return JSValueFactory.undefined();
       },
       isConstructor: false, // Resolve is not a constructor
@@ -5926,11 +6571,11 @@ class JSPromise extends JSObject {
       functionName: '', // Anonymous function per spec
       expectedArgs: 1, // Length property = 1
       nativeImpl: (args) {
-        if (_state == PromiseState.pending) {
-          _state = PromiseState.rejected;
-          _reason = args.isNotEmpty ? args[0] : JSValueFactory.undefined();
-          _settle();
+        if (alreadyResolved) {
+          return JSValueFactory.undefined();
         }
+        alreadyResolved = true;
+        _rejectDirect(args.isNotEmpty ? args[0] : JSValueFactory.undefined());
         return JSValueFactory.undefined();
       },
       isConstructor: false, // Reject is not a constructor
@@ -5938,9 +6583,9 @@ class JSPromise extends JSObject {
 
     // Call the executor with resolve and reject
     try {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
-        evaluator.callFunction(executor, [
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        runtime.callFunction(executor, [
           resolveFunction,
           rejectFunction,
         ], JSValueFactory.undefined());
@@ -5949,10 +6594,9 @@ class JSPromise extends JSObject {
       }
     } catch (e) {
       // If the executor throws an exception, reject the promise
-      if (_state == PromiseState.pending) {
-        _state = PromiseState.rejected;
-        _reason = e is JSValue ? e : JSValueFactory.string(e.toString());
-        _settle();
+      if (!alreadyResolved) {
+        alreadyResolved = true;
+        _rejectDirect(PromisePrototype._errorToPromiseRejection(e));
       }
     }
   }
@@ -5960,8 +6604,8 @@ class JSPromise extends JSObject {
   void _settle() {
     // Schedule callback execution as microtasks
     // Per ES6 spec, Promise callbacks must execute asynchronously
-    final evaluator = JSEvaluator.currentInstance;
-    if (evaluator == null) {
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
       return;
     }
 
@@ -5969,9 +6613,9 @@ class JSPromise extends JSObject {
     if (_state == PromiseState.fulfilled) {
       for (final callback in _onFulfilledCallbacks) {
         if (callback is JSFunction) {
-          evaluator.asyncScheduler.enqueueMicrotask(() {
+          runtime.enqueueMicrotask(() {
             try {
-              evaluator.callFunction(callback, [
+              runtime.callFunction(callback, [
                 _value ?? JSValueFactory.undefined(),
               ], JSValueFactory.undefined());
             } catch (e) {
@@ -5983,9 +6627,9 @@ class JSPromise extends JSObject {
     } else if (_state == PromiseState.rejected) {
       for (final callback in _onRejectedCallbacks) {
         if (callback is JSFunction) {
-          evaluator.asyncScheduler.enqueueMicrotask(() {
+          runtime.enqueueMicrotask(() {
             try {
-              evaluator.callFunction(callback, [
+              runtime.callFunction(callback, [
                 _reason ?? JSValueFactory.undefined(),
               ], JSValueFactory.undefined());
             } catch (e) {
@@ -5997,8 +6641,8 @@ class JSPromise extends JSObject {
     }
 
     // Notify the scheduler that this Promise has been resolved
-    evaluator.asyncScheduler.enqueueMicrotask(() {
-      evaluator.notifyPromiseResolved(this);
+    runtime.enqueueMicrotask(() {
+      runtime.notifyPromiseResolved(this);
     });
 
     // Clear callback lists
@@ -6008,20 +6652,12 @@ class JSPromise extends JSObject {
 
   /// Resolve the promise with a value
   void resolve(JSValue value) {
-    if (_state == PromiseState.pending) {
-      _state = PromiseState.fulfilled;
-      _value = value;
-      _settle();
-    }
+    _resolveChainedValue(value);
   }
 
   /// Reject the promise with a reason
   void reject(JSValue reason) {
-    if (_state == PromiseState.pending) {
-      _state = PromiseState.rejected;
-      _reason = reason;
-      _settle();
-    }
+    _rejectDirect(reason);
   }
 
   /// Getters for state and values (used by await)
@@ -6042,6 +6678,14 @@ class JSPromise extends JSObject {
   }
 }
 
+class _PromiseCapability {
+  final JSValue promise;
+  final JSValue resolve;
+  final JSValue reject;
+
+  _PromiseCapability(this.promise, this.resolve, this.reject);
+}
+
 /// Prototype for Promise objects
 class PromisePrototype {
   /// SameValue comparison per ES6 7.2.10
@@ -6049,7 +6693,6 @@ class PromisePrototype {
   static bool _sameValue(JSValue x, JSValue y) {
     // Same reference
     if (identical(x, y)) return true;
-
     // Different types - not same
     if (x.runtimeType != y.runtimeType) return false;
 
@@ -6076,268 +6719,599 @@ class PromisePrototype {
     return identical(x, y);
   }
 
-  /// Promise.prototype.then(onFulfilled, onRejected)
-  static JSValue then(List<JSValue> args, JSPromise promise) {
-    final onFulfilled = args.isNotEmpty && args[0] is JSFunction
-        ? args[0]
-        : null;
-    final onRejected = args.length > 1 && args[1] is JSFunction
-        ? args[1]
-        : null;
+  static JSPromise _getPromiseInternal(
+    JSValue receiver, {
+    String method = 'then',
+  }) {
+    if (receiver is JSPromise) {
+      return receiver;
+    }
+    if (receiver is JSObject) {
+      final internalPromise = receiver.getInternalSlot('[[PromiseInstance]]');
+      if (internalPromise is JSPromise) {
+        return internalPromise;
+      }
+    }
+    throw JSTypeError(
+      'Method Promise.prototype.$method called on incompatible receiver',
+    );
+  }
 
-    // Create a new promise for chaining
-    final newPromise = JSPromise(
-      JSNativeFunction(
-        functionName: 'executor',
-        nativeImpl: (executorArgs) {
-          final resolve = executorArgs[0];
-          final reject = executorArgs[1];
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator == null) return JSValueFactory.undefined();
+  static JSValue _speciesConstructor(
+    JSValue promise,
+    JSValue defaultConstructor,
+  ) {
+    if (promise is! JSObject) {
+      throw JSTypeError('Promise receiver must be an object');
+    }
 
-          if (promise._state == PromiseState.fulfilled) {
-            // Schedule callback execution as microtask
-            evaluator.asyncScheduler.enqueueMicrotask(() {
-              if (onFulfilled != null) {
-                try {
-                  final result = evaluator.callFunction(
-                    onFulfilled as JSFunction,
-                    [promise._value ?? JSValueFactory.undefined()],
-                    JSValueFactory.undefined(),
-                  );
+    final constructor = promise.getProperty('constructor');
+    if (constructor.isUndefined) {
+      return defaultConstructor;
+    }
+    if (constructor is! JSObject && constructor is! JSFunction) {
+      throw JSTypeError('Promise constructor is not an object');
+    }
 
-                  // If the result is a Promise, wait for its resolution
-                  if (result is JSPromise) {
-                    then([
-                      JSNativeFunction(
-                        functionName: 'chainResolve',
-                        nativeImpl: (args) {
-                          (resolve as JSNativeFunction).call(args);
-                          return JSValueFactory.undefined();
-                        },
-                      ),
-                      JSNativeFunction(
-                        functionName: 'chainReject',
-                        nativeImpl: (args) {
-                          (reject as JSNativeFunction).call(args);
-                          return JSValueFactory.undefined();
-                        },
-                      ),
-                    ], result);
-                  } else {
-                    (resolve as JSNativeFunction).call([result]);
-                  }
-                } catch (e) {
-                  (reject as JSNativeFunction).call([
-                    JSValueFactory.string(e.toString()),
-                  ]);
-                }
-              } else {
-                (resolve as JSNativeFunction).call([
-                  promise._value ?? JSValueFactory.undefined(),
-                ]);
-              }
-            });
-          } else if (promise._state == PromiseState.rejected) {
-            // Schedule callback execution as microtask
-            evaluator.asyncScheduler.enqueueMicrotask(() {
-              if (onRejected != null) {
-                try {
-                  final result = evaluator.callFunction(
-                    onRejected as JSFunction,
-                    [promise._reason ?? JSValueFactory.undefined()],
-                    JSValueFactory.undefined(),
-                  );
+    final species =
+        (constructor as dynamic).getProperty(JSSymbol.species.propertyKey)
+            as JSValue;
+    if (species.isUndefined || species.isNull) {
+      return defaultConstructor;
+    }
+    if (species is! JSObject && species is! JSFunction) {
+      throw JSTypeError('Symbol.species must be a constructor');
+    }
+    return species;
+  }
 
-                  // If the result is a Promise, wait for its resolution
-                  if (result is JSPromise) {
-                    then([
-                      JSNativeFunction(
-                        functionName: 'chainResolve',
-                        nativeImpl: (args) {
-                          (resolve as JSNativeFunction).call(args);
-                          return JSValueFactory.undefined();
-                        },
-                      ),
-                      JSNativeFunction(
-                        functionName: 'chainReject',
-                        nativeImpl: (args) {
-                          (reject as JSNativeFunction).call(args);
-                          return JSValueFactory.undefined();
-                        },
-                      ),
-                    ], result);
-                  } else {
-                    (resolve as JSNativeFunction).call([result]);
-                  }
-                } catch (e) {
-                  (reject as JSNativeFunction).call([
-                    JSValueFactory.string(e.toString()),
-                  ]);
-                }
-              } else {
-                (reject as JSNativeFunction).call([
-                  promise._reason ?? JSValueFactory.undefined(),
-                ]);
-              }
-            });
-          } else {
-            // Promise encore en attente
-            if (onFulfilled != null) {
-              promise._onFulfilledCallbacks.add(
-                JSNativeFunction(
-                  functionName: 'thenCallback',
-                  nativeImpl: (callbackArgs) {
-                    final evaluator = JSEvaluator.currentInstance;
-                    if (evaluator == null) return JSValueFactory.undefined();
+  static _PromiseCapability _newPromiseCapability(JSValue constructor) {
+    final undefined = JSValueFactory.undefined();
+    final capturedResolve = <JSValue?>[null];
+    final capturedReject = <JSValue?>[null];
+    final resolveSetter = <JSValue?>[null];
+    final rejectSetter = <JSValue?>[null];
 
-                    // Enqueue the callback as a microtask
-                    evaluator.asyncScheduler.enqueueMicrotask(() {
-                      try {
-                        final result = evaluator.callFunction(
-                          onFulfilled as JSFunction,
-                          callbackArgs,
-                          JSValueFactory.undefined(),
-                        );
+    final executor = JSNativeFunction(
+      functionName: '',
+      expectedArgs: 2,
+      nativeImpl: (executorArgs) {
+        final resolve = executorArgs.isNotEmpty ? executorArgs[0] : undefined;
+        final reject = executorArgs.length > 1 ? executorArgs[1] : undefined;
 
-                        // If the result is a Promise, wait for its resolution
-                        if (result is JSPromise) {
-                          then([
-                            JSNativeFunction(
-                              functionName: 'chainResolve',
-                              nativeImpl: (args) {
-                                (resolve as JSNativeFunction).call(args);
-                                return JSValueFactory.undefined();
-                              },
-                            ),
-                            JSNativeFunction(
-                              functionName: 'chainReject',
-                              nativeImpl: (args) {
-                                (reject as JSNativeFunction).call(args);
-                                return JSValueFactory.undefined();
-                              },
-                            ),
-                          ], result);
-                        } else {
-                          (resolve as JSNativeFunction).call([result]);
-                        }
-                      } catch (e) {
-                        (reject as JSNativeFunction).call([
-                          JSValueFactory.string(e.toString()),
-                        ]);
-                      }
-                    });
-                    return JSValueFactory.undefined();
-                  },
-                ),
-              );
-            }
+        capturedResolve[0] = resolve;
+        capturedReject[0] = reject;
 
-            if (onRejected != null) {
-              promise._onRejectedCallbacks.add(
-                JSNativeFunction(
-                  functionName: 'catchCallback',
-                  nativeImpl: (callbackArgs) {
-                    final evaluator = JSEvaluator.currentInstance;
-                    if (evaluator == null) return JSValueFactory.undefined();
-
-                    // Enqueue the callback as a microtask
-                    evaluator.asyncScheduler.enqueueMicrotask(() {
-                      try {
-                        final result = evaluator.callFunction(
-                          onRejected as JSFunction,
-                          callbackArgs,
-                          JSValueFactory.undefined(),
-                        );
-
-                        // If the result is a Promise, wait for its resolution
-                        if (result is JSPromise) {
-                          then([
-                            JSNativeFunction(
-                              functionName: 'chainResolve',
-                              nativeImpl: (args) {
-                                (resolve as JSNativeFunction).call(args);
-                                return JSValueFactory.undefined();
-                              },
-                            ),
-                            JSNativeFunction(
-                              functionName: 'chainReject',
-                              nativeImpl: (args) {
-                                (reject as JSNativeFunction).call(args);
-                                return JSValueFactory.undefined();
-                              },
-                            ),
-                          ], result);
-                        } else {
-                          (resolve as JSNativeFunction).call([result]);
-                        }
-                      } catch (e) {
-                        (reject as JSNativeFunction).call([
-                          JSValueFactory.string(e.toString()),
-                        ]);
-                      }
-                    });
-                    return JSValueFactory.undefined();
-                  },
-                ),
-              );
-            }
-          }
-          return JSValueFactory.undefined();
-        },
-      ),
+        if (!resolve.isUndefined && resolveSetter[0] != null) {
+          throw JSTypeError(
+            'Promise capability executor resolve already called',
+          );
+        }
+        if (!reject.isUndefined && rejectSetter[0] != null) {
+          throw JSTypeError(
+            'Promise capability executor reject already called',
+          );
+        }
+        if (!resolve.isUndefined) {
+          resolveSetter[0] = resolve;
+        }
+        if (!reject.isUndefined) {
+          rejectSetter[0] = reject;
+        }
+        return undefined;
+      },
     );
 
-    return newPromise;
+    JSValue promise;
+    if (constructor is JSNativeFunction) {
+      if (constructor.isConstructor) {
+        promise = JSNativeFunction.withConstructorCall(() {
+          if (constructor.functionName == 'Promise') {
+            return constructor.call([executor]);
+          }
+          final instance = JSObject();
+          final prototypeValue = constructor.getProperty('prototype');
+          if (prototypeValue is JSObject) {
+            instance.setPrototype(prototypeValue);
+          }
+          final constructed = constructor.callWithThis([executor], instance);
+          return constructed is JSObject && !constructed.isNull
+              ? constructed
+              : instance;
+        });
+      } else {
+        promise = constructor.call([executor]);
+      }
+      if (promise is JSObject) {
+        if (!promise.hasOwnProperty('constructor')) {
+          promise.setProperty('constructor', constructor);
+        }
+      }
+    } else if (constructor is JSClass) {
+      promise = constructor.construct([executor]);
+    } else if (constructor is JSFunction) {
+      final runtime = JSRuntime.current;
+      if (runtime == null) {
+        throw JSError('No evaluator for Promise constructor');
+      }
+      promise = runtime.callFunction(constructor, [executor], undefined);
+    } else {
+      throw JSTypeError('Promise constructor is not callable');
+    }
+
+    final resolve = capturedResolve[0];
+    final reject = capturedReject[0];
+    if (resolve == null || !resolve.isFunction) {
+      throw JSTypeError('Promise capability resolve is not callable');
+    }
+    if (reject == null || !reject.isFunction) {
+      throw JSTypeError('Promise capability reject is not callable');
+    }
+    return _PromiseCapability(promise, resolve, reject);
+  }
+
+  static JSValue _errorToPromiseRejection(Object error) {
+    if (error is JSException) {
+      return error.value;
+    }
+    if (error is JSError) {
+      final runtime = JSRuntime.current;
+      JSObject? errorObject;
+      if (runtime != null) {
+        final ctorValue = runtime.getGlobal(error.name);
+        if (ctorValue is JSFunction) {
+          try {
+            final constructed = runtime.callFunction(ctorValue, [
+              JSString(error.message),
+            ]);
+            if (constructed is JSObject) {
+              errorObject = constructed;
+            }
+          } catch (_) {
+            errorObject = null;
+          }
+        }
+      }
+      errorObject ??= JSObject();
+      errorObject.setProperty('name', JSString(error.name));
+      errorObject.setProperty('message', JSString(error.message));
+      return errorObject;
+    }
+    if (error is JSValue) {
+      return error;
+    }
+    return JSValueFactory.string(error.toString());
+  }
+
+  static void _resolveCapability(_PromiseCapability capability, JSValue value) {
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No evaluator available for Promise resolution');
+    }
+    runtime.callFunction(capability.resolve, [
+      value,
+    ], JSValueFactory.undefined());
+  }
+
+  static void _rejectCapability(_PromiseCapability capability, JSValue reason) {
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No evaluator available for Promise rejection');
+    }
+    runtime.callFunction(capability.reject, [
+      reason,
+    ], JSValueFactory.undefined());
+  }
+
+  static JSFunction _getPromiseResolveFunction(
+    JSValue constructor,
+    String methodName,
+  ) {
+    if (constructor is! JSObject && constructor is! JSFunction) {
+      throw JSTypeError('$methodName called on non-object');
+    }
+    final resolve = (constructor as dynamic).getProperty('resolve') as JSValue;
+    if (resolve is! JSFunction) {
+      throw JSTypeError('$methodName resolve is not callable');
+    }
+    return resolve;
+  }
+
+  static JSValue _getIteratorObject(JSValue iterable, String methodName) {
+    if (iterable.isNull || iterable.isUndefined) {
+      throw JSTypeError('$methodName argument is not iterable');
+    }
+
+    JSValue target = iterable;
+    if (iterable is! JSObject && iterable is! JSFunction) {
+      target = iterable.toObject();
+    }
+
+    final iteratorMethod =
+        (target as dynamic).getProperty(JSSymbol.iterator.propertyKey)
+            as JSValue;
+    if (iteratorMethod.isUndefined || iteratorMethod.isNull) {
+      final directIterator = IteratorUtils.getIterator(iterable);
+      if (directIterator != null) {
+        return directIterator;
+      }
+      throw JSTypeError('$methodName argument is not iterable');
+    }
+    if (iteratorMethod is! JSFunction) {
+      throw JSTypeError('$methodName argument is not iterable');
+    }
+
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No evaluator available for $methodName');
+    }
+
+    final iterator = runtime.callFunction(
+      iteratorMethod,
+      const <JSValue>[],
+      target,
+    );
+    if (iterator is! JSObject && iterator is! JSFunction) {
+      throw JSTypeError('Iterator result is not an object');
+    }
+    return iterator;
+  }
+
+  static JSObject _iteratorNext(JSValue iterator) {
+    final nextMethod = (iterator as dynamic).getProperty('next') as JSValue;
+    if (nextMethod is! JSFunction) {
+      throw JSTypeError('Iterator next is not callable');
+    }
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No evaluator available for iterator next');
+    }
+    final nextResult = runtime.callFunction(
+      nextMethod,
+      const <JSValue>[],
+      iterator,
+    );
+    if (nextResult is! JSObject) {
+      throw JSTypeError('Iterator result is not an object');
+    }
+    return nextResult;
+  }
+
+  static void _iteratorClose(JSValue iterator) {
+    if (iterator is! JSObject && iterator is! JSFunction) {
+      return;
+    }
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      return;
+    }
+    try {
+      final returnMethod =
+          (iterator as dynamic).getProperty('return') as JSValue;
+      if (returnMethod is JSFunction) {
+        runtime.callFunction(returnMethod, const <JSValue>[], iterator);
+      }
+    } catch (_) {}
+  }
+
+  static JSValue _createAggregateErrorValue(List<JSValue> errors) {
+    final runtime = JSRuntime.current;
+    if (runtime != null) {
+      final aggregateCtor = runtime.getGlobal('AggregateError');
+      if (aggregateCtor is JSFunction) {
+        try {
+          final value = runtime.callFunction(aggregateCtor, [
+            _createArrayValue(errors),
+            JSValueFactory.string('All promises were rejected'),
+          ]);
+          if (value is JSObject) {
+            return value;
+          }
+        } catch (_) {}
+      }
+    }
+
+    final aggregateError = JSValueFactory.object({});
+    aggregateError.setProperty('name', JSValueFactory.string('AggregateError'));
+    aggregateError.setProperty(
+      'message',
+      JSValueFactory.string('All promises were rejected'),
+    );
+    aggregateError.setProperty('errors', _createArrayValue(errors));
+    return aggregateError;
+  }
+
+  static JSArray _createArrayValue([List<JSValue>? elements]) {
+    final array = JSValueFactory.array(elements ?? const <JSValue>[]);
+    final runtime = JSRuntime.current;
+    if (runtime != null) {
+      final arrayCtor = runtime.getGlobal('Array');
+      if (arrayCtor is JSObject || arrayCtor is JSFunction) {
+        final proto =
+            (arrayCtor as dynamic).getProperty('prototype') as JSValue;
+        if (proto is JSObject) {
+          array.setPrototype(proto);
+        }
+      }
+    }
+    return array;
+  }
+
+  static JSValue _rejectCapabilityAndReturn(
+    _PromiseCapability capability,
+    Object error,
+  ) {
+    _rejectCapability(capability, _errorToPromiseRejection(error));
+    return capability.promise;
+  }
+
+  static void _runPromiseReaction(
+    JSFunction? handler,
+    JSValue value,
+    _PromiseCapability capability,
+    bool isReject,
+  ) {
+    if (handler == null) {
+      if (isReject) {
+        _rejectCapability(capability, value);
+      } else {
+        _resolveCapability(capability, value);
+      }
+      return;
+    }
+
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      if (isReject) {
+        _rejectCapability(capability, value);
+      } else {
+        _resolveCapability(capability, value);
+      }
+      return;
+    }
+
+    try {
+      final result = runtime.callFunction(handler, [
+        value,
+      ], JSValueFactory.undefined());
+      _resolveCapability(capability, result);
+    } catch (e) {
+      _rejectCapability(capability, _errorToPromiseRejection(e));
+    }
+  }
+
+  /// Promise.prototype.then(onFulfilled, onRejected)
+  static JSValue then(List<JSValue> args, JSPromise promise) {
+    return thenWithThis([promise, ...args]);
+  }
+
+  static JSValue thenWithThis(List<JSValue> args) {
+    final thisBinding = args.isNotEmpty ? args[0] : JSValueFactory.undefined();
+    final handlerArgs = args.length > 1 ? args.sublist(1) : const <JSValue>[];
+    final JSFunction? onFulfilled =
+        handlerArgs.isNotEmpty && handlerArgs[0] is JSFunction
+        ? handlerArgs[0] as JSFunction
+        : null;
+    final JSFunction? onRejected =
+        handlerArgs.length > 1 && handlerArgs[1] is JSFunction
+        ? handlerArgs[1] as JSFunction
+        : null;
+    final undefined = JSValueFactory.undefined();
+
+    final promise = _getPromiseInternal(thisBinding);
+    final runtime = JSRuntime.current;
+    final defaultConstructor = runtime?.getGlobal('Promise');
+    if (defaultConstructor == null) {
+      throw JSError('Promise constructor is not available');
+    }
+    final constructor = _speciesConstructor(thisBinding, defaultConstructor);
+    final capability = _newPromiseCapability(constructor);
+
+    if (promise._state == PromiseState.fulfilled) {
+      if (runtime == null) {
+        _runPromiseReaction(
+          onFulfilled,
+          promise._value ?? undefined,
+          capability,
+          false,
+        );
+      } else {
+        runtime.enqueueMicrotask(() {
+          _runPromiseReaction(
+            onFulfilled,
+            promise._value ?? undefined,
+            capability,
+            false,
+          );
+        });
+      }
+    } else if (promise._state == PromiseState.rejected) {
+      if (runtime == null) {
+        _runPromiseReaction(
+          onRejected,
+          promise._reason ?? undefined,
+          capability,
+          true,
+        );
+      } else {
+        runtime.enqueueMicrotask(() {
+          _runPromiseReaction(
+            onRejected,
+            promise._reason ?? undefined,
+            capability,
+            true,
+          );
+        });
+      }
+    } else {
+      promise._onFulfilledCallbacks.add(
+        JSNativeFunction(
+          functionName: 'thenCallback',
+          nativeImpl: (callbackArgs) {
+            _runPromiseReaction(
+              onFulfilled,
+              callbackArgs.isNotEmpty ? callbackArgs[0] : undefined,
+              capability,
+              false,
+            );
+            return undefined;
+          },
+        ),
+      );
+
+      promise._onRejectedCallbacks.add(
+        JSNativeFunction(
+          functionName: 'catchCallback',
+          nativeImpl: (callbackArgs) {
+            _runPromiseReaction(
+              onRejected,
+              callbackArgs.isNotEmpty ? callbackArgs[0] : undefined,
+              capability,
+              true,
+            );
+            return undefined;
+          },
+        ),
+      );
+    }
+
+    return capability.promise;
   }
 
   /// Promise.prototype.catch(onRejected)
   static JSValue catch_(List<JSValue> args, JSPromise promise) {
-    if (args.isEmpty) {
-      throw JSTypeError('Promise.prototype.catch requires 1 argument');
+    return catchWithThis([promise, ...args]);
+  }
+
+  static JSValue catchWithThis(List<JSValue> args) {
+    final thisBinding = args.isNotEmpty ? args[0] : JSValueFactory.undefined();
+    final onRejected = args.length > 1 ? args[1] : JSValueFactory.undefined();
+    return _invokeThen(thisBinding, [
+      JSValueFactory.undefined(),
+      onRejected,
+    ], methodName: 'Promise.prototype.catch');
+  }
+
+  static JSValue _promiseResolveByConstructor(
+    JSValue constructor,
+    JSValue value,
+  ) {
+    JSValue? promiseConstructor;
+    if (value is JSPromise) {
+      promiseConstructor = value.getProperty('constructor');
+    } else if (value is JSObject) {
+      final internalPromise = value.getInternalSlot('[[PromiseInstance]]');
+      if (internalPromise is JSPromise) {
+        promiseConstructor = value.getProperty('constructor');
+      }
     }
-    return then([JSValueFactory.undefined(), args[0]], promise);
+
+    if (promiseConstructor != null &&
+        _sameValue(promiseConstructor, constructor)) {
+      return value;
+    }
+
+    final capability = _newPromiseCapability(constructor);
+    _resolveCapability(capability, value);
+    return capability.promise;
+  }
+
+  static JSValue _invokeThen(
+    JSValue receiver,
+    List<JSValue> args, {
+    String methodName = 'Promise method',
+  }) {
+    JSValue target = receiver;
+    if (receiver is! JSObject && receiver is! JSFunction) {
+      if (receiver.isNull || receiver.isUndefined) {
+        throw JSTypeError('$methodName called on null or undefined');
+      }
+      target = receiver.toObject();
+    }
+
+    final thenValue = (target as dynamic).getProperty('then') as JSValue;
+    if (thenValue is! JSFunction) {
+      throw JSTypeError('$methodName receiver then is not callable');
+    }
+
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No evaluator available for $methodName');
+    }
+    return runtime.callFunction(thenValue, args, target);
   }
 
   /// Promise.prototype.finally(onFinally)
-  static JSValue finally_(List<JSValue> args, JSPromise promise) {
-    if (args.isEmpty) {
-      throw JSTypeError('Promise.prototype.finally requires 1 argument');
+  static JSValue finallyWithThis(List<JSValue> args) {
+    final thisBinding = args.isNotEmpty ? args[0] : JSValueFactory.undefined();
+    final onFinally = args.length > 1 ? args[1] : JSValueFactory.undefined();
+
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No evaluator available for Promise.prototype.finally');
     }
 
-    final onFinally = args[0];
-    if (onFinally is! JSFunction) {
-      throw JSTypeError(
-        'Promise.prototype.finally callback must be a function',
+    final defaultConstructor = runtime.getGlobal('Promise');
+
+    final constructor = _speciesConstructor(thisBinding, defaultConstructor);
+
+    JSValue thenFinally = onFinally;
+    JSValue catchFinally = onFinally;
+
+    if (onFinally is JSFunction) {
+      thenFinally = JSNativeFunction(
+        functionName: '',
+        expectedArgs: 1,
+        nativeImpl: (callbackArgs) {
+          final value = callbackArgs.isNotEmpty
+              ? callbackArgs[0]
+              : JSValueFactory.undefined();
+          final result = runtime.callFunction(
+            onFinally,
+            const <JSValue>[],
+            JSValueFactory.undefined(),
+          );
+          final promise = _promiseResolveByConstructor(constructor, result);
+          final valueThunk = JSNativeFunction(
+            functionName: '',
+            expectedArgs: 0,
+            nativeImpl: (_) => value,
+          );
+          return _invokeThen(promise, [valueThunk]);
+        },
+      );
+
+      catchFinally = JSNativeFunction(
+        functionName: '',
+        expectedArgs: 1,
+        nativeImpl: (callbackArgs) {
+          final reason = callbackArgs.isNotEmpty
+              ? callbackArgs[0]
+              : JSValueFactory.undefined();
+          final result = runtime.callFunction(
+            onFinally,
+            const <JSValue>[],
+            JSValueFactory.undefined(),
+          );
+          final promise = _promiseResolveByConstructor(constructor, result);
+          final thrower = JSNativeFunction(
+            functionName: '',
+            expectedArgs: 0,
+            nativeImpl: (_) => throw JSException(reason),
+          );
+          return _invokeThen(promise, [thrower]);
+        },
       );
     }
 
-    return then([
-      JSNativeFunction(
-        functionName: 'finallyFulfilled',
-        nativeImpl: (callbackArgs) {
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
-            evaluator.callFunction(onFinally, [], JSValueFactory.undefined());
-          }
-          return callbackArgs.isNotEmpty
-              ? callbackArgs[0]
-              : JSValueFactory.undefined();
-        },
-      ),
-      JSNativeFunction(
-        functionName: 'finallyRejected',
-        nativeImpl: (callbackArgs) {
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
-            evaluator.callFunction(onFinally, [], JSValueFactory.undefined());
-          }
-          throw callbackArgs.isNotEmpty
-              ? callbackArgs[0]
-              : JSValueFactory.undefined();
-        },
-      ),
-    ], promise);
+    return _invokeThen(thisBinding, [
+      thenFinally,
+      catchFinally,
+    ], methodName: 'Promise.prototype.finally');
+  }
+
+  static JSValue finally_(List<JSValue> args, JSPromise promise) {
+    return finallyWithThis([promise, ...args]);
   }
 
   /// Get a property of the object Promise
@@ -6351,12 +7325,12 @@ class PromisePrototype {
       case 'catch':
         return JSNativeFunction(
           functionName: 'catch',
-          nativeImpl: (args) => catch_(args, promise),
+          nativeImpl: (args) => catchWithThis([promise, ...args]),
         );
       case 'finally':
         return JSNativeFunction(
           functionName: 'finally',
-          nativeImpl: (args) => finally_(args, promise),
+          nativeImpl: (args) => finallyWithThis([promise, ...args]),
         );
       default:
         // Search dans Object.prototype
@@ -6398,9 +7372,9 @@ class PromisePrototype {
           functionName: 'resolveExecutor',
           nativeImpl: (executorArgs) {
             final resolve = executorArgs[0] as JSNativeFunction;
-            final evaluator = JSEvaluator.currentInstance;
-            if (evaluator != null) {
-              evaluator.callFunction(resolve, [
+            final runtime = JSRuntime.current;
+            if (runtime != null) {
+              runtime.callFunction(resolve, [
                 value,
               ], JSValueFactory.undefined());
             }
@@ -6473,14 +7447,22 @@ class PromisePrototype {
     JSValue result;
     try {
       if (thisBinding is JSNativeFunction) {
-        // Call as regular function (may not be a constructor)
-        result = thisBinding.call([executor]);
-        // If result is an object, set up the prototype
+        if (thisBinding.isConstructor) {
+          result = JSNativeFunction.withConstructorCall(() {
+            final instance = JSObject();
+            final prototypeValue = thisBinding.getProperty('prototype');
+            if (prototypeValue is JSObject) {
+              instance.setPrototype(prototypeValue);
+            }
+            final constructed = thisBinding.callWithThis([executor], instance);
+            return constructed is JSObject && !constructed.isNull
+                ? constructed
+                : instance;
+          });
+        } else {
+          result = thisBinding.call([executor]);
+        }
         if (result is JSObject) {
-          final prototypeValue = thisBinding.getProperty('prototype');
-          if (prototypeValue is JSObject) {
-            result.setPrototype(prototypeValue);
-          }
           if (!result.hasOwnProperty('constructor')) {
             result.setProperty('constructor', thisBinding);
           }
@@ -6488,10 +7470,9 @@ class PromisePrototype {
       } else if (thisBinding is JSClass) {
         result = thisBinding.construct([executor]);
       } else if (thisBinding is JSFunction) {
-        // Can call any JSFunction
-        final evaluator = JSEvaluator.currentInstance;
-        if (evaluator != null) {
-          result = evaluator.callFunction(thisBinding, [
+        final runtime = JSRuntime.current;
+        if (runtime != null) {
+          result = runtime.callFunction(thisBinding, [
             executor,
           ], JSValueFactory.undefined());
         } else {
@@ -6520,9 +7501,9 @@ class PromisePrototype {
 
     // Step 5: Call promiseCapability.[[Resolve]] with x
     // Per ES6: Perform ? Call(promiseCapability.[[Resolve]], undefined, « x »).
-    final evaluator = JSEvaluator.currentInstance;
-    if (evaluator != null) {
-      evaluator.callFunction(resolveCapability, [
+    final runtime = JSRuntime.current;
+    if (runtime != null) {
+      runtime.callFunction(resolveCapability, [
         value,
       ], JSValueFactory.undefined());
     }
@@ -6544,9 +7525,9 @@ class PromisePrototype {
           nativeImpl: (executorArgs) {
             if (executorArgs.length > 1) {
               final reject = executorArgs[1] as JSNativeFunction;
-              final evaluator = JSEvaluator.currentInstance;
-              if (evaluator != null) {
-                evaluator.callFunction(reject, [
+              final runtime = JSRuntime.current;
+              if (runtime != null) {
+                runtime.callFunction(reject, [
                   reason,
                 ], JSValueFactory.undefined());
               }
@@ -6619,14 +7600,22 @@ class PromisePrototype {
     JSValue result;
     try {
       if (thisBinding is JSNativeFunction) {
-        // Call as regular function (may not be a constructor)
-        result = thisBinding.call([executor]);
-        // If result is an object, set up the prototype
+        if (thisBinding.isConstructor) {
+          result = JSNativeFunction.withConstructorCall(() {
+            final instance = JSObject();
+            final prototypeValue = thisBinding.getProperty('prototype');
+            if (prototypeValue is JSObject) {
+              instance.setPrototype(prototypeValue);
+            }
+            final constructed = thisBinding.callWithThis([executor], instance);
+            return constructed is JSObject && !constructed.isNull
+                ? constructed
+                : instance;
+          });
+        } else {
+          result = thisBinding.call([executor]);
+        }
         if (result is JSObject) {
-          final prototypeValue = thisBinding.getProperty('prototype');
-          if (prototypeValue is JSObject) {
-            result.setPrototype(prototypeValue);
-          }
           if (!result.hasOwnProperty('constructor')) {
             result.setProperty('constructor', thisBinding);
           }
@@ -6634,10 +7623,9 @@ class PromisePrototype {
       } else if (thisBinding is JSClass) {
         result = thisBinding.construct([executor]);
       } else if (thisBinding is JSFunction) {
-        // Can call any JSFunction
-        final evaluator = JSEvaluator.currentInstance;
-        if (evaluator != null) {
-          result = evaluator.callFunction(thisBinding, [
+        final runtime = JSRuntime.current;
+        if (runtime != null) {
+          result = runtime.callFunction(thisBinding, [
             executor,
           ], JSValueFactory.undefined());
         } else {
@@ -6668,9 +7656,9 @@ class PromisePrototype {
 
     // Step 5: Call promiseCapability.[[Reject]] with reason
     // Per ES6: Perform ? Call(promiseCapability.[[Reject]], undefined, « reason »).
-    final evaluator = JSEvaluator.currentInstance;
-    if (evaluator != null) {
-      evaluator.callFunction(rejectCapability, [
+    final runtime = JSRuntime.current;
+    if (runtime != null) {
+      runtime.callFunction(rejectCapability, [
         reason,
       ], JSValueFactory.undefined());
     }
@@ -6687,11 +7675,9 @@ class PromisePrototype {
         functionName: 'resolveExecutor',
         nativeImpl: (executorArgs) {
           final resolve = executorArgs[0] as JSNativeFunction;
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
-            evaluator.callFunction(resolve, [
-              value,
-            ], JSValueFactory.undefined());
+          final runtime = JSRuntime.current;
+          if (runtime != null) {
+            runtime.callFunction(resolve, [value], JSValueFactory.undefined());
           }
           return JSValueFactory.undefined();
         },
@@ -6708,11 +7694,9 @@ class PromisePrototype {
         functionName: 'rejectExecutor',
         nativeImpl: (executorArgs) {
           final reject = executorArgs[1] as JSNativeFunction;
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
-            evaluator.callFunction(reject, [
-              reason,
-            ], JSValueFactory.undefined());
+          final runtime = JSRuntime.current;
+          if (runtime != null) {
+            runtime.callFunction(reject, [reason], JSValueFactory.undefined());
           }
           return JSValueFactory.undefined();
         },
@@ -6722,445 +7706,465 @@ class PromisePrototype {
 
   /// Promise.all(iterable)
   static JSValue all(List<JSValue> args) {
-    if (args.isEmpty) {
-      throw JSTypeError('Promise.all requires 1 argument');
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No evaluator available for Promise.all');
+    }
+    final constructor = runtime.getGlobal('Promise');
+    return allWithThis(args, constructor);
+  }
+
+  static JSValue allWithThis(List<JSValue> args, JSValue constructor) {
+    final capability = _newPromiseCapability(constructor);
+
+    JSFunction promiseResolve;
+    JSValue iterator;
+    try {
+      final iterable = args.isNotEmpty ? args[0] : JSValueFactory.undefined();
+      promiseResolve = _getPromiseResolveFunction(constructor, 'Promise.all');
+      iterator = _getIteratorObject(iterable, 'Promise.all');
+    } catch (e) {
+      return _rejectCapabilityAndReturn(capability, e);
     }
 
-    final iterable = args[0];
+    final values = <JSValue>[];
+    var remainingElements = 1;
+    var index = 0;
 
-    // Return a rejected promise if the argument is not iterable
-    if (iterable is! JSArray) {
-      return JSPromise(
-        JSNativeFunction(
-          functionName: 'allRejectExecutor',
-          nativeImpl: (executorArgs) {
-            final reject = executorArgs[1] as JSNativeFunction;
-            final evaluator = JSEvaluator.currentInstance;
-            if (evaluator != null) {
-              // Create a TypeError object
-              final typeErrorCtor = evaluator.globalEnvironment.get(
-                'TypeError',
-              );
-              JSValue errorValue;
-              if (typeErrorCtor is JSNativeFunction) {
-                errorValue = typeErrorCtor.call([
-                  JSValueFactory.string('${iterable.type} is not iterable'),
-                ]);
-              } else {
-                // Fallback: create error manually
-                errorValue = JSValueFactory.object({});
-                if (errorValue is JSObject) {
-                  errorValue.setProperty(
-                    'name',
-                    JSValueFactory.string('TypeError'),
-                  );
-                  errorValue.setProperty(
-                    'message',
-                    JSValueFactory.string('${iterable.type} is not iterable'),
-                  );
-                }
-              }
+    while (true) {
+      JSObject nextResult;
+      try {
+        nextResult = _iteratorNext(iterator);
+      } catch (e) {
+        return _rejectCapabilityAndReturn(capability, e);
+      }
 
-              evaluator.callFunction(reject, [
-                errorValue,
-              ], JSValueFactory.undefined());
-            }
-            return JSValueFactory.undefined();
-          },
-        ),
-      );
-    }
+      final bool isDone;
+      final JSValue nextValue;
+      try {
+        isDone = nextResult.getProperty('done').toBoolean();
+        if (isDone) {
+          remainingElements--;
+          if (remainingElements == 0) {
+            _resolveCapability(capability, _createArrayValue(values));
+          }
+          return capability.promise;
+        }
+        nextValue = nextResult.getProperty('value');
+      } catch (e) {
+        return _rejectCapabilityAndReturn(capability, e);
+      }
 
-    return JSPromise(
-      JSNativeFunction(
-        functionName: 'allExecutor',
-        nativeImpl: (executorArgs) {
-          final resolve = executorArgs[0] as JSNativeFunction;
-          final reject = executorArgs[1] as JSNativeFunction;
+      final currentIndex = index;
+      index++;
+      values.add(JSValueFactory.undefined());
+      remainingElements++;
 
-          final promises = iterable.elements;
-          if (promises.isEmpty) {
-            final evaluator = JSEvaluator.currentInstance;
-            if (evaluator != null) {
-              evaluator.callFunction(resolve, [
-                JSValueFactory.array(),
-              ], JSValueFactory.undefined());
-            }
+      JSValue nextPromise;
+      try {
+        final runtime = JSRuntime.current;
+        if (runtime == null) {
+          throw JSError('No evaluator available for Promise.all');
+        }
+        nextPromise = runtime.callFunction(promiseResolve, [
+          nextValue,
+        ], constructor);
+      } catch (e) {
+        _iteratorClose(iterator);
+        return _rejectCapabilityAndReturn(capability, e);
+      }
+
+      var alreadyCalled = false;
+      final resolveElement = JSNativeFunction(
+        functionName: '',
+        expectedArgs: 1,
+        nativeImpl: (callbackArgs) {
+          if (alreadyCalled) {
             return JSValueFactory.undefined();
           }
-
-          final results = List<JSValue>.filled(
-            promises.length,
-            JSValueFactory.undefined(),
-          );
-          var completed = 0;
-
-          for (var i = 0; i < promises.length; i++) {
-            final promise = promises[i];
-            if (promise is JSPromise) {
-              PromisePrototype.then([
-                JSNativeFunction(
-                  functionName: 'allResolve',
-                  nativeImpl: (callbackArgs) {
-                    results[i] = callbackArgs.isNotEmpty
-                        ? callbackArgs[0]
-                        : JSValueFactory.undefined();
-                    completed++;
-                    if (completed == promises.length) {
-                      final evaluator = JSEvaluator.currentInstance;
-                      if (evaluator != null) {
-                        evaluator.callFunction(resolve, [
-                          JSValueFactory.array(results),
-                        ], JSValueFactory.undefined());
-                      }
-                    }
-                    return JSValueFactory.undefined();
-                  },
-                ),
-                JSNativeFunction(
-                  functionName: 'allReject',
-                  nativeImpl: (callbackArgs) {
-                    final evaluator = JSEvaluator.currentInstance;
-                    if (evaluator != null) {
-                      evaluator.callFunction(
-                        reject,
-                        callbackArgs,
-                        JSValueFactory.undefined(),
-                      );
-                    }
-                    return JSValueFactory.undefined();
-                  },
-                ),
-              ], promise);
-            } else {
-              // If ce n'est pas une promise, traiter comme a value resolue
-              results[i] = promise;
-              completed++;
-              if (completed == promises.length) {
-                final evaluator = JSEvaluator.currentInstance;
-                if (evaluator != null) {
-                  evaluator.callFunction(resolve, [
-                    JSValueFactory.array(results),
-                  ], JSValueFactory.undefined());
-                }
-              }
-            }
+          alreadyCalled = true;
+          values[currentIndex] = callbackArgs.isNotEmpty
+              ? callbackArgs[0]
+              : JSValueFactory.undefined();
+          remainingElements--;
+          if (remainingElements == 0) {
+            _resolveCapability(capability, _createArrayValue(values));
           }
           return JSValueFactory.undefined();
         },
-      ),
-    );
+      );
+
+      try {
+        _invokeThen(nextPromise, [
+          resolveElement,
+          capability.reject,
+        ], methodName: 'Promise.all');
+      } catch (e) {
+        _iteratorClose(iterator);
+        return _rejectCapabilityAndReturn(capability, e);
+      }
+    }
   }
 
   /// Promise.race(iterable)
   static JSValue race(List<JSValue> args) {
-    if (args.isEmpty) {
-      throw JSTypeError('Promise.race requires 1 argument');
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No evaluator available for Promise.race');
+    }
+    final constructor = runtime.getGlobal('Promise');
+    return raceWithThis(args, constructor);
+  }
+
+  static JSValue raceWithThis(List<JSValue> args, JSValue constructor) {
+    final capability = _newPromiseCapability(constructor);
+
+    JSFunction promiseResolve;
+    JSValue iterator;
+    try {
+      final iterable = args.isNotEmpty ? args[0] : JSValueFactory.undefined();
+      promiseResolve = _getPromiseResolveFunction(constructor, 'Promise.race');
+      iterator = _getIteratorObject(iterable, 'Promise.race');
+    } catch (e) {
+      return _rejectCapabilityAndReturn(capability, e);
     }
 
-    final iterable = args[0];
-    if (iterable is! JSArray) {
-      throw JSTypeError('Promise.race argument must be iterable');
+    while (true) {
+      JSObject nextResult;
+      try {
+        nextResult = _iteratorNext(iterator);
+      } catch (e) {
+        return _rejectCapabilityAndReturn(capability, e);
+      }
+
+      final bool isDone;
+      final JSValue nextValue;
+      try {
+        isDone = nextResult.getProperty('done').toBoolean();
+        if (isDone) {
+          return capability.promise;
+        }
+        nextValue = nextResult.getProperty('value');
+      } catch (e) {
+        return _rejectCapabilityAndReturn(capability, e);
+      }
+      JSValue nextPromise;
+      try {
+        final runtime = JSRuntime.current;
+        if (runtime == null) {
+          throw JSError('No evaluator available for Promise.race');
+        }
+        nextPromise = runtime.callFunction(promiseResolve, [
+          nextValue,
+        ], constructor);
+      } catch (e) {
+        _iteratorClose(iterator);
+        return _rejectCapabilityAndReturn(capability, e);
+      }
+
+      try {
+        _invokeThen(nextPromise, [
+          capability.resolve,
+          capability.reject,
+        ], methodName: 'Promise.race');
+      } catch (e) {
+        _iteratorClose(iterator);
+        return _rejectCapabilityAndReturn(capability, e);
+      }
     }
-
-    return JSPromise(
-      JSNativeFunction(
-        functionName: 'raceExecutor',
-        nativeImpl: (executorArgs) {
-          final resolve = executorArgs[0] as JSNativeFunction;
-          final reject = executorArgs[1] as JSNativeFunction;
-
-          final promises = iterable.elements;
-          if (promises.isEmpty) {
-            // Rester en attente indefiniment
-            return JSValueFactory.undefined();
-          }
-
-          for (final promise in promises) {
-            if (promise is JSPromise) {
-              PromisePrototype.then([
-                JSNativeFunction(
-                  functionName: 'raceResolve',
-                  nativeImpl: (callbackArgs) {
-                    final evaluator = JSEvaluator.currentInstance;
-                    if (evaluator != null) {
-                      evaluator.callFunction(
-                        resolve,
-                        callbackArgs,
-                        JSValueFactory.undefined(),
-                      );
-                    }
-                    return JSValueFactory.undefined();
-                  },
-                ),
-                JSNativeFunction(
-                  functionName: 'raceReject',
-                  nativeImpl: (callbackArgs) {
-                    final evaluator = JSEvaluator.currentInstance;
-                    if (evaluator != null) {
-                      evaluator.callFunction(
-                        reject,
-                        callbackArgs,
-                        JSValueFactory.undefined(),
-                      );
-                    }
-                    return JSValueFactory.undefined();
-                  },
-                ),
-              ], promise);
-            } else {
-              // If ce n'est pas une promise, resoudre immediatement
-              final evaluator = JSEvaluator.currentInstance;
-              if (evaluator != null) {
-                evaluator.callFunction(resolve, [
-                  promise,
-                ], JSValueFactory.undefined());
-              }
-              return JSValueFactory.undefined();
-            }
-          }
-          return JSValueFactory.undefined();
-        },
-      ),
-    );
   }
 
   /// ES2020: Promise.allSettled(iterable)
   /// Attend que all promesses soient resolues (fulfilled OU rejected)
   /// Returns an array d'objets {status, value/reason}
   static JSValue allSettled(List<JSValue> args) {
-    if (args.isEmpty) {
-      throw JSTypeError('Promise.allSettled requires 1 argument');
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No evaluator available for Promise.allSettled');
+    }
+    final constructor = runtime.getGlobal('Promise');
+    return allSettledWithThis(args, constructor);
+  }
+
+  static JSValue allSettledWithThis(List<JSValue> args, JSValue constructor) {
+    final capability = _newPromiseCapability(constructor);
+
+    JSFunction promiseResolve;
+    JSValue iterator;
+    try {
+      final iterable = args.isNotEmpty ? args[0] : JSValueFactory.undefined();
+      promiseResolve = _getPromiseResolveFunction(
+        constructor,
+        'Promise.allSettled',
+      );
+      iterator = _getIteratorObject(iterable, 'Promise.allSettled');
+    } catch (e) {
+      return _rejectCapabilityAndReturn(capability, e);
     }
 
-    final iterable = args[0];
-    if (iterable is! JSArray) {
-      throw JSTypeError('Promise.allSettled argument must be iterable');
-    }
+    final results = <JSValue>[];
+    var remainingElements = 1;
+    var index = 0;
 
-    return JSPromise(
-      JSNativeFunction(
-        functionName: 'allSettledExecutor',
-        nativeImpl: (executorArgs) {
-          final resolve = executorArgs[0] as JSNativeFunction;
+    while (true) {
+      JSObject nextResult;
+      try {
+        nextResult = _iteratorNext(iterator);
+      } catch (e) {
+        return _rejectCapabilityAndReturn(capability, e);
+      }
 
-          final promises = iterable.elements;
-          if (promises.isEmpty) {
-            final evaluator = JSEvaluator.currentInstance;
-            if (evaluator != null) {
-              evaluator.callFunction(resolve, [
-                JSValueFactory.array(),
-              ], JSValueFactory.undefined());
-            }
+      final bool isDone;
+      final JSValue nextValue;
+      try {
+        isDone = nextResult.getProperty('done').toBoolean();
+        if (isDone) {
+          remainingElements--;
+          if (remainingElements == 0) {
+            _resolveCapability(capability, _createArrayValue(results));
+          }
+          return capability.promise;
+        }
+        nextValue = nextResult.getProperty('value');
+      } catch (e) {
+        return _rejectCapabilityAndReturn(capability, e);
+      }
+
+      final currentIndex = index;
+      index++;
+      results.add(JSValueFactory.undefined());
+      remainingElements++;
+
+      JSValue nextPromise;
+      try {
+        final runtime = JSRuntime.current;
+        if (runtime == null) {
+          throw JSError('No evaluator available for Promise.allSettled');
+        }
+        nextPromise = runtime.callFunction(promiseResolve, [
+          nextValue,
+        ], constructor);
+      } catch (e) {
+        _iteratorClose(iterator);
+        return _rejectCapabilityAndReturn(capability, e);
+      }
+
+      var alreadyCalled = false;
+      final resolveElement = JSNativeFunction(
+        functionName: '',
+        expectedArgs: 1,
+        nativeImpl: (callbackArgs) {
+          if (alreadyCalled) {
             return JSValueFactory.undefined();
           }
-
-          final results = List<JSValue?>.filled(promises.length, null);
-          var completed = 0;
-
-          void checkCompletion() {
-            if (completed == promises.length) {
-              final evaluator = JSEvaluator.currentInstance;
-              if (evaluator != null) {
-                evaluator.callFunction(resolve, [
-                  JSValueFactory.array(results.cast<JSValue>()),
-                ], JSValueFactory.undefined());
-              }
-            }
-          }
-
-          for (var i = 0; i < promises.length; i++) {
-            final index = i; // Capturer l'index pour la closure
-            final promise = promises[i];
-
-            if (promise is JSPromise) {
-              PromisePrototype.then([
-                JSNativeFunction(
-                  functionName: 'allSettledFulfilled',
-                  nativeImpl: (callbackArgs) {
-                    // Create l'objet de resultat {status: 'fulfilled', value: ...}
-                    final resultObj = JSValueFactory.object({});
-                    resultObj.setProperty(
-                      'status',
-                      JSValueFactory.string('fulfilled'),
-                    );
-                    resultObj.setProperty(
-                      'value',
-                      callbackArgs.isNotEmpty
-                          ? callbackArgs[0]
-                          : JSValueFactory.undefined(),
-                    );
-                    results[index] = resultObj;
-                    completed++;
-                    checkCompletion();
-                    return JSValueFactory.undefined();
-                  },
-                ),
-                JSNativeFunction(
-                  functionName: 'allSettledRejected',
-                  nativeImpl: (callbackArgs) {
-                    // Create l'objet de resultat {status: 'rejected', reason: ...}
-                    final resultObj = JSValueFactory.object({});
-                    resultObj.setProperty(
-                      'status',
-                      JSValueFactory.string('rejected'),
-                    );
-                    resultObj.setProperty(
-                      'reason',
-                      callbackArgs.isNotEmpty
-                          ? callbackArgs[0]
-                          : JSValueFactory.undefined(),
-                    );
-                    results[index] = resultObj;
-                    completed++;
-                    checkCompletion();
-                    return JSValueFactory.undefined();
-                  },
-                ),
-              ], promise);
-            } else {
-              // If ce n'est pas une promise, traiter comme a value fulfilled
-              final resultObj = JSValueFactory.object({});
-              resultObj.setProperty(
-                'status',
-                JSValueFactory.string('fulfilled'),
-              );
-              resultObj.setProperty('value', promise);
-              results[i] = resultObj;
-              completed++;
-              checkCompletion();
-            }
+          alreadyCalled = true;
+          final resultObj = JSValueFactory.object({});
+          resultObj.setProperty('status', JSValueFactory.string('fulfilled'));
+          resultObj.setProperty(
+            'value',
+            callbackArgs.isNotEmpty
+                ? callbackArgs[0]
+                : JSValueFactory.undefined(),
+          );
+          results[currentIndex] = resultObj;
+          remainingElements--;
+          if (remainingElements == 0) {
+            _resolveCapability(capability, _createArrayValue(results));
           }
           return JSValueFactory.undefined();
         },
-      ),
-    );
+      );
+
+      final rejectElement = JSNativeFunction(
+        functionName: '',
+        expectedArgs: 1,
+        nativeImpl: (callbackArgs) {
+          if (alreadyCalled) {
+            return JSValueFactory.undefined();
+          }
+          alreadyCalled = true;
+          final resultObj = JSValueFactory.object({});
+          resultObj.setProperty('status', JSValueFactory.string('rejected'));
+          resultObj.setProperty(
+            'reason',
+            callbackArgs.isNotEmpty
+                ? callbackArgs[0]
+                : JSValueFactory.undefined(),
+          );
+          results[currentIndex] = resultObj;
+          remainingElements--;
+          if (remainingElements == 0) {
+            _resolveCapability(capability, _createArrayValue(results));
+          }
+          return JSValueFactory.undefined();
+        },
+      );
+
+      try {
+        _invokeThen(nextPromise, [
+          resolveElement,
+          rejectElement,
+        ], methodName: 'Promise.allSettled');
+      } catch (e) {
+        _iteratorClose(iterator);
+        return _rejectCapabilityAndReturn(capability, e);
+      }
+    }
   }
 
   /// ES2021: Promise.any(iterable)
   /// Resout avec la premiere promise qui se resout (fulfilled)
   /// Rejette avec AggregateError si all promises rejettent
   static JSValue any(List<JSValue> args) {
-    if (args.isEmpty) {
-      throw JSTypeError('Promise.any requires 1 argument');
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No evaluator available for Promise.any');
+    }
+    final constructor = runtime.getGlobal('Promise');
+    return anyWithThis(args, constructor);
+  }
+
+  static JSValue anyWithThis(List<JSValue> args, JSValue constructor) {
+    final capability = _newPromiseCapability(constructor);
+
+    JSFunction promiseResolve;
+    JSValue iterator;
+    try {
+      final iterable = args.isNotEmpty ? args[0] : JSValueFactory.undefined();
+      promiseResolve = _getPromiseResolveFunction(constructor, 'Promise.any');
+      iterator = _getIteratorObject(iterable, 'Promise.any');
+    } catch (e) {
+      return _rejectCapabilityAndReturn(capability, e);
     }
 
-    final iterable = args[0];
-    if (iterable is! JSArray) {
-      throw JSTypeError('Promise.any argument must be iterable');
-    }
+    final errors = <JSValue>[];
+    var remainingElements = 1;
+    var index = 0;
+    while (true) {
+      JSObject nextResult;
+      try {
+        nextResult = _iteratorNext(iterator);
+      } catch (e) {
+        return _rejectCapabilityAndReturn(capability, e);
+      }
 
-    return JSPromise(
-      JSNativeFunction(
-        functionName: 'anyExecutor',
-        nativeImpl: (executorArgs) {
-          final resolve = executorArgs[0] as JSNativeFunction;
-          final reject = executorArgs[1] as JSNativeFunction;
+      final bool isDone;
+      final JSValue nextValue;
+      try {
+        isDone = nextResult.getProperty('done').toBoolean();
+        if (isDone) {
+          remainingElements--;
+          if (remainingElements == 0) {
+            _rejectCapability(capability, _createAggregateErrorValue(errors));
+          }
+          return capability.promise;
+        }
+        nextValue = nextResult.getProperty('value');
+      } catch (e) {
+        return _rejectCapabilityAndReturn(capability, e);
+      }
 
-          final promises = iterable.elements;
+      final currentIndex = index;
+      index++;
+      errors.add(JSValueFactory.undefined());
+      remainingElements++;
 
-          // Cas special: tableau vide rejette avec AggregateError
-          if (promises.isEmpty) {
-            final evaluator = JSEvaluator.currentInstance;
-            if (evaluator != null) {
-              final aggregateError = JSValueFactory.object({});
-              aggregateError.setProperty(
-                'name',
-                JSValueFactory.string('AggregateError'),
-              );
-              aggregateError.setProperty(
-                'message',
-                JSValueFactory.string('All promises were rejected'),
-              );
-              aggregateError.setProperty('errors', JSValueFactory.array([]));
-              evaluator.callFunction(reject, [
-                aggregateError,
-              ], JSValueFactory.undefined());
-            }
+      JSValue nextPromise;
+      try {
+        final runtime = JSRuntime.current;
+        if (runtime == null) {
+          throw JSError('No evaluator available for Promise.any');
+        }
+        nextPromise = runtime.callFunction(promiseResolve, [
+          nextValue,
+        ], constructor);
+      } catch (e) {
+        _iteratorClose(iterator);
+        return _rejectCapabilityAndReturn(capability, e);
+      }
+
+      var rejectElementAlreadyCalled = false;
+      final rejectElement = JSNativeFunction(
+        functionName: '',
+        expectedArgs: 1,
+        nativeImpl: (callbackArgs) {
+          if (rejectElementAlreadyCalled) {
             return JSValueFactory.undefined();
           }
-
-          final errors = List<JSValue?>.filled(promises.length, null);
-          var rejectedCount = 0;
-          var resolved = false;
-
-          void checkAllRejected() {
-            if (rejectedCount == promises.length && !resolved) {
-              // Toutes les promises ont rejete - creer AggregateError
-              final evaluator = JSEvaluator.currentInstance;
-              if (evaluator != null) {
-                final aggregateError = JSValueFactory.object({});
-                aggregateError.setProperty(
-                  'name',
-                  JSValueFactory.string('AggregateError'),
-                );
-                aggregateError.setProperty(
-                  'message',
-                  JSValueFactory.string('All promises were rejected'),
-                );
-                aggregateError.setProperty(
-                  'errors',
-                  JSValueFactory.array(errors.cast<JSValue>()),
-                );
-                evaluator.callFunction(reject, [
-                  aggregateError,
-                ], JSValueFactory.undefined());
-              }
-            }
-          }
-
-          for (var i = 0; i < promises.length; i++) {
-            final index = i; // Capturer l'index pour la closure
-            final promise = promises[i];
-
-            if (promise is JSPromise) {
-              PromisePrototype.then([
-                JSNativeFunction(
-                  functionName: 'anyFulfilled',
-                  nativeImpl: (callbackArgs) {
-                    if (!resolved) {
-                      resolved = true;
-                      final evaluator = JSEvaluator.currentInstance;
-                      if (evaluator != null) {
-                        evaluator.callFunction(resolve, [
-                          callbackArgs.isNotEmpty
-                              ? callbackArgs[0]
-                              : JSValueFactory.undefined(),
-                        ], JSValueFactory.undefined());
-                      }
-                    }
-                    return JSValueFactory.undefined();
-                  },
-                ),
-                JSNativeFunction(
-                  functionName: 'anyRejected',
-                  nativeImpl: (callbackArgs) {
-                    errors[index] = callbackArgs.isNotEmpty
-                        ? callbackArgs[0]
-                        : JSValueFactory.undefined();
-                    rejectedCount++;
-                    checkAllRejected();
-                    return JSValueFactory.undefined();
-                  },
-                ),
-              ], promise);
-            } else {
-              // If ce n'est pas une promise, traiter comme a value fulfilled
-              if (!resolved) {
-                resolved = true;
-                final evaluator = JSEvaluator.currentInstance;
-                if (evaluator != null) {
-                  evaluator.callFunction(resolve, [
-                    promise,
-                  ], JSValueFactory.undefined());
-                }
-              }
-            }
+          rejectElementAlreadyCalled = true;
+          errors[currentIndex] = callbackArgs.isNotEmpty
+              ? callbackArgs[0]
+              : JSValueFactory.undefined();
+          remainingElements--;
+          if (remainingElements == 0) {
+            _rejectCapability(capability, _createAggregateErrorValue(errors));
           }
           return JSValueFactory.undefined();
         },
-      ),
-    );
+      );
+
+      final fulfillElement = JSNativeFunction(
+        functionName: '',
+        expectedArgs: 1,
+        nativeImpl: (callbackArgs) {
+          _resolveCapability(
+            capability,
+            callbackArgs.isNotEmpty
+                ? callbackArgs[0]
+                : JSValueFactory.undefined(),
+          );
+          return JSValueFactory.undefined();
+        },
+      );
+
+      try {
+        _invokeThen(nextPromise, [
+          fulfillElement,
+          rejectElement,
+        ], methodName: 'Promise.any');
+      } catch (e) {
+        _iteratorClose(iterator);
+        return _rejectCapabilityAndReturn(capability, e);
+      }
+    }
+  }
+
+  /// ES2024: Promise.try(callbackFn, ...args)
+  static JSValue tryWithThis(List<JSValue> args, JSValue constructor) {
+    final capability = _newPromiseCapability(constructor);
+    final callback = args.isNotEmpty ? args[0] : JSValueFactory.undefined();
+    final callbackArgs = args.length > 1 ? args.sublist(1) : const <JSValue>[];
+
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No evaluator available for Promise.try');
+    }
+
+    try {
+      final result = runtime.callFunction(
+        callback,
+        callbackArgs,
+        JSValueFactory.undefined(),
+      );
+      _resolveCapability(capability, result);
+    } catch (e) {
+      _rejectCapability(capability, _errorToPromiseRejection(e));
+    }
+
+    return capability.promise;
+  }
+
+  /// ES2024: Promise.withResolvers()
+  static JSValue withResolversWithThis(
+    List<JSValue> args,
+    JSValue constructor,
+  ) {
+    final capability = _newPromiseCapability(constructor);
+    final result = JSObject();
+    result.setProperty('promise', capability.promise);
+    result.setProperty('resolve', capability.resolve);
+    result.setProperty('reject', capability.reject);
+    return result;
   }
 }
 
@@ -7362,18 +8366,7 @@ class FunctionObject extends JSObject {
         enumerableOnly: enumerableOnly,
       );
     }
-    // For regular functions, return length, name, and prototype
-    final names = <String>[];
-    if (function.containsOwnProperty('length')) {
-      names.add('length');
-    }
-    if (function.containsOwnProperty('name')) {
-      names.add('name');
-    }
-    if (function.containsOwnProperty('prototype')) {
-      names.add('prototype');
-    }
-    return names;
+    return function.getPropertyNames(enumerableOnly: enumerableOnly);
   }
 
   @override
@@ -7384,4 +8377,152 @@ class FunctionObject extends JSObject {
 
   @override
   bool strictEquals(JSValue other) => function.strictEquals(other);
+}
+
+bool jsValueReferencesTarget(
+  JSValue? root,
+  JSValue target, {
+  Set<Object>? visited,
+}) {
+  if (root == null) {
+    return false;
+  }
+  final seen = visited ?? HashSet<Object>.identity();
+  return _jsValueReferencesTarget(root, target, seen);
+}
+
+bool _jsValueReferencesTarget(
+  JSValue root,
+  JSValue target,
+  Set<Object> visited,
+) {
+  if (identical(root, target)) {
+    return true;
+  }
+
+  if (root.isPrimitive && root is! JSSymbol) {
+    return false;
+  }
+
+  if (!visited.add(root)) {
+    return false;
+  }
+
+  try {
+    final dynamic dynamicRoot = root;
+    final boxedRef = dynamicRoot.ref;
+    if (boxedRef != null) {
+      final boxedValue = boxedRef.value;
+      if (boxedValue is JSValue) {
+        return _jsValueReferencesTarget(boxedValue, target, visited);
+      }
+    }
+  } catch (_) {}
+
+  if (root is JSWeakMap ||
+      root is JSWeakRefObject ||
+      root is JSFinalizationRegistryObject ||
+      root is JSWeakSet) {
+    return false;
+  }
+
+  if (root is JSArray) {
+    for (final element in root.elements) {
+      if (_jsValueReferencesTarget(element, target, visited)) {
+        return true;
+      }
+    }
+  }
+
+  if (root is JSMap) {
+    for (final entry in root.entries) {
+      if (_jsValueReferencesTarget(entry.key, target, visited) ||
+          _jsValueReferencesTarget(entry.value, target, visited)) {
+        return true;
+      }
+    }
+  }
+
+  if (root is JSSet) {
+    for (final value in root.values) {
+      if (_jsValueReferencesTarget(value, target, visited)) {
+        return true;
+      }
+    }
+  }
+
+  if (root is JSObject) {
+    final prototype = root._prototype;
+    if (prototype != null &&
+        _jsValueReferencesTarget(prototype, target, visited)) {
+      return true;
+    }
+
+    for (final value in root._properties.values) {
+      if (_jsValueReferencesTarget(value, target, visited)) {
+        return true;
+      }
+    }
+
+    for (final descriptor in root._accessorProperties.values) {
+      final getter = descriptor.getter;
+      if (getter != null && _jsValueReferencesTarget(getter, target, visited)) {
+        return true;
+      }
+      final setter = descriptor.setter;
+      if (setter != null && _jsValueReferencesTarget(setter, target, visited)) {
+        return true;
+      }
+    }
+
+    for (final symbol in root._symbolKeys.values) {
+      if (_jsValueReferencesTarget(symbol, target, visited)) {
+        return true;
+      }
+    }
+
+    for (final slotValue in root._internalSlots.values) {
+      if (_dynamicValueReferencesTarget(slotValue, target, visited)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+bool _dynamicValueReferencesTarget(
+  Object? value,
+  JSValue target,
+  Set<Object> visited,
+) {
+  if (value == null) {
+    return false;
+  }
+  if (value is JSValue) {
+    return _jsValueReferencesTarget(value, target, visited);
+  }
+  try {
+    final dynamic dynamicValue = value;
+    final boxedValue = dynamicValue.value;
+    if (boxedValue is JSValue) {
+      return _jsValueReferencesTarget(boxedValue, target, visited);
+    }
+  } catch (_) {}
+  if (value is Iterable) {
+    for (final item in value) {
+      if (_dynamicValueReferencesTarget(item, target, visited)) {
+        return true;
+      }
+    }
+  }
+  if (value is Map) {
+    for (final entry in value.entries) {
+      if (_dynamicValueReferencesTarget(entry.key, target, visited) ||
+          _dynamicValueReferencesTarget(entry.value, target, visited)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }

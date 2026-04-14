@@ -1,14 +1,19 @@
+import 'package:js_interpreter/js_interpreter.dart';
 import 'package:test/test.dart';
-import 'package:js_interpreter/src/evaluator/evaluator.dart';
 
 void main() {
+  late JSInterpreter interpreter;
+
+  setUp(() {
+    interpreter = JSInterpreter();
+  });
   test('simple case that should work', () {
     const code = '''
 var x = 5
 console.log(x)
 ''';
 
-    expect(() => JSEvaluator.evaluateString(code), returnsNormally);
+    expect(() => interpreter.eval(code), returnsNormally);
   });
 
   test('method chain single line', () {
@@ -17,7 +22,7 @@ var result = "hello".toUpperCase()
 console.log(result)
 ''';
 
-    expect(() => JSEvaluator.evaluateString(code), returnsNormally);
+    expect(() => interpreter.eval(code), returnsNormally);
   });
 
   test('method chain multi line - the problematic case', () {
@@ -28,6 +33,6 @@ var result = str
 console.log(result)
 ''';
 
-    expect(() => JSEvaluator.evaluateString(code), returnsNormally);
+    expect(() => interpreter.eval(code), returnsNormally);
   });
 }

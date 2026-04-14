@@ -1,4 +1,6 @@
 import 'js_value.dart';
+import 'js_runtime.dart';
+import 'native_functions.dart';
 
 /// Implementation of JavaScript Symbol
 /// NOTE: JSSymbol extends JSValue (not JSObject) because symbols are primitives
@@ -101,6 +103,10 @@ class JSSymbol extends JSValue {
     }
   }
 
+  /// Unique string key for use as property storage key.
+  /// Unlike toString(), this is guaranteed unique per symbol instance.
+  String get propertyKey => '\$sym_${_id}_${description ?? ''}';
+
   @override
   JSValueType get type => JSValueType.symbol;
 
@@ -126,7 +132,8 @@ class JSSymbol extends JSValue {
 }
 
 /// Symbol constructor for JavaScript
-class JSSymbolConstructor extends JSFunction {
+class JSSymbolConstructor extends JSFunction
+    implements RuntimeCallableFunction {
   JSSymbolConstructor()
     : super('Symbol', (context, thisBinding, arguments) {
         // Symbol() sans new
@@ -137,6 +144,18 @@ class JSSymbolConstructor extends JSFunction {
           return JSSymbol(description);
         }
       });
+
+  @override
+  JSValue callWithRuntime(
+    List<JSValue> args,
+    JSValue thisBinding,
+    JSRuntime runtime,
+  ) {
+    if (args.isEmpty) {
+      return JSSymbol();
+    }
+    return JSSymbol(args[0].toString());
+  }
 
   /// Symbol.for(key)
   JSValue symbolForMethod(List<JSValue> args) {
@@ -166,16 +185,12 @@ class JSSymbolConstructor extends JSFunction {
     // Static methods
     setProperty(
       'for',
-      JSValueFactory.function('for', (context, thisBinding, arguments) {
-        return symbolForMethod(arguments);
-      }),
+      JSNativeFunction(functionName: 'for', nativeImpl: symbolForMethod),
     );
 
     setProperty(
       'keyFor',
-      JSValueFactory.function('keyFor', (context, thisBinding, arguments) {
-        return keyForMethod(arguments);
-      }),
+      JSNativeFunction(functionName: 'keyFor', nativeImpl: keyForMethod),
     );
 
     // Well-known symbols

@@ -55,6 +55,63 @@ void main() {
       expect(() => interpreter.eval(code), isNotNull);
     });
 
+    test('WeakRef clears after host garbage collection', () {
+      interpreter.eval('''
+        let weakRefResult;
+        {
+          let obj = { value: 42 };
+          weakRefResult = new WeakRef(obj);
+          obj = null;
+        }
+      ''');
+
+      interpreter.performHostGarbageCollection();
+      final result = interpreter.eval('weakRefResult.deref() === undefined;');
+
+      expect(result.toBoolean(), isTrue);
+    });
+
+    test('WeakRef clears symbol target after host garbage collection', () {
+      interpreter.eval('''
+        let weakSymbolRef;
+        {
+          let sym = Symbol('weak-target');
+          weakSymbolRef = new WeakRef(sym);
+          sym = null;
+        }
+      ''');
+
+      interpreter.performHostGarbageCollection();
+      final result = interpreter.eval('weakSymbolRef.deref() === undefined;');
+
+      expect(result.toBoolean(), isTrue);
+    });
+
+    test('WeakMap removes collected keys after host garbage collection', () {
+      final weakMap = interpreter.eval('new WeakMap()') as JSWeakMap;
+      final key = JSObject();
+
+      weakMap.setValue(key, JSString('value'));
+      expect(
+        (weakMap.getProperty('has') as JSNativeFunction).call([
+          key,
+        ]).toBoolean(),
+        isTrue,
+      );
+
+      interpreter.performHostGarbageCollection();
+
+      final hasAfterGc = (weakMap.getProperty('has') as JSNativeFunction).call([
+        key,
+      ]);
+      final getAfterGc = (weakMap.getProperty('get') as JSNativeFunction).call([
+        key,
+      ]);
+
+      expect(hasAfterGc.toBoolean(), isFalse);
+      expect(getAfterGc.isUndefined, isTrue);
+    });
+
     // Test FinalizationRegistry
     test('FinalizationRegistry constructor', () {
       final code = createTest262Harness('''
@@ -67,6 +124,51 @@ void main() {
       ''');
 
       expect(() => interpreter.eval(code), isNotNull);
+    });
+
+    test(
+      'FinalizationRegistry callback runs after host garbage collection',
+      () {
+        interpreter.eval('''
+        let finalizedValue = 'pending';
+        const registry = new FinalizationRegistry((heldValue) => {
+          finalizedValue = heldValue;
+        });
+
+        {
+          let obj = { value: 1 };
+          registry.register(obj, 'collected');
+          obj = null;
+        }
+      ''');
+
+        interpreter.performHostGarbageCollection();
+        final result = interpreter.eval('finalizedValue;');
+
+        expect(result.toString(), equals('collected'));
+      },
+    );
+
+    test('FinalizationRegistry.unregister prevents callback', () {
+      interpreter.eval('''
+        let finalizedValue = 'pending';
+        const unregisterToken = {};
+        const registry = new FinalizationRegistry((heldValue) => {
+          finalizedValue = heldValue;
+        });
+
+        {
+          let obj = { value: 1 };
+          registry.register(obj, 'collected', unregisterToken);
+          registry.unregister(unregisterToken);
+          obj = null;
+        }
+      ''');
+
+      interpreter.performHostGarbageCollection();
+      final result = interpreter.eval('finalizedValue;');
+
+      expect(result.toString(), equals('pending'));
     });
 
     // Test Iterator protocol

@@ -1,15 +1,20 @@
+import 'package:js_interpreter/js_interpreter.dart';
 import 'package:test/test.dart';
-import 'package:js_interpreter/src/evaluator/evaluator.dart';
 
 void main() {
   group('Object Literals Basic Tests', () {
+    late JSInterpreter interpreter;
+
+    setUp(() {
+      interpreter = JSInterpreter();
+    });
     test('simple object literal', () {
       const code = '''
         var obj = {name: "John", age: 30};
         obj;
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.isObject, isTrue);
     });
 
@@ -23,7 +28,7 @@ void main() {
         person.name;
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('Alice'));
     });
 
@@ -46,7 +51,7 @@ void main() {
         console.log("Array:", mixed.arr);
       ''';
 
-      expect(() => JSEvaluator.evaluateString(code), returnsNormally);
+      expect(() => interpreter.eval(code), returnsNormally);
     });
 
     test('object with string keys and computed access', () {
@@ -59,7 +64,7 @@ void main() {
         obj["first name"];
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('John'));
     });
 
@@ -73,7 +78,7 @@ void main() {
         obj.dynamic;
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('value'));
     });
 
@@ -95,7 +100,7 @@ void main() {
         nested.user.address.city;
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('New York'));
     });
 
@@ -108,7 +113,7 @@ void main() {
         obj.x;
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('100'));
     });
 
@@ -118,7 +123,7 @@ void main() {
         empty;
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.isObject, isTrue);
     });
 
@@ -139,7 +144,7 @@ void main() {
         data["user456"];
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('Bob'));
     });
   });

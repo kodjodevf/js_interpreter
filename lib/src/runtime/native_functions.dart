@@ -4,13 +4,27 @@
 library;
 
 import 'js_value.dart';
-import '../evaluator/evaluator.dart';
+import 'js_runtime.dart';
+import 'js_symbol.dart';
 
 /// Type of native function
 typedef NativeFunction = JSValue Function(List<JSValue> args);
 
 /// Native JavaScript function
 class JSNativeFunction extends JSFunction {
+  static int _constructorCallDepth = 0;
+
+  static T withConstructorCall<T>(T Function() action) {
+    _constructorCallDepth++;
+    try {
+      return action();
+    } finally {
+      _constructorCallDepth--;
+    }
+  }
+
+  static bool get isConstructorCallActive => _constructorCallDepth > 0;
+
   @override
   final String functionName;
   final NativeFunction nativeImpl;
@@ -84,9 +98,15 @@ class JSNativeFunction extends JSFunction {
           String propName;
           if (args.length >= 2) {
             // Called with this binding: hasOwnProperty(thisObj, propName)
-            propName = args[1].toString();
+            final property = args[1];
+            propName = property is JSSymbol
+                ? property.propertyKey
+                : property.toString();
           } else if (args.length == 1) {
-            propName = args[0].toString();
+            final property = args[0];
+            propName = property is JSSymbol
+                ? property.propertyKey
+                : property.toString();
           } else {
             return JSValueFactory.boolean(false);
           }
@@ -169,13 +189,8 @@ class JSNativeFunction extends JSFunction {
 
   /// Get all property names for this native function
   /// Note: This doesn't override a parent method, JSFunction doesn't provide this
+  @override
   List<String> getPropertyNames({bool enumerableOnly = false}) {
-    // For built-in functions, property names must appear in specific order:
-    // 1. "length" (if not deleted)
-    // 2. "name" (if not deleted)
-    // 3. All other properties from parent
-    // Note: "prototype" should NOT be included for non-constructor functions
-
     final names = <String>[];
 
     // Add "length" first (it's always non-enumerable but configurable)
@@ -193,12 +208,18 @@ class JSNativeFunction extends JSFunction {
       final prototypeObj = getProperty('prototype');
       if (prototypeObj is JSObject &&
           prototypeObj.hasOwnProperty('constructor')) {
-        // Prototype property is present for constructors
         names.add('prototype');
       }
     }
 
-    // Return just length, name, and optionally prototype for built-in functions
+    // Add any additional own properties (e.g., static methods on class constructors)
+    final ownNames = super.getPropertyNames(enumerableOnly: enumerableOnly);
+    for (final name in ownNames) {
+      if (!names.contains(name)) {
+        names.add(name);
+      }
+    }
+
     return names;
   }
 
@@ -298,6 +319,7 @@ class JSNativeFunction extends JSFunction {
       'Promise.prototype.catch',
       'Promise.prototype.finally',
       // Array methods that support array-like objects via .call()
+      'slice',
       'indexOf',
       'lastIndexOf',
       'includes',
@@ -305,6 +327,7 @@ class JSNativeFunction extends JSFunction {
       'reverse',
       'fill',
       'copyWithin',
+      'Symbol.iterator',
     };
 
     if (thisBindingMethods.contains(functionName)) {
@@ -354,12 +377,12 @@ class JSConversion {
           final toStringMethod = value.getProperty('toString');
           if (toStringMethod is JSFunction ||
               toStringMethod is JSNativeFunction) {
-            final evaluator = JSEvaluator.currentInstance;
-            if (evaluator != null) {
+            final runtime = JSRuntime.current;
+            if (runtime != null) {
               // Call toString() - let exceptions propagate
               final result = toStringMethod is JSNativeFunction
                   ? toStringMethod.call([value])
-                  : evaluator.callFunction(toStringMethod, [], value);
+                  : runtime.callFunction(toStringMethod, [], value);
               // If toString returns a primitive, use it
               if (result.isString) {
                 return result.toString();
@@ -376,7 +399,7 @@ class JSConversion {
                   valueOfMethod is JSNativeFunction) {
                 final valueOfResult = valueOfMethod is JSNativeFunction
                     ? valueOfMethod.call([value])
-                    : evaluator.callFunction(valueOfMethod, [], value);
+                    : runtime.callFunction(valueOfMethod, [], value);
                 if (valueOfResult.isString ||
                     valueOfResult.isNumber ||
                     valueOfResult.isBoolean ||
@@ -393,11 +416,11 @@ class JSConversion {
             final valueOfMethod = value.getProperty('valueOf');
             if (valueOfMethod is JSFunction ||
                 valueOfMethod is JSNativeFunction) {
-              final evaluator = JSEvaluator.currentInstance;
-              if (evaluator != null) {
+              final runtime = JSRuntime.current;
+              if (runtime != null) {
                 final valueOfResult = valueOfMethod is JSNativeFunction
                     ? valueOfMethod.call([value])
-                    : evaluator.callFunction(valueOfMethod, [], value);
+                    : runtime.callFunction(valueOfMethod, [], value);
                 if (valueOfResult.isString ||
                     valueOfResult.isNumber ||
                     valueOfResult.isBoolean ||
@@ -421,14 +444,14 @@ class JSConversion {
         final func = value as JSFunction;
         // Check if this function has custom toString/valueOf (from user assignment)
         final toStringMethod = func.getProperty('toString');
-        final evaluator = JSEvaluator.currentInstance;
-        if (evaluator != null) {
+        final runtime = JSRuntime.current;
+        if (runtime != null) {
           // Check if toString returns a primitive or object
           if (toStringMethod is JSFunction ||
               toStringMethod is JSNativeFunction) {
             final result = toStringMethod is JSNativeFunction
                 ? toStringMethod.call([func])
-                : evaluator.callFunction(toStringMethod, [], func);
+                : runtime.callFunction(toStringMethod, [], func);
             // If toString returns a primitive, use it
             if (result.isString) {
               return result.toString();
@@ -444,7 +467,7 @@ class JSConversion {
                 valueOfMethod is JSNativeFunction) {
               final valueOfResult = valueOfMethod is JSNativeFunction
                   ? valueOfMethod.call([func])
-                  : evaluator.callFunction(valueOfMethod, [], func);
+                  : runtime.callFunction(valueOfMethod, [], func);
               if (valueOfResult.isString ||
                   valueOfResult.isNumber ||
                   valueOfResult.isBoolean ||
@@ -522,15 +545,15 @@ class JSConversion {
 
         // For general objects, use ToPrimitive with hint "number"
         if (value is JSObject) {
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
+          final runtime = JSRuntime.current;
+          if (runtime != null) {
             // 1. Try valueOf() first (hint: number)
             final valueOfMethod = value.getProperty('valueOf');
             if (valueOfMethod is JSFunction ||
                 valueOfMethod is JSNativeFunction) {
               final valueOfResult = valueOfMethod is JSNativeFunction
                   ? valueOfMethod.call([value])
-                  : evaluator.callFunction(valueOfMethod, [], value);
+                  : runtime.callFunction(valueOfMethod, [], value);
 
               // If valueOf returns a primitive, convert it to number
               if (valueOfResult is! JSObject ||
@@ -546,7 +569,7 @@ class JSConversion {
                 toStringMethod is JSNativeFunction) {
               final toStringResult = toStringMethod is JSNativeFunction
                   ? toStringMethod.call([value])
-                  : evaluator.callFunction(toStringMethod, [], value);
+                  : runtime.callFunction(toStringMethod, [], value);
 
               if (toStringResult is! JSObject ||
                   toStringResult is JSNull ||
