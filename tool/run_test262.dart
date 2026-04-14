@@ -67,6 +67,15 @@ class Test262Runner {
             case 'style':
               newStyle = value == 'new';
               break;
+            case 'verbose':
+              verbose = value == 'yes';
+              break;
+            case 'reportfile':
+              reportPath = value;
+              break;
+            case 'timeout':
+              timeoutMs = int.tryParse(value) ?? timeoutMs;
+              break;
           }
         }
       } else if (section == 'features') {
@@ -77,6 +86,8 @@ class Test262Runner {
         } else {
           features.add(feature);
         }
+      } else if (section == 'exclude') {
+        excludeDirList.add(line);
       }
     }
   }

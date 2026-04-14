@@ -1,15 +1,20 @@
+import 'package:js_interpreter/js_interpreter.dart';
 import 'package:test/test.dart';
-import 'package:js_interpreter/src/evaluator/evaluator.dart';
 
 void main() {
   group('String Methods Tests', () {
+    late JSInterpreter interpreter;
+
+    setUp(() {
+      interpreter = JSInterpreter();
+    });
     test('string length property', () {
       const code = '''
         var str = "Hello World";
         str.length;
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('11'));
     });
 
@@ -19,7 +24,7 @@ void main() {
         str.charAt(0) + str.charAt(4);
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('JS'));
     });
 
@@ -29,7 +34,7 @@ void main() {
         str.substring(0, 5);
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('Hello'));
     });
 
@@ -39,7 +44,7 @@ void main() {
         str.indexOf("World");
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('6'));
     });
 
@@ -63,7 +68,7 @@ void main() {
         info.length;
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('11'));
     });
   });

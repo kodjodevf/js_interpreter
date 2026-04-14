@@ -159,6 +159,11 @@ void main() {
         final result = interpreter.eval('5 << 33');
         expect(result.toNumber(), 10); // Same as 5 << 1
       });
+
+      test('Left shift wraps to signed 32-bit', () {
+        final result = interpreter.eval('1 << 31');
+        expect(result.toNumber(), -2147483648);
+      });
     });
 
     group('Right Shift (>>)', () {

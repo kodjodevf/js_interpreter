@@ -75,6 +75,16 @@ void main() {
         expect(interpreter.eval('parseFloat("")').toNumber().isNaN, isTrue);
         expect(interpreter.eval('parseFloat()').toNumber().isNaN, isTrue);
       });
+
+      test(
+        'large integral numbers stringify without scientific notation below 1e21',
+        () {
+          expect(
+            interpreter.eval('(19686109595169230000).toString()').toString(),
+            equals('19686109595169230000'),
+          );
+        },
+      );
     });
 
     group('isNaN()', () {
@@ -167,6 +177,45 @@ void main() {
 
       test('returns undefined for empty input', () {
         expect(interpreter.eval('eval()').type.name, equals('undefined'));
+      });
+    });
+
+    group('Global property redefinition', () {
+      test('global var cache follows descriptor changes', () {
+        final result = interpreter.eval('''
+          var seen;
+          (1, eval)('var gvar1');
+
+          gvar1 = 1;
+          Object.defineProperty(globalThis, 'gvar1', { writable: false });
+          gvar1 = 2;
+          const afterReadonly = gvar1;
+
+          Object.defineProperty(globalThis, 'gvar1', {
+            get: function() { return 'hello'; },
+            set: function(v) { seen = v; }
+          });
+          const getterValue = gvar1;
+          gvar1 = 3;
+
+          Object.defineProperty(globalThis, 'gvar1', {
+            value: 4,
+            writable: true,
+            configurable: true
+          });
+          delete gvar1;
+          let deletedThrows = false;
+          try {
+            gvar1;
+          } catch (e) {
+            deletedThrows = e instanceof ReferenceError;
+          }
+          gvar1 = 5;
+
+          [afterReadonly, getterValue, seen, deletedThrows, gvar1];
+        ''');
+
+        expect(result.toString(), equals('1,hello,3,true,5'));
       });
     });
   });

@@ -373,7 +373,7 @@ void main() {
         
         process();
       ''');
-      expect(result.toString(), equals('30')); // (5 + 10) * 2 - 2 = 30
+      expect(result.toString(), equals('28')); // (5 + 10) * 2 - 2 = 28
     });
 
     test('Async arrow function with setTimeout and error handling', () async {
@@ -512,6 +512,23 @@ void main() {
         runAll();
       ''');
       expect(result.toString(), equals('42'));
+    });
+
+    test('ASI after newline-separated arrow function expressions', () {
+      final result = interpreter.eval(r'''
+        [
+          typeof eval("() => {}\n() => {}"),
+          eval("() => {}\n+1"),
+          typeof eval("x => {}\n() => {}"),
+          typeof eval("async () => {}\n() => {}"),
+          typeof eval("async x => {}\n() => {}")
+        ].toString();
+      ''');
+
+      expect(
+        result.toString(),
+        equals('function,1,function,function,function'),
+      );
     });
   });
 }

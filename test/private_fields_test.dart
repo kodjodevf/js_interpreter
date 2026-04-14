@@ -158,6 +158,32 @@ void main() {
       expect(result.toString(), equals('error'));
     });
 
+    test('Private brand check with in operator', () {
+      final code = '''
+        class Secret {
+          #data = 'hidden';
+
+          hasSecret(obj) {
+            return #data in obj;
+          }
+        }
+
+        class Other {
+          #data = 'other';
+        }
+
+        const secret = new Secret();
+        const other = new Other();
+
+        [secret.hasSecret(secret), secret.hasSecret(other), secret.hasSecret({})];
+      ''';
+
+      final result = interpreter.eval(code) as JSArray;
+      expect(result.elements[0].toBoolean(), equals(true));
+      expect(result.elements[1].toBoolean(), equals(false));
+      expect(result.elements[2].toBoolean(), equals(false));
+    });
+
     // NOTE: Private field inheritance handling not yet fully implemented
     // test('Private fields are not inherited', () { ... });
 

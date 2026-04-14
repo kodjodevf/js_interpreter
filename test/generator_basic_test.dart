@@ -36,6 +36,26 @@ void main() {
       expect(result.toString(), equals('object'));
     });
 
+    test('Generator function is not a constructor', () {
+      final result =
+          interpreter.eval('''
+        function* gen() {}
+        var ok = false;
+        var message = '';
+        try {
+          new gen();
+        } catch (e) {
+          ok = e instanceof TypeError;
+          message = e.message;
+        }
+        [ok, message];
+      ''')
+              as JSArray;
+
+      expect(result.elements[0].toBoolean(), isTrue);
+      expect(result.elements[1].toString(), equals('gen is not a constructor'));
+    });
+
     test('Generator has next() method', () {
       final code = '''
         function* gen() {

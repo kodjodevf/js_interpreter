@@ -437,6 +437,18 @@ void main() {
       expect(map['matches'], isTrue);
       expect(map['replaced'], equals('hello everyone'));
     });
+
+    test('should preserve native regex behavior for simple v patterns', () {
+      final code = '''
+        const re = /o./gv;
+        const str = 'foo boo zoo';
+        const result = str.replace(re, 'X');
+        result;
+      ''';
+
+      final result = interpreter.eval(code);
+      expect(result.toString(), equals('fX bX zX'));
+    });
   });
 
   group('ES2024 Combined Features Tests', () {

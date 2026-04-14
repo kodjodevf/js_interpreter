@@ -29,8 +29,16 @@ void main() {
       expect(result.type.name, equals('number'));
       expect(
         result.toNumber(),
-        equals(DateTime.parse("2023-01-01").millisecondsSinceEpoch.toDouble()),
+        equals(DateTime.utc(2023, 1, 1).millisecondsSinceEpoch.toDouble()),
       );
+    });
+
+    test('Date.parse() date-only ISO strings use UTC semantics', () {
+      final result = interpreter.eval('''
+        Date.parse("2023-01-01") === Date.UTC(2023, 0, 1)
+      ''');
+
+      expect(result.toBoolean(), isTrue);
     });
 
     test('Date with timestamp constructor', () {
@@ -71,6 +79,20 @@ void main() {
         'new Date("2023-01-01T00:00:00.000Z").toISOString()',
       );
       expect(result.toString(), equals('2023-01-01T00:00:00.000Z'));
+    });
+
+    test('Date.prototype.toJSON()', () {
+      final result = interpreter.eval(
+        'new Date("2023-01-01T00:00:00.000Z").toJSON()',
+      );
+      expect(result.toString(), equals('2023-01-01T00:00:00.000Z'));
+    });
+
+    test('Date.UTC preserves floating-point cancellation precision', () {
+      final result = interpreter.eval(
+        'Date.UTC(1970, 0, 213503982336, 0, 0, 0, -18446744073709552000)',
+      );
+      expect(result.toNumber(), equals(34447360));
     });
 
     test('Date arithmetic', () {

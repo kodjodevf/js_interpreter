@@ -1,10 +1,13 @@
+import 'package:js_interpreter/js_interpreter.dart';
 import 'package:test/test.dart';
-import 'package:js_interpreter/src/lexer/lexer.dart';
-import 'package:js_interpreter/src/parser/parser.dart';
-import 'package:js_interpreter/src/evaluator/evaluator.dart';
 
 void main() {
   group('Class Constructor Tests', () {
+    late JSInterpreter interpreter;
+
+    setUp(() {
+      interpreter = JSInterpreter();
+    });
     test('Basic constructor with this binding', () {
       const code = '''
         class Person {
@@ -18,13 +21,7 @@ void main() {
         person.name + " " + person.age;
       ''';
 
-      final lexer = JSLexer(code);
-      final tokens = lexer.tokenize();
-      final parser = JSParser(tokens);
-      final ast = parser.parse();
-      final evaluator = JSEvaluator();
-
-      final result = evaluator.evaluate(ast);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('Alice 30'));
     });
 
@@ -45,13 +42,7 @@ void main() {
         person.getInfo();
       ''';
 
-      final lexer = JSLexer(code);
-      final tokens = lexer.tokenize();
-      final parser = JSParser(tokens);
-      final ast = parser.parse();
-      final evaluator = JSEvaluator();
-
-      final result = evaluator.evaluate(ast);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('Bob is 25 years old'));
     });
 
@@ -68,13 +59,7 @@ void main() {
         result.custom + " " + result.value;
       ''';
 
-      final lexer = JSLexer(code);
-      final tokens = lexer.tokenize();
-      final parser = JSParser(tokens);
-      final ast = parser.parse();
-      final evaluator = JSEvaluator();
-
-      final result = evaluator.evaluate(ast);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('true 42'));
     });
 
@@ -91,13 +76,7 @@ void main() {
         result.value;
       ''';
 
-      final lexer = JSLexer(code);
-      final tokens = lexer.tokenize();
-      final parser = JSParser(tokens);
-      final ast = parser.parse();
-      final evaluator = JSEvaluator();
-
-      final result = evaluator.evaluate(ast);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('42'));
     });
 
@@ -128,13 +107,7 @@ void main() {
         dog.name + " " + dog.breed + " " + dog.speak();
       ''';
 
-      final lexer = JSLexer(code);
-      final tokens = lexer.tokenize();
-      final parser = JSParser(tokens);
-      final ast = parser.parse();
-      final evaluator = JSEvaluator();
-
-      final result = evaluator.evaluate(ast);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('Rex Golden Retriever Rex barks'));
     });
 
@@ -150,13 +123,7 @@ void main() {
         obj.value;
       ''';
 
-      final lexer = JSLexer(code);
-      final tokens = lexer.tokenize();
-      final parser = JSParser(tokens);
-      final ast = parser.parse();
-      final evaluator = JSEvaluator();
-
-      final result = evaluator.evaluate(ast);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('empty'));
     });
 
@@ -181,13 +148,7 @@ void main() {
         c1.count + " " + c2.count;
       ''';
 
-      final lexer = JSLexer(code);
-      final tokens = lexer.tokenize();
-      final parser = JSParser(tokens);
-      final ast = parser.parse();
-      final evaluator = JSEvaluator();
-
-      final result = evaluator.evaluate(ast);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('2 1'));
     });
   });

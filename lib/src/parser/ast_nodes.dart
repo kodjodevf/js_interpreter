@@ -118,10 +118,12 @@ abstract class Expression extends ASTNode {
 class LiteralExpression extends Expression {
   final dynamic value;
   final String type; // 'number', 'string', 'boolean', 'null', 'undefined'
+  final String? raw; // Raw source text (for directive detection)
 
   const LiteralExpression({
     required this.value,
     required this.type,
+    this.raw,
     required super.line,
     required super.column,
   });

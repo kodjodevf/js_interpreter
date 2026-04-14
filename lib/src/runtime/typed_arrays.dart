@@ -13,7 +13,7 @@ import 'dart:typed_data';
 import 'dart:math' as math;
 import 'js_value.dart';
 import 'native_functions.dart';
-import '../evaluator/evaluator.dart';
+import 'js_runtime.dart';
 import 'iterator_protocol.dart';
 import 'js_symbol.dart';
 
@@ -39,7 +39,9 @@ int _toSafeInt(
 /// ArrayBuffer: represents a raw binary data buffer
 class JSArrayBuffer extends JSObject {
   /// The raw binary data (bytes)
-  final Uint8List _data;
+  Uint8List _data;
+
+  bool _detached = false;
 
   /// Constructor
   JSArrayBuffer(int byteLength) : _data = Uint8List(byteLength) {
@@ -84,6 +86,23 @@ class JSArrayBuffer extends JSObject {
 
           return JSArrayBuffer.fromData(newData);
         },
+        hasContextBound: true,
+      ),
+    );
+
+    setProperty(
+      'transfer',
+      JSNativeFunction(
+        functionName: 'transfer',
+        nativeImpl: (args) {
+          final newData = Uint8List.fromList(_data);
+          final transferred = JSArrayBuffer.fromData(newData);
+          _data = Uint8List(0);
+          _detached = true;
+          setProperty('byteLength', JSValueFactory.number(0));
+          return transferred;
+        },
+        hasContextBound: true,
       ),
     );
   }
@@ -93,6 +112,8 @@ class JSArrayBuffer extends JSObject {
 
   /// Length in bytes
   int get byteLength => _data.length;
+
+  bool get isDetached => _detached;
 
   @override
   String toString() => '[object ArrayBuffer]';
@@ -130,18 +151,18 @@ abstract class JSTypedArray extends JSObject {
   ) {
     // If it's a native function, call it directly
     if (callback is JSNativeFunction) {
-      return callback.nativeImpl(args);
+      return callback.callWithThis(args, thisBinding);
     }
 
-    // For JavaScript functions, use the evaluator
+    // For JavaScript functions, use the runtime
     if (callback is JSFunction) {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator == null) {
-        throw JSError('No evaluator available for callback execution');
+      final runtime = JSRuntime.current;
+      if (runtime == null) {
+        throw JSError('No runtime available for callback execution');
       }
 
       try {
-        return evaluator.callFunction(callback, args, thisBinding);
+        return runtime.callFunction(callback, args, thisBinding);
       } catch (e) {
         if (e is JSException) {
           rethrow;
@@ -650,6 +671,7 @@ abstract class JSTypedArray extends JSObject {
 
           return sliced;
         },
+        hasContextBound: true,
       ),
     );
 
@@ -712,7 +734,7 @@ abstract class JSTypedArray extends JSObject {
 
     // Support pour Symbol.iterator (pour for...of)
     setProperty(
-      JSSymbol.iterator.toString(),
+      JSSymbol.iterator.propertyKey,
       JSNativeFunction(
         functionName: 'Symbol.iterator',
         nativeImpl: (args) {
@@ -780,6 +802,9 @@ abstract class JSTypedArray extends JSObject {
     // Essayer de parser comme un index numerique
     final index = int.tryParse(key);
     if (index != null && index >= 0 && index < length) {
+      if (buffer.isDetached) {
+        return JSValueFactory.undefined();
+      }
       return JSValueFactory.number(getElement(index));
     }
 
@@ -800,6 +825,9 @@ abstract class JSTypedArray extends JSObject {
     // Essayer de parser comme un index numerique
     final index = int.tryParse(key);
     if (index != null && index >= 0 && index < length) {
+      if (buffer.isDetached) {
+        return;
+      }
       setElement(index, value.toNumber());
       return;
     }

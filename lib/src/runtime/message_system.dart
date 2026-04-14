@@ -8,9 +8,10 @@ class MessageSystem {
   final String? getInterpreterInstanceId;
 
   MessageSystem(this.getInterpreterInstanceId) {
-    _channels =
-        JSInterpreter.channelFunctionsRegistered[getInterpreterInstanceId] ??
-        {};
+    _channels = JSInterpreter.channelFunctionsRegistered.putIfAbsent(
+      getInterpreterInstanceId ?? '__default__',
+      () => {},
+    );
   }
 
   /// Map of channel names to synchronous callbacks

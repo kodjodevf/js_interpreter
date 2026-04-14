@@ -1,6 +1,6 @@
 import 'js_value.dart';
 import 'native_functions.dart';
-import '../evaluator/evaluator.dart';
+import 'js_runtime.dart';
 
 /// Helper class to store parsed constructor arguments
 class _ErrorConstructorArgs {
@@ -85,9 +85,9 @@ _ErrorConstructorArgs _parseErrorConstructorArgs(
         final toStringFunc = toStringProp as JSFunction;
         try {
           // Use evaluator to call the function
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
-            final result = evaluator.callFunction(toStringFunc, [], obj);
+          final runtime = JSRuntime.current;
+          if (runtime != null) {
+            final result = runtime.callFunction(toStringFunc, [], obj);
             message = result.toString();
           } else {
             message = messageArg.toString();
@@ -148,9 +148,9 @@ class JSErrorObjectFactory {
     // First, retrieve Object.prototype from the evaluator
     JSObject? objectPrototype;
     try {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
-        final objectConstructor = evaluator.globalEnvironment.get('Object');
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        final objectConstructor = runtime.getGlobal('Object');
         if (objectConstructor is JSFunction) {
           final proto = objectConstructor.getProperty('prototype');
           if (proto is JSObject) {
@@ -491,15 +491,17 @@ class JSErrorObjectFactory {
       );
     }
 
-    // Set constructor property if provided, otherwise try to get it from global
+    // Set constructor property if explicitly provided.
+    // For subclass instances initialized through super(), keep constructor inherited
+    // from the subclass prototype instead of overwriting it with the native Error ctor.
     if (constructor != null) {
       errorObj.setProperty('constructor', constructor);
-    } else {
+    } else if (existingInstance == null) {
       // Try to get the constructor from the global environment
       try {
-        final evaluator = JSEvaluator.currentInstance;
-        if (evaluator != null) {
-          final ctor = evaluator.globalEnvironment.get(name);
+        final runtime = JSRuntime.current;
+        if (runtime != null) {
+          final ctor = runtime.getGlobal(name);
           if (ctor is JSFunction) {
             errorObj.setProperty('constructor', ctor);
           }
@@ -509,9 +511,32 @@ class JSErrorObjectFactory {
       }
     }
 
-    // Stack trace (simplified version - we can improve it later)
+    List<int>? sourcePosition;
+    try {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        final dynamic dynamicRuntime = runtime;
+        final captured = dynamicRuntime.captureCurrentSourcePosition();
+        if (captured is List && captured.length >= 2) {
+          sourcePosition = [captured[0] as int, captured[1] as int];
+        }
+      }
+    } catch (_) {
+      sourcePosition = null;
+    }
+
     final stack = _generateStackTrace(name, message);
     errorObj.setProperty('stack', JSValueFactory.string(stack));
+    if (sourcePosition != null) {
+      errorObj.setProperty(
+        'lineNumber',
+        JSValueFactory.number(sourcePosition[0].toDouble()),
+      );
+      errorObj.setProperty(
+        'columnNumber',
+        JSValueFactory.number(sourcePosition[1].toDouble()),
+      );
+    }
 
     // Per ES spec: Error instances should NOT have own toString method
     // They inherit toString from Error.prototype
@@ -562,20 +587,21 @@ class JSErrorObjectFactory {
 
   /// Genere une stack trace simplifiee
   static String _generateStackTrace(String name, String? message) {
-    // Simplified version - in a complete implementation,
-    // we would have access to the JavaScript call stack
-    final buffer = StringBuffer();
+    try {
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        final dynamic dynamicRuntime = runtime;
+        final captured = dynamicRuntime.captureCurrentStackTrace();
+        if (captured is String && captured.isNotEmpty) {
+          return captured;
+        }
+      }
+    } catch (_) {}
 
     if (message != null && message.isNotEmpty) {
-      buffer.writeln('$name: $message');
-    } else {
-      buffer.writeln(name);
+      return '$name: $message';
     }
-
-    // Simulated stack trace
-    buffer.writeln('    at <anonymous>:1:1');
-
-    return buffer.toString().trim();
+    return name;
   }
 
   /// Utility functions to throw errors in the interpreter
@@ -620,9 +646,9 @@ class JSErrorObjectFactory {
     // Also get the constructor function
     JSValue? constructor;
     try {
-      final evaluator = JSEvaluator.currentInstance;
-      if (evaluator != null) {
-        final ctor = evaluator.globalEnvironment.get(name);
+      final runtime = JSRuntime.current;
+      if (runtime != null) {
+        final ctor = runtime.getGlobal(name);
         if (ctor is JSFunction) {
           constructor = ctor;
           if (prototype == null) {
@@ -637,6 +663,14 @@ class JSErrorObjectFactory {
       // Ignore errors when trying to get prototype
     }
 
-    return _createErrorObject(name, message, null, prototype, constructor);
+    final errorObject = _createErrorObject(
+      name,
+      message,
+      null,
+      prototype,
+      constructor,
+    );
+    errorObject.setInternalSlot('HostErrorName', name);
+    return errorObject;
   }
 }

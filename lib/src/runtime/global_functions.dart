@@ -5,8 +5,7 @@ library;
 import 'dart:async';
 import 'js_value.dart';
 import 'native_functions.dart';
-import '../evaluator/evaluator.dart';
-import '../parser/parser.dart';
+import 'js_runtime.dart';
 import 'message_system.dart';
 import 'dart_value_converter.dart';
 
@@ -109,7 +108,7 @@ class GlobalFunctions {
   final String? getInterpreterInstanceId;
   GlobalFunctions(this.getInterpreterInstanceId);
   static JSNativeFunction createEval() {
-    return JSNativeFunction(
+    final evalFunction = JSNativeFunction(
       functionName: 'eval',
       expectedArgs: 1, // eval takes 1 parameter
       nativeImpl: (args) {
@@ -121,48 +120,27 @@ class GlobalFunctions {
 
         try {
           // Get current evaluator instance
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator == null) {
+          final runtime = JSRuntime.current;
+          if (runtime == null) {
             throw JSError('eval() called without evaluator context');
           }
 
-          // Check if current execution context is in strict mode
-          // If so, the eval code inherits that strict mode
-          final isInStrictMode = evaluator.isCurrentlyInStrictMode();
-
-          // Parse and evaluate the code in current context
-          // This uses evaluateDirectEval which checks for var/let conflicts
-          final program = JSParser.parseString(
-            code,
-            initialStrictMode: isInStrictMode,
-          );
-          return evaluator.evaluateDirectEval(program);
+          // Evaluate the code in current context via the runtime
+          return runtime.evalCode(code, directEval: false);
         } on JSException {
           // Re-throw JavaScript exceptions (including SyntaxErrors from var redeclaration)
           rethrow;
         } on JSError {
           // Re-throw JavaScript errors (JSTypeError, JSReferenceError, etc.)
-          // These will be caught by visitTryStatement and converted to proper JS objects
           rethrow;
-        } on ParseError catch (e) {
-          // Convert parse errors to JavaScript SyntaxError exceptions
-          // Get the evaluator and use its throwJSSyntaxError method
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
-            evaluator.throwJSSyntaxError(e.message);
-          }
-          // Fallback if no evaluator (should not happen)
-          throw JSSyntaxError(e.message);
         } catch (e) {
-          // Generic error conversion
-          final evaluator = JSEvaluator.currentInstance;
-          if (evaluator != null) {
-            evaluator.throwJSSyntaxError('$e');
-          }
+          // Convert other errors to SyntaxError
           throw JSSyntaxError('$e');
         }
       },
     );
+    evalFunction.setInternalSlot('[[GlobalEval]]', true);
+    return evalFunction;
   }
 
   /// Creates parseInt() function
@@ -457,6 +435,7 @@ class GlobalFunctions {
             .sublist(1)
             .map((arg) => _jsToDartValue(arg))
             .toList();
+        final runtime = JSRuntime.current;
 
         return JSPromise(
           JSNativeFunction(
@@ -470,26 +449,48 @@ class GlobalFunctions {
                 MessageSystem(getInterpreterInstanceId)
                     .sendMessageAsync(channelName, messageArgs)
                     .then((result) {
-                      // If the result is an exception, reject the promise
-                      if (result is Exception && result is! FormatException) {
-                        reject.call([JSValueFactory.string(result.toString())]);
-                      } else {
-                        final jsValue = _dartToJSValue(result);
-                        resolve.call([jsValue]);
+                      final previousRuntime = JSRuntime.current;
+                      if (runtime != null &&
+                          !identical(previousRuntime, runtime)) {
+                        JSRuntime.setCurrent(runtime);
                       }
-                      // Process microtasks enqueued by the resolution
-                      final evaluator = JSEvaluator.currentInstance;
-                      evaluator?.runPendingAsyncTasks();
+                      // If the result is an exception, reject the promise
+                      try {
+                        if (result is Exception && result is! FormatException) {
+                          reject.call([
+                            JSValueFactory.string(result.toString()),
+                          ]);
+                        } else {
+                          final jsValue = _dartToJSValue(result);
+                          resolve.call([jsValue]);
+                        }
+                        runtime?.runPendingTasks();
+                      } finally {
+                        if (runtime != null &&
+                            !identical(previousRuntime, runtime)) {
+                          JSRuntime.setCurrent(previousRuntime);
+                        }
+                      }
                     })
                     .catchError((error) {
+                      final previousRuntime = JSRuntime.current;
+                      if (runtime != null &&
+                          !identical(previousRuntime, runtime)) {
+                        JSRuntime.setCurrent(runtime);
+                      }
                       // Reject the promise with the error message
-                      final errorMessage = error is JSError
-                          ? error.message
-                          : error.toString();
-                      reject.call([JSValueFactory.string(errorMessage)]);
-                      // Process microtasks enqueued by the rejection
-                      final evaluator = JSEvaluator.currentInstance;
-                      evaluator?.runPendingAsyncTasks();
+                      try {
+                        final errorMessage = error is JSError
+                            ? error.message
+                            : error.toString();
+                        reject.call([JSValueFactory.string(errorMessage)]);
+                        runtime?.runPendingTasks();
+                      } finally {
+                        if (runtime != null &&
+                            !identical(previousRuntime, runtime)) {
+                          JSRuntime.setCurrent(previousRuntime);
+                        }
+                      }
                     });
               }
               return JSValueFactory.undefined();
@@ -522,8 +523,8 @@ class GlobalFunctions {
         final additionalArgs = args.length > 2 ? args.sublist(2) : <JSValue>[];
 
         // Get current evaluator for function calls
-        final evaluator = JSEvaluator.currentInstance;
-        if (evaluator == null) {
+        final runtime = JSRuntime.current;
+        if (runtime == null) {
           throw JSError('setTimeout() called without evaluator context');
         }
 
@@ -531,10 +532,10 @@ class GlobalFunctions {
         final timeoutId = TimeoutManager.instance.setTimeout(() {
           try {
             // Call the callback function with additional arguments
-            evaluator.callFunction(callback, additionalArgs);
+            runtime.callFunction(callback, additionalArgs);
             // Process any microtasks enqueued by the callback
             // (e.g. Promise resolve/reject inside setTimeout)
-            evaluator.runPendingAsyncTasks();
+            runtime.runPendingTasks();
           } catch (e) {
             // Log error but don't crash
             print('setTimeout callback error: $e');

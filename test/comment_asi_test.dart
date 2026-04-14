@@ -1,7 +1,12 @@
+import 'package:js_interpreter/js_interpreter.dart';
 import 'package:test/test.dart';
-import 'package:js_interpreter/src/evaluator/evaluator.dart';
 
 void main() {
+  late JSInterpreter interpreter;
+
+  setUp(() {
+    interpreter = JSInterpreter();
+  });
   test('comments with ASI', () {
     const code = '''
 function test() {
@@ -14,7 +19,7 @@ var result = test()
 console.log(result)
 ''';
 
-    expect(() => JSEvaluator.evaluateString(code), returnsNormally);
+    expect(() => interpreter.eval(code), returnsNormally);
   });
 
   test('complex case from original test', () {
@@ -29,7 +34,7 @@ var result = processEmail("test@example.com")
 result
 ''';
 
-    final result = JSEvaluator.evaluateString(code);
+    final result = interpreter.eval(code);
     expect(result.toString(), equals('test@example.com'));
   });
 }

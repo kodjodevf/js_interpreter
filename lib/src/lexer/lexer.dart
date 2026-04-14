@@ -13,7 +13,7 @@ class LexerError extends Error {
   LexerError(this.message, this.line, this.column);
 
   @override
-  String toString() => 'LexerError at $line:$column: $message';
+  String toString() => 'SyntaxError: $message';
 }
 
 /// JavaScript Lexical Analyzer
@@ -61,6 +61,7 @@ class JSLexer {
       TokenType.strictNotEqual,
       TokenType.keywordYield,
       TokenType.keywordAwait,
+      TokenType.rightBrace,
     };
 
     return regexContextTokens.contains(lastToken.type);
@@ -568,18 +569,9 @@ class JSLexer {
     final buffer = StringBuffer();
 
     while (!_isAtEnd() && _peek() != quote) {
-      if (_peek() == '\n') {
-        _line++;
-        _column = 1;
-      } else if (_peek() == '\r') {
-        // CR is a line terminator; consume CRLF as single terminator
-        _advance();
-        if (!_isAtEnd() && _peek() == '\n') {
-          _advance();
-        }
-        _line++;
-        _column = 1;
-        continue;
+      // Line terminators (LF, CR) are not allowed in string literals
+      if (_peek() == '\n' || _peek() == '\r') {
+        throw LexerError('Invalid or unexpected token', startLine, startColumn);
       }
 
       if (_peek() == '\\') {
@@ -1302,6 +1294,34 @@ class JSLexer {
     final hasUnicodeEscapes = rawLexeme.contains('\\u');
     final lexeme = _processUnicodeEscapes(rawLexeme);
 
+    // Validate that decoded unicode escapes produce valid identifier characters
+    if (hasUnicodeEscapes && lexeme.isNotEmpty) {
+      final firstChar = lexeme[0];
+      if (!_isAlpha(firstChar) &&
+          firstChar != '_' &&
+          firstChar != '\$' &&
+          !_isUnicodeIdentifierStart(firstChar)) {
+        throw LexerError(
+          'Invalid Unicode escape sequence in identifier',
+          startLine,
+          startColumn,
+        );
+      }
+      for (int i = 1; i < lexeme.length; i++) {
+        final ch = lexeme[i];
+        if (!_isAlphaNumeric(ch) &&
+            ch != '_' &&
+            ch != '\$' &&
+            !_isUnicodeIdentifierStart(ch)) {
+          throw LexerError(
+            'Invalid Unicode escape sequence in identifier',
+            startLine,
+            startColumn,
+          );
+        }
+      }
+    }
+
     // Check if this matches a keyword
     final keywordType = keywords[lexeme];
 
@@ -1521,6 +1541,38 @@ class JSLexer {
     }
 
     final lexeme = source.substring(start, _current);
+    final hasUnicodeEscapes = lexeme.contains('\\u');
+    // Validate decoded Unicode escapes produce valid identifier characters
+    if (hasUnicodeEscapes) {
+      final decoded = _processUnicodeEscapes(lexeme.substring(1)); // skip '#'
+      if (decoded.isEmpty) {
+        throw LexerError('Invalid private identifier', startLine, startColumn);
+      }
+      final firstChar = decoded[0];
+      if (!_isAlpha(firstChar) &&
+          firstChar != '_' &&
+          firstChar != '\$' &&
+          !_isUnicodeIdentifierStart(firstChar)) {
+        throw LexerError(
+          'Invalid Unicode escape sequence in identifier',
+          startLine,
+          startColumn,
+        );
+      }
+      for (int i = 1; i < decoded.length; i++) {
+        final ch = decoded[i];
+        if (!_isAlphaNumeric(ch) &&
+            ch != '_' &&
+            ch != '\$' &&
+            !_isUnicodeIdentifierStart(ch)) {
+          throw LexerError(
+            'Invalid Unicode escape sequence in identifier',
+            startLine,
+            startColumn,
+          );
+        }
+      }
+    }
     _addToken(
       TokenType.privateIdentifier,
       lexeme,
@@ -1532,7 +1584,15 @@ class JSLexer {
 
   /// Analyzes a single line comment
   void _scanSingleLineComment(int start, int startLine, int startColumn) {
-    while (!_isAtEnd() && _peek() != '\n') {
+    while (!_isAtEnd()) {
+      final ch = _peek();
+      // All line terminators end a single-line comment
+      if (ch == '\n' ||
+          ch == '\r' ||
+          ch.codeUnitAt(0) == 0x2028 ||
+          ch.codeUnitAt(0) == 0x2029) {
+        break;
+      }
       _advance();
     }
     // Note: we could ignore comments or keep them for formatting
@@ -1544,12 +1604,13 @@ class JSLexer {
       if (_peek() == '*' && _peekNext() == '/') {
         _advance(); // Consume *
         _advance(); // Consume /
-        break;
+        return;
       }
-      if (_peek() == '\n') {
+      final ch = _peek();
+      if (ch == '\n') {
         _line++;
         _column = 1;
-      } else if (_peek() == '\r') {
+      } else if (ch == '\r') {
         // CR is a line terminator; consume CRLF as single terminator
         _advance();
         if (!_isAtEnd() && _peek() == '\n') {
@@ -1558,9 +1619,15 @@ class JSLexer {
         _line++;
         _column = 1;
         continue; // Already advanced past the CR (and optional LF)
+      } else if (ch.codeUnitAt(0) == 0x2028 || ch.codeUnitAt(0) == 0x2029) {
+        // Line Separator and Paragraph Separator are line terminators
+        _line++;
+        _column = 1;
       }
       _advance();
     }
+    // Reached end of input without closing */
+    throw LexerError('Unterminated multi-line comment', startLine, startColumn);
   }
 
   /// Analyzes a regex literal /pattern/flags
@@ -1740,6 +1807,20 @@ class JSLexer {
     if (codePoint >= 0x007F && codePoint <= 0x009F) {
       return false; // DEL and C1 controls
     }
+
+    // Exclude Unicode whitespace/space separator characters (Zs category)
+    // These are NOT valid in identifiers
+    if (codePoint == 0x00A0) return false; // NBSP
+    if (codePoint == 0x1680) return false; // Ogham Space Mark
+    if (codePoint == 0x180E) return false; // Mongolian Vowel Separator
+    if (codePoint >= 0x2000 && codePoint <= 0x200B) {
+      return false; // Various spaces + ZWSP
+    }
+    if (codePoint == 0x202F) return false; // Narrow NBSP
+    if (codePoint == 0x205F) return false; // Medium Mathematical Space
+    if (codePoint == 0x3000) return false; // Ideographic Space
+    if (codePoint == 0xFEFF) return false; // BOM / ZWNBSP
+
     // Line/Paragraph separators are line terminators, not identifiers
     if (codePoint == 0x2028 || codePoint == 0x2029) return false;
     if (codePoint >= 0xFDD0 && codePoint <= 0xFDEF) {

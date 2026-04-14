@@ -21,7 +21,7 @@ topics:
   - interpreter
   - parser
   - ecmascript
-  - es6
+  - bytecode
 
 dependencies:
   intl: ^0.20.0

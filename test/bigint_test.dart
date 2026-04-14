@@ -36,6 +36,12 @@ void main() {
       expect(result.type, JSValueType.bigint);
     });
 
+    test('BigInt constructor with empty string', () {
+      final result = interpreter.eval('BigInt("")');
+      expect(result.toString(), '0n');
+      expect(result.type, JSValueType.bigint);
+    });
+
     test('BigInt constructor with binary string', () {
       final result = interpreter.eval('BigInt("0b1010")');
       expect(result.toString(), '10n');
@@ -81,7 +87,15 @@ void main() {
       );
       expect(
         () => interpreter.eval('BigInt("invalid")'),
-        throwsA(isA<JSTypeError>()),
+        throwsA(isA<JSSyntaxError>()),
+      );
+      expect(
+        () => interpreter.eval('BigInt("+")'),
+        throwsA(isA<JSSyntaxError>()),
+      );
+      expect(
+        () => interpreter.eval('BigInt("-")'),
+        throwsA(isA<JSSyntaxError>()),
       );
     });
 
@@ -128,6 +142,43 @@ void main() {
         [a / b, a % b]
       ''');
       expect(result.toString(), '3n,2n');
+    });
+
+    test('BigInt for-loop update reaches terminal value', () {
+      final result = interpreter.eval('''
+        (() => {
+          let i = 0n;
+          for (i = 0n; i < 5n; i++) {}
+          return i;
+        })()
+      ''');
+      expect(result.toString(), '5n');
+    });
+
+    test('BigInt for-loop body sees each iteration value', () {
+      final result = interpreter.eval('''
+        (() => {
+          let last = 0n;
+          for (let j = 0n; j < 5n; j++) {
+            last = j;
+          }
+          return last;
+        })()
+      ''');
+      expect(result.toString(), '4n');
+    });
+
+    test('BigInt compound assignment works across for-loop iterations', () {
+      final result = interpreter.eval('''
+        (() => {
+          let product = 1n;
+          for (let i = 0n; i < 3n; i++) {
+            product *= 3n;
+          }
+          return product;
+        })()
+      ''');
+      expect(result.toString(), '27n');
     });
   });
 }

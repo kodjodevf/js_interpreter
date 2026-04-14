@@ -321,6 +321,91 @@ class MathObject {
     return JSValueFactory.number(dart_math.sqrt(sumOfSquares));
   }
 
+  /// Math.sumPrecise(iterable) - numerically stable sum over an iterable.
+  static JSValue sumPrecise(List<JSValue> args) {
+    if (args.isEmpty || args[0].isUndefined || args[0].isNull) {
+      return JSValueFactory.number(0);
+    }
+
+    final values = <double>[];
+    final source = args[0];
+    if (source is JSArray) {
+      for (var i = 0; i < source.length; i++) {
+        values.add(source.getProperty(i.toString()).toNumber());
+      }
+    } else if (source is JSObject) {
+      final length = source.getProperty('length').toNumber();
+      if (!length.isNaN && !length.isInfinite) {
+        for (var i = 0; i < length.truncate(); i++) {
+          values.add(source.getProperty(i.toString()).toNumber());
+        }
+      } else {
+        return JSValueFactory.number(double.nan);
+      }
+    } else {
+      return JSValueFactory.number(source.toNumber());
+    }
+
+    final partials = <double>[];
+    for (final value in values) {
+      if (value.isNaN) return JSValueFactory.number(double.nan);
+      if (value.isInfinite) return JSValueFactory.number(value);
+
+      var x = value;
+      var i = 0;
+      for (final y0 in partials) {
+        var y = y0;
+        if (x.abs() < y.abs()) {
+          final tmp = x;
+          x = y;
+          y = tmp;
+        }
+        final hi = x + y;
+        final lo = y - (hi - x);
+        if (lo != 0) {
+          partials[i++] = lo;
+        }
+        x = hi;
+      }
+      if (i < partials.length) {
+        partials.length = i;
+      }
+      partials.add(x);
+    }
+
+    if (partials.isEmpty) {
+      return JSValueFactory.number(0);
+    }
+
+    var n = partials.length;
+    var hi = partials[--n];
+    var lo = 0.0;
+
+    while (n > 0) {
+      final x = hi;
+      final y = partials[--n];
+      hi = x + y;
+      final yr = hi - x;
+      lo = y - yr;
+      if (lo != 0.0) {
+        break;
+      }
+    }
+
+    if (n > 0 &&
+        ((lo < 0.0 && partials[n - 1] < 0.0) ||
+            (lo > 0.0 && partials[n - 1] > 0.0))) {
+      final y = lo * 2.0;
+      final x = hi + y;
+      final yr = x - hi;
+      if (y == yr) {
+        hi = x;
+      }
+    }
+
+    return JSValueFactory.number(hi);
+  }
+
   /// Math.imul(x, y) - signed 32-bit multiplication
   static JSValue imul(List<JSValue> args) {
     if (args.length < 2) {
@@ -744,6 +829,14 @@ class MathObject {
       JSNativeFunction(functionName: 'imul', nativeImpl: imul, expectedArgs: 2),
     );
     math.setProperty(
+      'sumPrecise',
+      JSNativeFunction(
+        functionName: 'sumPrecise',
+        nativeImpl: sumPrecise,
+        expectedArgs: 1,
+      ),
+    );
+    math.setProperty(
       'log',
       JSNativeFunction(functionName: 'log', nativeImpl: log, expectedArgs: 1),
     );
@@ -850,6 +943,7 @@ class MathObject {
       'fround',
       'hypot',
       'imul',
+      'sumPrecise',
       'log',
       'log1p',
       'log10',
@@ -885,7 +979,7 @@ class MathObject {
     // This is required by ES6: Math[Symbol.toStringTag] === "Math"
     // The property has attributes { [[Writable]]: false, [[Enumerable]]: false, [[Configurable]]: true }
     math.defineProperty(
-      JSSymbol.toStringTag.toString(),
+      JSSymbol.toStringTag.propertyKey,
       PropertyDescriptor(
         value: JSValueFactory.string('Math'),
         writable: false,

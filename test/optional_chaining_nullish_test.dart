@@ -31,6 +31,29 @@ void main() {
       expect(result.toString(), 'called,');
     });
 
+    test('Optional chaining with computed property and parenthesized call', () {
+      final result = interpreter.eval('''
+        const obj = {
+          method() { return this.value; },
+          value: 42
+        };
+        (obj?.['method'])();
+      ''');
+      expect(result.toNumber(), equals(42));
+    });
+
+    test('Optional chaining delete short-circuits on nullish base', () {
+      final result = interpreter.eval('''
+        const nullObj = null;
+        const obj = { nested: { value: 1 } };
+        const result1 = delete nullObj?.nested.value;
+        const result2 = delete nullObj?.nested['value'];
+        const result3 = delete obj?.nested.value;
+        [result1, result2, result3, JSON.stringify(obj)]
+      ''');
+      expect(result.toString(), 'true,true,true,{"nested":{}}');
+    });
+
     test('Nullish coalescing operator', () {
       final result = interpreter.eval('''
         const nullValue = null;

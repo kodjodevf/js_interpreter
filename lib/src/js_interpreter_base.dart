@@ -4,24 +4,37 @@
 library;
 
 import 'dart:async';
-import 'evaluator/evaluator.dart' show JSEvaluator, JSModule;
+import 'bytecode/compiler.dart';
+import 'bytecode/vm.dart';
 import 'parser/parser.dart';
+import 'runtime/module.dart';
+import 'runtime/js_runtime.dart';
 import 'runtime/js_value.dart';
 import 'runtime/message_system.dart';
 import 'runtime/native_functions.dart';
 import 'runtime/realm.dart';
-import 'runtime/environment.dart' show BindingType;
+import 'runtime/runtime_bootstrap.dart';
+import 'runtime/environment.dart' show Environment;
 
 /// Main JavaScript engine
 class JSInterpreter {
-  late final JSEvaluator _evaluator;
   bool _moduleMode = false;
+  static int _nextInterpreterId = 0;
+  final String _interpreterInstanceId;
 
-  JSInterpreter() {
-    _evaluator = JSEvaluator(
-      getInterpreterInstanceId: getInterpreterInstanceId(),
-    );
+  BytecodeVM? _vm;
+
+  /// Console output buffer for bytecode mode
+  List<String> get consoleOutput => _vm?.takeConsoleOutput() ?? [];
+
+  /// Emits a debug trace to consoleOutput when a non-callable value is invoked.
+  void enableNotAFunctionTracing([bool enabled = true]) {
+    _vm?.traceNotAFunctionErrors = enabled;
+  }
+
+  JSInterpreter() : _interpreterInstanceId = 'vm-${_nextInterpreterId++}' {
     _channelFunctionsRegistered[getInterpreterInstanceId()] = {};
+    _initBytecodeVM();
   }
   static final Map<String, Map<String, Function(dynamic arg)>>
   _channelFunctionsRegistered = {};
@@ -30,13 +43,12 @@ class JSInterpreter {
   get channelFunctionsRegistered => _channelFunctionsRegistered;
 
   String getInterpreterInstanceId() {
-    return hashCode.toString();
+    return _interpreterInstanceId;
   }
 
   /// Set module mode - in module context, certain identifiers are restricted
   void setModuleMode(bool isModule) {
     _moduleMode = isModule;
-    _evaluator.moduleMode = isModule;
   }
 
   /// Check if currently in module mode
@@ -44,7 +56,11 @@ class JSInterpreter {
 
   /// Registers a native function in the global environment
   void registerGlobal(String name, JSValue value) {
-    _evaluator.globalEnvironment.define(name, value, BindingType.var_);
+    _vm!.globals[name] = value;
+    final globalThis = _vm!.globals['globalThis'];
+    if (globalThis is JSObject) {
+      globalThis.setProperty(name, value);
+    }
   }
 
   /// Creates a createRealm function that can be used in JavaScript
@@ -53,19 +69,49 @@ class JSInterpreter {
     return JSRealmFactory.createRealmFunction();
   }
 
+  void _initBytecodeVM() {
+    _vm = BytecodeVM();
+    RuntimeBootstrap.populateGlobals(
+      _vm!.globals,
+      getInterpreterInstanceId: getInterpreterInstanceId,
+    );
+  }
+
   /// Evaluates a JavaScript code string
   /// Maintains state between evaluations
   JSValue eval(String code) {
+    return _evalBytecode(code);
+  }
+
+  JSValue _evalBytecode(String code, {bool allowTopLevelAwait = false}) {
     try {
-      final program = JSParser.parseString(code);
-      final result = _evaluator.evaluate(program);
-      // Process any pending microtasks (e.g. Promise callbacks)
-      _evaluator.runPendingAsyncTasks();
-      return result;
+      final program = JSParser.parseString(
+        code,
+        allowTopLevelAwait: allowTopLevelAwait,
+      );
+      final compiler = BytecodeCompiler();
+      final bytecode = compiler.compile(program);
+      return _vm!.execute(bytecode);
+    } on JSException catch (e) {
+      final value = e.value;
+      if (value is JSObject && value.hasInternalSlot('ExposeAsDartError')) {
+        final hostErrorName = value.getInternalSlot('HostErrorName');
+        switch (hostErrorName) {
+          case 'TypeError':
+            throw JSTypeError(e.message);
+          case 'ReferenceError':
+            throw JSReferenceError(e.message);
+          case 'SyntaxError':
+            throw JSSyntaxError(e.message);
+          case 'RangeError':
+            throw JSRangeError(e.message);
+          case 'URIError':
+            throw JSURIError(e.message);
+        }
+      }
+      rethrow;
     } catch (e) {
       if (e is JSError) rethrow;
-
-      // Convertir ParseError en JSSyntaxError
       if (e.toString().contains('ParseError')) {
         final message = e.toString().replaceFirst(
           'ParseError at',
@@ -73,7 +119,6 @@ class JSInterpreter {
         );
         throw JSSyntaxError(message);
       }
-      // Laisser passer les Exception standard pour les tests
       if (e is Exception) rethrow;
       throw JSError('Evaluation error: $e');
     }
@@ -85,8 +130,7 @@ class JSInterpreter {
     // Parse with allowTopLevelAwait so that `await expr` works at the top level
     final JSValue result;
     try {
-      final program = JSParser.parseString(code, allowTopLevelAwait: true);
-      result = _evaluator.evaluate(program);
+      result = _evalBytecode(code, allowTopLevelAwait: true);
     } catch (e) {
       if (e is JSError) rethrow;
       if (e.toString().contains('ParseError')) {
@@ -101,39 +145,57 @@ class JSInterpreter {
     }
 
     // Execute pending async tasks after evaluation
-    _evaluator.runPendingAsyncTasks();
+    _vm!.runPendingTasks();
 
     if (result is JSPromise) {
-      // Create a Completer to wait for the JS Promise resolution
+      // If already fulfilled, return immediately
+      if (result.state == PromiseState.fulfilled) {
+        return Future.value(result.value ?? JSUndefined.instance);
+      }
+      if (result.state == PromiseState.rejected) {
+        return Future.error(
+          result.reason ?? JSValueFactory.string('Promise rejected'),
+        );
+      }
+
+      // Promise is still pending (e.g. waiting on a setTimeout Timer).
+      // Register .then() callbacks using the VM as the active runtime
+      // so that microtask enqueuing and promise chaining work correctly.
       final completer = Completer<JSValue>();
+      final vm = _vm!;
 
-      // Call then on the Promise with callbacks
-      final thenMethod = result.getProperty('then') as JSFunction;
-      _evaluator.callFunction(thenMethod, [
-        JSNativeFunction(
-          functionName: 'asyncResolve',
-          nativeImpl: (args) {
-            final value = args.isNotEmpty
-                ? args[0]
-                : JSValueFactory.undefined();
+      final resolveCallback = JSNativeFunction(
+        functionName: 'asyncResolve',
+        nativeImpl: (args) {
+          final value = args.isNotEmpty ? args[0] : JSValueFactory.undefined();
+          if (!completer.isCompleted) {
             completer.complete(value);
-            return JSValueFactory.undefined();
-          },
-        ),
-        JSNativeFunction(
-          functionName: 'asyncReject',
-          nativeImpl: (args) {
-            final error = args.isNotEmpty
-                ? args[0]
-                : JSValueFactory.string('Promise rejected');
-            completer.completeError(error);
-            return JSValueFactory.undefined();
-          },
-        ),
-      ], result);
+          }
+          return JSValueFactory.undefined();
+        },
+      );
 
-      // Process microtasks to execute the .then() callback we just registered
-      _evaluator.runPendingAsyncTasks();
+      final rejectCallback = JSNativeFunction(
+        functionName: 'asyncReject',
+        nativeImpl: (args) {
+          final error = args.isNotEmpty
+              ? args[0]
+              : JSValueFactory.string('Promise rejected');
+          if (!completer.isCompleted) {
+            completer.completeError(error);
+          }
+          return JSValueFactory.undefined();
+        },
+      );
+
+      // Use the VM to call .then() so JSRuntime.current is properly set
+      final thenMethod = result.getProperty('then');
+      if (thenMethod is JSFunction) {
+        vm.callFunction(thenMethod, [resolveCallback, rejectCallback], result);
+      }
+
+      // Process microtasks enqueued by the .then() registration
+      vm.runPendingTasks();
 
       return completer.future;
     } else {
@@ -170,29 +232,27 @@ class JSInterpreter {
     } else {
       jsValue = JSValueFactory.fromDart(value);
     }
-    _evaluator.setGlobalVariable(name, jsValue);
+    _vm!.globals[name] = jsValue;
+    final globalThis = _vm!.globals['globalThis'];
+    if (globalThis is JSObject) {
+      globalThis.setProperty(name, jsValue);
+    }
   }
 
   /// Retrieves a global variable
   dynamic getGlobal(String name) {
-    final jsValue = _evaluator.getGlobalVariable(name);
+    final jsValue = _vm!.globals[name] ?? JSUndefined.instance;
     return jsValue.primitiveValue;
   }
 
   /// Checks if a global variable exists
   bool hasGlobal(String name) {
-    return _evaluator.hasGlobalVariable(name);
+    return _vm!.globals.containsKey(name);
   }
 
   /// Evaluates a simple JavaScript expression
   JSValue evalExpression(String code) {
-    try {
-      final expression = JSParser.parseExpression(code);
-      return expression.accept(_evaluator);
-    } catch (e) {
-      if (e is JSError) rethrow;
-      throw JSError('Expression evaluation error: $e');
-    }
+    return eval(code);
   }
 
   /// Evaluates an expression and returns the Dart value
@@ -203,26 +263,53 @@ class JSInterpreter {
 
   /// Configures the module loader
   void setModuleLoader(Future<String> Function(String moduleId) loader) {
-    _evaluator.setModuleLoader(loader);
+    _vm!.moduleLoader = loader;
   }
 
   /// Configures the module resolver
   void setModuleResolver(
     String Function(String moduleId, String? importer) resolver,
   ) {
-    _evaluator.setModuleResolver(resolver);
+    _vm!.moduleResolver = resolver;
   }
 
   /// Preloads a module asynchronously
   ///
   /// ES2022: Returns the loaded module to access exports
   Future<JSModule> loadModule(String moduleId, [String? importer]) async {
-    return await _evaluator.loadModule(moduleId, importer);
+    final exports = await _vm!.loadModuleAsync(moduleId, importer);
+
+    final resolvedId =
+        _vm!.moduleResolver?.call(moduleId, importer) ?? moduleId;
+    final module = JSModule(resolvedId, Environment.global());
+    final previousRuntime = JSRuntime.current;
+    JSRuntime.setCurrent(_vm!);
+    try {
+      for (final key in exports.getPropertyNames()) {
+        final value = exports.getProperty(key);
+        if (key == 'default') {
+          module.defaultExport = value;
+        }
+        module.exports[key] = value;
+      }
+    } finally {
+      JSRuntime.setCurrent(previousRuntime);
+    }
+    module.isLoaded = true;
+    module.hasTopLevelAwait = _vm!.hasModuleTLA(resolvedId);
+    module.status = ModuleStatus.evaluated;
+    return module;
   }
 
   /// Manually executes pending asynchronous tasks (for tests)
   void runPendingAsyncTasks() {
-    _evaluator.runPendingAsyncTasks();
+    _vm!.runPendingTasks();
+  }
+
+  /// Runs the host-visible weak-reference collection step used by tests.
+  void performHostGarbageCollection() {
+    _vm!.performHostGarbageCollection();
+    _vm!.runPendingTasks();
   }
 
   /// Registers a callback to receive messages from a JavaScript channel

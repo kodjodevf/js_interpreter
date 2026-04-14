@@ -3,8 +3,13 @@ import 'package:js_interpreter/js_interpreter.dart';
 
 void main() {
   group('Array.sort avec compareFn Tests', () {
+    late JSInterpreter interpreter;
+
+    setUp(() {
+      interpreter = JSInterpreter();
+    });
     test('Array.sort sans compareFn utilise le tri alphabétique', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var arr = [3, 1, 10, 2];
         arr.sort();
       ''');
@@ -18,7 +23,7 @@ void main() {
     });
 
     test('Array.sort avec function expression pour tri numérique', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var arr = [3, 1, 10, 2];
         arr.sort(function(a, b) {
           return a - b;
@@ -31,7 +36,7 @@ void main() {
     });
 
     test('Array.sort avec arrow function pour tri décroissant', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var numbers = [5, 2, 8, 1, 9];
         numbers.sort((a, b) => b - a);
       ''');
@@ -45,7 +50,7 @@ void main() {
     });
 
     test('Array.sort avec fonction de comparaison personnalisée', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var words = ["banana", "apple", "cherry", "date"];
         words.sort(function(a, b) {
           return a.length - b.length;
@@ -61,7 +66,7 @@ void main() {
     });
 
     test('Array.sort avec logique de tri complexe', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var items = [3, 1, 4, 1, 5, 2, 6];
         items.sort(function(a, b) {
           // Pairs en premier, puis impairs
@@ -82,7 +87,7 @@ void main() {
     });
 
     test('Array.sort avec compareFn non-fonction utilise tri par défaut', () {
-      final result = JSEvaluator.evaluateString('''
+      final result = interpreter.eval('''
         var arr = [3, 1, 10, 2];
         arr.sort("not a function");
       ''');

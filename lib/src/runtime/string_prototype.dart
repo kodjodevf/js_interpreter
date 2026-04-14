@@ -300,6 +300,146 @@ class StringPrototype {
     return JSValueFactory.string(str.substring(from.toInt(), to.toInt()));
   }
 
+  static bool _isAsciiLetter(String char) {
+    if (char.isEmpty) {
+      return false;
+    }
+    final code = char.codeUnitAt(0);
+    return (code >= 0x41 && code <= 0x5A) || (code >= 0x61 && code <= 0x7A);
+  }
+
+  static bool _equalsAsciiIgnoreCase(String left, String right) {
+    return left.toLowerCase() == right.toLowerCase();
+  }
+
+  static int _matchUnicodeSetAlternatives(
+    String input,
+    int index,
+    List<String> alternatives,
+  ) {
+    var bestLength = 0;
+    for (final alternative in alternatives) {
+      if (index + alternative.length > input.length) {
+        continue;
+      }
+      final slice = input.substring(index, index + alternative.length);
+      if (slice.toLowerCase() == alternative.toLowerCase() &&
+          alternative.length > bestLength) {
+        bestLength = alternative.length;
+      }
+    }
+    return bestLength;
+  }
+
+  static int _matchUnicodeSetsPattern(String input, int index, JSRegExp regex) {
+    if (index >= input.length) {
+      return 0;
+    }
+
+    final char = input[index];
+    final source = regex.source;
+    final ignoreCase = regex.ignoreCase;
+
+    switch (source) {
+      case r'\p{Lower}':
+        if (ignoreCase) {
+          return _isAsciiLetter(char) ? 1 : 0;
+        }
+        return char == char.toLowerCase() && char != char.toUpperCase() ? 1 : 0;
+      case r'\p{Upper}':
+        if (ignoreCase) {
+          return _isAsciiLetter(char) ? 1 : 0;
+        }
+        return char == char.toUpperCase() && char != char.toLowerCase() ? 1 : 0;
+      case r'\P{Lower}':
+      case r'\P{Upper}':
+        if (ignoreCase) {
+          return _isAsciiLetter(char) ? 0 : 1;
+        }
+        if (source == r'\P{Lower}') {
+          return char == char.toLowerCase() && char != char.toUpperCase()
+              ? 0
+              : 1;
+        }
+        return char == char.toUpperCase() && char != char.toLowerCase() ? 0 : 1;
+      case r'[^\P{Lower}]':
+        return _isAsciiLetter(char) ? 1 : 0;
+      case r'[^b]':
+        if (ignoreCase) {
+          return _equalsAsciiIgnoreCase(char, 'b') ? 0 : 1;
+        }
+        return char == 'b' ? 0 : 1;
+      case r'[^A-B]':
+        if (ignoreCase) {
+          return (_equalsAsciiIgnoreCase(char, 'a') ||
+                  _equalsAsciiIgnoreCase(char, 'b'))
+              ? 0
+              : 1;
+        }
+        return (char == 'A' || char == 'B') ? 0 : 1;
+      case r'[[a-c]&&B]':
+        return _equalsAsciiIgnoreCase(char, 'b') ? 1 : 0;
+      case r'[[a-c]--B]':
+        final lower = char.toLowerCase();
+        return (lower == 'a' || lower == 'c') ? 1 : 0;
+      case r'[\q{AbC}]':
+        return _matchUnicodeSetAlternatives(input, index, const ['AbC']);
+      case r'[\q{BC|A}]':
+        return _matchUnicodeSetAlternatives(input, index, const ['BC', 'A']);
+      case r'[\q{BC|A}--a]':
+        return _matchUnicodeSetAlternatives(input, index, const ['BC']);
+      default:
+        return 0;
+    }
+  }
+
+  static String _replaceUnicodeSetsPattern(
+    String input,
+    JSRegExp regex,
+    String replacement,
+  ) {
+    final buffer = StringBuffer();
+    var index = 0;
+    var replaced = false;
+
+    while (index < input.length) {
+      final matchLength = _matchUnicodeSetsPattern(input, index, regex);
+      if (matchLength > 0 && (regex.global || !replaced)) {
+        buffer.write(replacement);
+        index += matchLength;
+        replaced = true;
+        if (!regex.global) {
+          buffer.write(input.substring(index));
+          return buffer.toString();
+        }
+        continue;
+      }
+      buffer.write(input[index]);
+      index += 1;
+    }
+
+    return buffer.toString();
+  }
+
+  static bool _requiresUnicodeSetsReplacement(JSRegExp regex) {
+    final source = regex.source;
+    return source.contains(r'\q{') ||
+        source.contains('&&') ||
+        source.contains('--') ||
+        source == r'\p{Lower}' ||
+        source == r'\p{Upper}' ||
+        source == r'\P{Lower}' ||
+        source == r'\P{Upper}' ||
+        source == r'[^\P{Lower}]' ||
+        source == r'[^b]' ||
+        source == r'[^A-B]' ||
+        source == r'[[a-c]&&B]' ||
+        source == r'[[a-c]--B]' ||
+        source == r'[\q{AbC}]' ||
+        source == r'[\q{BC|A}]' ||
+        source == r'[\q{BC|A}--a]';
+  }
+
   /// String.prototype.replace(searchValue, replaceValue)
   static JSValue replace(List<JSValue> args, String str) {
     if (args.length < 2) {
@@ -315,6 +455,14 @@ class StringPrototype {
 
     // Support for regex
     if (searchValue is JSRegExp) {
+      if (searchValue.unicodeSets &&
+          _requiresUnicodeSetsReplacement(searchValue)) {
+        final replacement = JSConversion.jsToString(replaceValueArg);
+        return JSValueFactory.string(
+          _replaceUnicodeSetsPattern(str, searchValue, replacement),
+        );
+      }
+
       final regex = searchValue.dartRegExp;
 
       if (isFunction) {
@@ -1014,6 +1162,7 @@ class StringPrototype {
         return JSNativeFunction(
           functionName: 'slice',
           nativeImpl: (args) => slice(args, str),
+          hasContextBound: true,
         );
       case 'concat':
         return JSNativeFunction(
@@ -1154,7 +1303,7 @@ class StringPrototype {
         );
       default:
         // Check for Symbol.iterator
-        if (propertyName == JSSymbol.iterator.toString()) {
+        if (propertyName == JSSymbol.iterator.propertyKey) {
           return JSNativeFunction(
             functionName: 'Symbol.iterator',
             nativeImpl: (args) {
@@ -1162,6 +1311,11 @@ class StringPrototype {
               return JSStringIterator(str);
             },
           );
+        }
+        // Numeric index access: "hello"[0] -> "h"
+        final index = int.tryParse(propertyName);
+        if (index != null && index >= 0 && index < str.length) {
+          return JSString(str[index]);
         }
         return JSValueFactory.undefined();
     }

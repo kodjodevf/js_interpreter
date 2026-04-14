@@ -1,15 +1,20 @@
+import 'package:js_interpreter/js_interpreter.dart';
 import 'package:test/test.dart';
-import 'package:js_interpreter/src/evaluator/evaluator.dart';
 
 void main() {
   group('ASI Debug Tests', () {
+    late JSInterpreter interpreter;
+
+    setUp(() {
+      interpreter = JSInterpreter();
+    });
     test('simple multiline expression', () {
       const code = '''
         var x = 5
         var y = 10
       ''';
 
-      expect(() => JSEvaluator.evaluateString(code), returnsNormally);
+      expect(() => interpreter.eval(code), returnsNormally);
     });
 
     test('method chaining simple', () {
@@ -19,7 +24,7 @@ void main() {
         result
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('HELLO'));
     });
 
@@ -31,7 +36,7 @@ void main() {
         result
       ''';
 
-      final result = JSEvaluator.evaluateString(code);
+      final result = interpreter.eval(code);
       expect(result.toString(), equals('HELLO'));
     });
   });

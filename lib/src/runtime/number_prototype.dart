@@ -59,17 +59,20 @@ class NumberPrototype {
                 return JSValueFactory.string('NaN');
               }
 
-              // Remove unnecessary decimals
-              if (number == number.toInt()) {
-                final str = number.toString();
-                // Remove .0 at the end for integers
-                if (str.endsWith('.0')) {
-                  return JSValueFactory.string(
-                    str.substring(0, str.length - 2),
-                  );
-                }
-                return JSValueFactory.string(str);
+              if (number == 0) {
+                return JSValueFactory.string('0');
               }
+
+              if (number == number.truncateToDouble() && number.abs() < 1e21) {
+                final raw = number.toString();
+                if (raw.contains('e') || raw.contains('E')) {
+                  return JSValueFactory.string(_expandExponentialInteger(raw));
+                }
+                return JSValueFactory.string(
+                  raw.endsWith('.0') ? raw.substring(0, raw.length - 2) : raw,
+                );
+              }
+
               return JSValueFactory.string(number.toString());
             } else {
               // Other bases - use the helper function to handle decimals
@@ -266,6 +269,24 @@ class NumberPrototype {
     }
 
     return isNegative ? '-$result' : result;
+  }
+
+  static String _expandExponentialInteger(String raw) {
+    final parts = raw.toLowerCase().split('e');
+    if (parts.length != 2) {
+      return raw;
+    }
+
+    final mantissa = parts[0];
+    final exponent = int.parse(parts[1]);
+    final negative = mantissa.startsWith('-');
+    final digits = mantissa.replaceAll('-', '').replaceAll('.', '');
+    final decimalDigits = mantissa.contains('.')
+        ? mantissa.length - mantissa.indexOf('.') - 1
+        : 0;
+    final zeros = exponent - decimalDigits;
+    final expanded = zeros >= 0 ? digits + ('0' * zeros) : digits;
+    return negative ? '-$expanded' : expanded;
   }
 
   /// Converts a digit (0-35) to a character (0-9, a-z)
