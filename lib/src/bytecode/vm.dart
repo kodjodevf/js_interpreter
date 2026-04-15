@@ -529,6 +529,30 @@ class BytecodeVM implements JSRuntime {
       },
     );
 
+    globals['__setInferredNameIfNeeded__'] = JSNativeFunction(
+      functionName: '__setInferredNameIfNeeded__',
+      nativeImpl: (args) {
+        final value = args.isNotEmpty ? args[0] : JSUndefined.instance;
+        final name = args.length > 1 ? _jsToString(args[1]) : '';
+        bool hasConcreteName(PropertyDescriptor? descriptor) {
+          return descriptor != null &&
+              descriptor.value is JSString &&
+              (descriptor.value as JSString).value.isNotEmpty;
+        }
+
+        if (name.isNotEmpty && value is JSFunction) {
+          if (!hasConcreteName(value.getOwnPropertyDescriptor('name'))) {
+            value.setFunctionName(name);
+          }
+        } else if (name.isNotEmpty && value is JSClass) {
+          if (!hasConcreteName(value.getOwnPropertyDescriptor('name'))) {
+            value.name = name;
+          }
+        }
+        return JSUndefined.instance;
+      },
+    );
+
     // Synchronous module import helper (for static import declarations)
     globals['__import_sync__'] = JSNativeFunction(
       functionName: '__import_sync__',
@@ -1978,6 +2002,20 @@ class BytecodeVM implements JSRuntime {
     return false;
   }
 
+  VarRef? _resolveWithBindingRef(String name) {
+    final frame = _currentFrame;
+    if (frame == null) {
+      return null;
+    }
+    for (var i = frame.withObjects.length - 1; i >= 0; i--) {
+      final obj = frame.withObjects[i];
+      if (obj.hasProperty(name)) {
+        return _ObjectPropertyVarRef(obj, name);
+      }
+    }
+    return null;
+  }
+
   JSValue? _lookupCurrentFrameBinding(String name) {
     final frame = _currentFrame;
     if (frame == null) {
@@ -2012,6 +2050,25 @@ class BytecodeVM implements JSRuntime {
     }
 
     return false;
+  }
+
+  VarRef? _resolveCurrentFrameBindingRef(String name) {
+    final frame = _currentFrame;
+    if (frame == null) {
+      return null;
+    }
+
+    final ordinaryRef = _resolveOrdinaryBindingRefInFrame(frame, name);
+    if (ordinaryRef != null) {
+      return ordinaryRef;
+    }
+
+    final closureRef = _resolveClosureBindingRefInFrame(frame, name);
+    if (closureRef != null) {
+      return closureRef;
+    }
+
+    return null;
   }
 
   JSValue? _lookupNonWithBinding(String name) {
@@ -2067,6 +2124,40 @@ class BytecodeVM implements JSRuntime {
     return null;
   }
 
+  VarRef _resolveDynamicAssignmentRef(String name) {
+    final withRef = _resolveWithBindingRef(name);
+    if (withRef != null) {
+      return withRef;
+    }
+
+    final currentRef = _resolveCurrentFrameBindingRef(name);
+    if (currentRef != null) {
+      return currentRef;
+    }
+
+    final evalRef = _resolveEvalBindingRef(name);
+    if (evalRef != null) {
+      return evalRef;
+    }
+
+    if (_currentFrame?.isDirectEvalFrame == true) {
+      final hostRef = _resolveDirectEvalHostBindingRef(
+        _currentFrame!.callerFrame,
+        name,
+      );
+      if (hostRef != null) {
+        return hostRef;
+      }
+    }
+
+    return _GlobalBindingVarRef(
+      this,
+      name,
+      isStrict: _currentFrame?.func.isStrict == true,
+      bindingExists: _hasDirectGlobalBinding(name),
+    );
+  }
+
   void _assignNonWithBinding(String name, JSValue value) {
     if (_assignCurrentFrameBinding(name, value)) {
       return;
@@ -2079,6 +2170,10 @@ class BytecodeVM implements JSRuntime {
     if (_currentFrame?.isDirectEvalFrame == true &&
         _assignDirectEvalHostBinding(_currentFrame!.callerFrame, name, value)) {
       return;
+    }
+
+    if (_currentFrame?.func.isStrict == true && !_hasGlobalBinding(name)) {
+      throw _ThrowSignal(_makeError('ReferenceError', '$name is not defined'));
     }
 
     _setGlobalBinding(name, value);
@@ -2232,6 +2327,18 @@ class BytecodeVM implements JSRuntime {
       final binding = frame.evalBindings[name];
       if (binding != null) {
         return binding.value;
+      }
+      frame = frame.callerFrame;
+    }
+    return null;
+  }
+
+  VarRef? _resolveEvalBindingRef(String name) {
+    StackFrame? frame = _currentFrame;
+    while (frame != null) {
+      final binding = frame.evalBindings[name];
+      if (binding != null) {
+        return binding;
       }
       frame = frame.callerFrame;
     }
@@ -2535,6 +2642,45 @@ class BytecodeVM implements JSRuntime {
     return false;
   }
 
+  VarRef? _resolveDirectEvalHostBindingRef(StackFrame? frame, String name) {
+    if (frame == null) {
+      return null;
+    }
+
+    final localLimit = _directEvalHostLocalLimit(frame);
+
+    final hostRef = _resolveOrdinaryBindingRefInFrameWithLimit(
+      frame,
+      name,
+      localLimit,
+    );
+    if (hostRef != null) {
+      return hostRef;
+    }
+
+    final hostClosureRef = _resolveClosureBindingRefInFrame(frame, name);
+    if (hostClosureRef != null) {
+      return hostClosureRef;
+    }
+
+    StackFrame? current = frame.callerFrame;
+    while (current != null) {
+      final evalBinding = current.evalBindings[name];
+      if (evalBinding != null) {
+        return evalBinding;
+      }
+
+      final ordinaryRef = _resolveOrdinaryBindingRefInFrame(current, name);
+      if (ordinaryRef != null) {
+        return ordinaryRef;
+      }
+
+      current = current.callerFrame;
+    }
+
+    return null;
+  }
+
   int? _findClosureBindingIndexInFrame(StackFrame frame, String name) {
     for (var i = 0; i < frame.func.closureVars.length; i++) {
       if (frame.func.closureVars[i].name == name) {
@@ -2542,6 +2688,14 @@ class BytecodeVM implements JSRuntime {
       }
     }
     return null;
+  }
+
+  VarRef? _resolveClosureBindingRefInFrame(StackFrame frame, String name) {
+    final index = _findClosureBindingIndexInFrame(frame, name);
+    if (index == null) {
+      return null;
+    }
+    return frame.closureVarRefs[index];
   }
 
   JSValue? _lookupClosureBindingInFrame(StackFrame frame, String name) {
@@ -2565,6 +2719,45 @@ class BytecodeVM implements JSRuntime {
     return true;
   }
 
+  VarRef? _resolveOrdinaryBindingRefInFrame(StackFrame frame, String name) {
+    return _resolveOrdinaryBindingRefInFrameWithLimit(
+      frame,
+      name,
+      frame.func.vars.length,
+    );
+  }
+
+  VarRef? _resolveOrdinaryBindingRefInFrameWithLimit(
+    StackFrame frame,
+    String name,
+    int localLimit,
+  ) {
+    final cappedLocalLimit = localLimit.clamp(0, frame.func.vars.length);
+    JSReferenceError? pendingTdzError;
+    for (var i = cappedLocalLimit - 1; i >= 0; i--) {
+      if (frame.func.vars[i].name != name) {
+        continue;
+      }
+      try {
+        return _ensureLocalBindingRef(frame, i);
+      } on JSReferenceError catch (error) {
+        pendingTdzError ??= error;
+      }
+    }
+
+    for (var i = 0; i < frame.func.argNames.length; i++) {
+      if (frame.func.argNames[i] == name) {
+        return _ArgumentBindingVarRef(frame, i);
+      }
+    }
+
+    if (pendingTdzError != null) {
+      throw pendingTdzError;
+    }
+
+    return null;
+  }
+
   int _directEvalHostLocalLimit(StackFrame frame) {
     if (_currentFrame?.isDirectEvalFrame == true &&
         identical(frame, _currentFrame!.directEvalHostFrame)) {
@@ -2577,6 +2770,68 @@ class BytecodeVM implements JSRuntime {
       return frame.func.vars.length;
     }
     return frame.func.parameterVarCount;
+  }
+
+  bool _hasDirectGlobalBinding(String name) {
+    if (_isPersistentLexicalGlobal(globals[name])) {
+      return true;
+    }
+
+    final globalThis = globals['globalThis'];
+    if (globalThis is JSObject && globalThis.hasProperty(name)) {
+      return true;
+    }
+
+    return globals.containsKey(name);
+  }
+
+  JSValue? _lookupDirectGlobalBinding(String name) {
+    final cachedValue = globals[name];
+    if (_isPersistentLexicalGlobal(cachedValue)) {
+      return (cachedValue as _VarRefWrapper).ref.value;
+    }
+    final globalThis = globals['globalThis'];
+    if (cachedValue is _VarRefWrapper) {
+      if (globalThis is JSObject) {
+        final descriptor = globalThis.getOwnPropertyDescriptor(name);
+        if (descriptor == null ||
+            (!descriptor.isAccessor &&
+                descriptor.writable &&
+                descriptor.configurable)) {
+          return cachedValue.ref.value;
+        }
+        if (globalThis.hasProperty(name)) {
+          return globalThis.getProperty(name);
+        }
+      }
+      return cachedValue.ref.value;
+    }
+
+    if (globalThis is JSObject && globalThis.hasProperty(name)) {
+      return globalThis.getProperty(name);
+    }
+
+    if (cachedValue != null || globals.containsKey(name)) {
+      return cachedValue ?? JSUndefined.instance;
+    }
+
+    return null;
+  }
+
+  void _writeDirectGlobalBinding(String name, JSValue value) {
+    final existing = globals[name];
+    if (existing is _VarRefWrapper) {
+      existing.ref.value = value;
+      return;
+    }
+
+    final globalThis = globals['globalThis'];
+    if (globalThis is JSObject) {
+      globalThis.setProperty(name, value);
+      _syncGlobalCacheFromObject(name, globalThis);
+    } else {
+      _syncGlobalCacheValue(name, value);
+    }
   }
 
   VarRef _ensureDirectEvalHostBinding(StackFrame host, String name) {
@@ -2645,7 +2900,7 @@ class BytecodeVM implements JSRuntime {
     bool allowAsync = false,
   }) {
     if (iterable is JSArray) {
-      return _ForOfIterator(List<JSValue>.from(iterable.elements));
+      return _ForOfIterator.values(List<JSValue>.from(iterable.elements));
     }
 
     if (iterable is JSString) {
@@ -2653,31 +2908,39 @@ class BytecodeVM implements JSRuntime {
       for (var i = 0; i < iterable.value.length; i++) {
         chars.add(JSString(iterable.value[i]));
       }
-      return _ForOfIterator(chars);
+      return _ForOfIterator.values(chars);
     }
 
     if (iterable is JSObject) {
       final iterator = _getIteratorObject(iterable, allowAsync: allowAsync);
       if (iterator != null) {
-        final values = <JSValue>[];
         final nextFn = iterator.getProperty('next');
-        if (nextFn is JSFunction) {
-          while (true) {
+        if (!nextFn.isFunction) {
+          throw JSTypeError('iterator.next is not a function');
+        }
+        return _ForOfIterator.iterator(
+          nextStep: () => _unwrapIteratorStep(
+            _callFunction(nextFn, iterator, []),
+            allowAsync: allowAsync,
+          ),
+          closeStep: () {
+            final returnFn = iterator.getProperty('return');
+            if (returnFn.isUndefined || returnFn.isNull) {
+              return;
+            }
+            if (!returnFn.isFunction) {
+              throw JSTypeError('iterator.return is not a function');
+            }
+
             final result = _unwrapIteratorStep(
-              _callFunction(nextFn, iterator, []),
+              _callFunction(returnFn, iterator, []),
               allowAsync: allowAsync,
             );
             if (result is! JSObject) {
-              break;
+              throw JSTypeError('Iterator result is not an object');
             }
-            final done = result.getProperty('done');
-            if (done is JSBoolean && done.value) {
-              break;
-            }
-            values.add(result.getProperty('value'));
-          }
-        }
-        return _ForOfIterator(values);
+          },
+        );
       }
     }
 
@@ -3025,6 +3288,11 @@ class BytecodeVM implements JSRuntime {
               pc += 4;
               final name = cpool[atom] as String;
               final newVal = pop();
+              if (frame.func.isStrict && !_hasGlobalBinding(name)) {
+                throw _ThrowSignal(
+                  _makeError('ReferenceError', '$name is not defined'),
+                );
+              }
               _setGlobalBinding(name, newVal);
 
             case Op.checkVar:
@@ -3806,7 +4074,10 @@ class BytecodeVM implements JSRuntime {
               }
 
             case Op.iteratorClose:
-              pop(); // discard iterator
+              final iterator = pop();
+              if (iterator is _ForOfIterator) {
+                iterator.close();
+              }
 
             case Op.forAwaitOfStart:
               final iterable = pop();
@@ -3872,6 +4143,22 @@ class BytecodeVM implements JSRuntime {
               if (!_assignWithBinding(name, newVal)) {
                 _assignNonWithBinding(name, newVal);
               }
+
+            case Op.captureVarRef:
+              final atom = readU32(bc, pc);
+              pc += 4;
+              final name = cpool[atom] as String;
+              push(_VarRefWrapper(_resolveDynamicAssignmentRef(name)));
+
+            case Op.putCapturedVar:
+              final ref = (pop() as _VarRefWrapper).ref;
+              final newVal = pop();
+              ref.value = newVal;
+
+            case Op.setCapturedVar:
+              final ref = (pop() as _VarRefWrapper).ref;
+              final newVal = stack[sp - 1];
+              ref.value = newVal;
 
             case Op.enterWith:
               final obj = pop();
@@ -4382,18 +4669,39 @@ class BytecodeVM implements JSRuntime {
               final keyCount = readU16(bc, pc);
               pc += 2;
               // Pop excluded keys
-              final excludedKeys = <String>{};
+              final excludedKeys = <JSValue>[];
               for (var i = 0; i < keyCount; i++) {
-                excludedKeys.add(_jsToString(pop()));
+                excludedKeys.add(pop());
               }
               // Pop source object
               final srcObj = pop();
               // Create rest object with remaining properties
               final restObj = JSObject();
-              if (srcObj is JSObject) {
-                for (final key in srcObj.getPropertyNames()) {
-                  if (!excludedKeys.contains(key)) {
-                    restObj.setProperty(key, srcObj.getProperty(key));
+              if (!srcObj.isNull && !srcObj.isUndefined) {
+                final sourceObject = srcObj.toObject();
+
+                for (final key in sourceObject.getPropertyNames(
+                  enumerableOnly: true,
+                )) {
+                  if (!_objectRestExcludes(excludedKeys, JSString(key))) {
+                    restObj.setProperty(key, sourceObject.getProperty(key));
+                  }
+                }
+
+                for (final symbol in sourceObject.getSymbolKeys()) {
+                  final symbolKey = symbol.propertyKey;
+                  final descriptor = sourceObject.getOwnPropertyDescriptor(
+                    symbolKey,
+                  );
+                  if (descriptor == null || !descriptor.enumerable) {
+                    continue;
+                  }
+                  if (!_objectRestExcludes(excludedKeys, symbol)) {
+                    restObj.setPropertyWithSymbol(
+                      symbolKey,
+                      sourceObject.getProperty(symbolKey),
+                      symbol,
+                    );
                   }
                 }
               }
@@ -4420,6 +4728,30 @@ class BytecodeVM implements JSRuntime {
         rethrow;
       }
     }
+  }
+
+  bool _objectRestExcludes(List<JSValue> excludedKeys, JSValue candidate) {
+    for (final excluded in excludedKeys) {
+      if (excluded.strictEquals(candidate)) {
+        return true;
+      }
+
+      if (excluded is JSSymbol && candidate is JSSymbol) {
+        if (identical(excluded, candidate) ||
+            excluded.propertyKey == candidate.propertyKey) {
+          return true;
+        }
+      }
+
+      if (excluded is JSSymbol || candidate is JSSymbol) {
+        continue;
+      }
+
+      if (_jsToString(excluded) == _jsToString(candidate)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // ================================================================
@@ -4768,6 +5100,15 @@ class BytecodeVM implements JSRuntime {
 
   void _setProperty(JSValue obj, String name, JSValue value) {
     try {
+      if (obj.isNull || obj.isUndefined) {
+        throw _ThrowSignal(
+          _makeError(
+            'TypeError',
+            'Cannot set properties of ${obj.isNull ? 'null' : 'undefined'} (setting \"$name\")',
+          ),
+        );
+      }
+
       if (obj is JSObject) {
         if (name == '__proto__') {
           obj.setPrototype(value is JSObject ? value : null);
@@ -5294,6 +5635,14 @@ class BytecodeVM implements JSRuntime {
 
     final variable = frame.func.vars[index];
     if (!initializing &&
+        variable.isLexical &&
+        identical(existing, JSTemporalDeadZone.instance)) {
+      throw JSReferenceError(
+        'Cannot access \'${variable.name}\' before initialization',
+      );
+    }
+
+    if (!initializing &&
         variable.isConst &&
         !identical(existing, JSTemporalDeadZone.instance)) {
       throw JSTypeError('Assignment to constant variable: ${variable.name}');
@@ -5569,6 +5918,83 @@ class _VarRefWrapper extends JSValue {
   bool strictEquals(JSValue other) => ref.value.strictEquals(other);
 }
 
+class _ArgumentBindingVarRef extends VarRef {
+  final StackFrame frame;
+  final int index;
+
+  _ArgumentBindingVarRef(this.frame, this.index) : super(frame.args[index]);
+
+  @override
+  JSValue get value => frame.args[index];
+
+  @override
+  set value(JSValue newValue) {
+    frame.args[index] = newValue;
+  }
+
+  @override
+  void initialize(JSValue newValue) {
+    frame.args[index] = newValue;
+  }
+}
+
+class _ObjectPropertyVarRef extends VarRef {
+  final JSObject object;
+  final String name;
+
+  _ObjectPropertyVarRef(this.object, this.name)
+    : super(object.getProperty(name));
+
+  @override
+  JSValue get value => object.getProperty(name);
+
+  @override
+  set value(JSValue newValue) {
+    object.setProperty(name, newValue);
+  }
+
+  @override
+  void initialize(JSValue newValue) {
+    object.setProperty(name, newValue);
+  }
+}
+
+class _GlobalBindingVarRef extends VarRef {
+  final BytecodeVM vm;
+  final String name;
+  final bool isStrict;
+  final bool bindingExists;
+
+  _GlobalBindingVarRef(
+    this.vm,
+    this.name, {
+    required this.isStrict,
+    required this.bindingExists,
+  }) : super(vm._lookupDirectGlobalBinding(name) ?? JSUndefined.instance);
+
+  @override
+  JSValue get value {
+    final resolved = vm._lookupDirectGlobalBinding(name);
+    if (resolved == null) {
+      throw JSReferenceError('$name is not defined');
+    }
+    return resolved;
+  }
+
+  @override
+  set value(JSValue newValue) {
+    if (!bindingExists && isStrict) {
+      throw JSReferenceError('$name is not defined');
+    }
+    vm._writeDirectGlobalBinding(name, newValue);
+  }
+
+  @override
+  void initialize(JSValue newValue) {
+    vm._writeDirectGlobalBinding(name, newValue);
+  }
+}
+
 /// Internal signal for return statements
 class _ReturnSignal {
   final JSValue value;
@@ -5785,13 +6211,86 @@ class _ForInIterator extends JSValue {
 
 /// Iterator for for-of loops
 class _ForOfIterator extends JSValue {
-  final List<JSValue> values;
+  final List<JSValue>? values;
+  final JSValue Function()? _nextStep;
+  final void Function()? _closeStep;
   int _index = 0;
+  bool _done = false;
+  bool _buffered = false;
+  bool _closed = false;
+  JSValue _bufferedValue = JSUndefined.instance;
 
-  _ForOfIterator(this.values);
+  _ForOfIterator.values(List<JSValue> values)
+    : values = values,
+      _nextStep = null,
+      _closeStep = null;
 
-  bool get hasNext => _index < values.length;
-  JSValue next() => values[_index++];
+  _ForOfIterator.iterator({
+    required JSValue Function() nextStep,
+    void Function()? closeStep,
+  }) : values = null,
+       _nextStep = nextStep,
+       _closeStep = closeStep;
+
+  bool get hasNext {
+    if (values != null) {
+      return _index < values!.length;
+    }
+
+    _fillBuffer();
+    return !_done;
+  }
+
+  JSValue next() {
+    if (values != null) {
+      return values![_index++];
+    }
+
+    _fillBuffer();
+    if (_done) {
+      return JSUndefined.instance;
+    }
+
+    _buffered = false;
+    return _bufferedValue;
+  }
+
+  void close() {
+    if (_closed) {
+      return;
+    }
+    _closed = true;
+
+    if (values != null || _done) {
+      return;
+    }
+
+    _closeStep?.call();
+    _done = true;
+    _buffered = false;
+    _bufferedValue = JSUndefined.instance;
+  }
+
+  void _fillBuffer() {
+    if (values != null || _done || _buffered) {
+      return;
+    }
+
+    final result = _nextStep!.call();
+    if (result is! JSObject) {
+      throw JSTypeError('Iterator result is not an object');
+    }
+
+    final done = result.getProperty('done').toBoolean();
+    if (done) {
+      _done = true;
+      _bufferedValue = JSUndefined.instance;
+      return;
+    }
+
+    _bufferedValue = result.getProperty('value');
+    _buffered = true;
+  }
 
   @override
   JSValueType get type => JSValueType.object;

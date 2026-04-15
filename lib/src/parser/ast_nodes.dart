@@ -399,9 +399,11 @@ class MemberExpression extends Expression {
 /// Array expression ([1, 2, 3])
 class ArrayExpression extends Expression {
   final List<Expression?> elements; // null for empty elements
+  final bool hasTrailingComma;
 
   const ArrayExpression({
     required this.elements,
+    this.hasTrailingComma = false,
     required super.line,
     required super.column,
   });
@@ -455,9 +457,11 @@ class ObjectProperty {
 /// Object literal expression ({a: 1, b: 2, ...other})
 class ObjectExpression extends Expression {
   final List<dynamic> properties; // ObjectProperty or SpreadElement
+  final bool hasTrailingComma;
 
   const ObjectExpression({
     required this.properties,
+    this.hasTrailingComma = false,
     required super.line,
     required super.column,
   });
@@ -1542,12 +1546,16 @@ class ObjectPattern extends Pattern {
 /// Property in an object pattern
 class ObjectPatternProperty extends ASTNode {
   final String key; // Original key
+  final Expression? keyExpression; // Present for computed property names
+  final bool computed; // true for {[expr]: value}
   final Pattern value; // Destination pattern
   final bool shorthand; // true for {x} instead of {x: x}
   final Expression? defaultValue; // Default value
 
   const ObjectPatternProperty({
     required this.key,
+    this.keyExpression,
+    this.computed = false,
     required this.value,
     this.shorthand = false,
     this.defaultValue,
@@ -1561,7 +1569,7 @@ class ObjectPatternProperty extends ASTNode {
 
   @override
   String toString() =>
-      'ObjectPatternProperty($key: $value${shorthand ? ' [shorthand]' : ''}${defaultValue != null ? ' = $defaultValue' : ''})';
+      'ObjectPatternProperty(${computed ? '[${keyExpression ?? key}]' : key}: $value${shorthand ? ' [shorthand]' : ''}${defaultValue != null ? ' = $defaultValue' : ''})';
 }
 
 /// Assignment with destructuring ([a, b] = arr or {x, y} = obj)

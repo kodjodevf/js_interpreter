@@ -48,6 +48,28 @@ void main() {
         expect(result.toNumber(), equals(5));
       });
 
+      test('should support object rest from string primitives', () {
+        final result = interpreter.eval('''
+          let rest;
+          ({...rest} = 'foo');
+          rest[0] + rest[1] + rest[2];
+        ''');
+
+        expect(result.toString(), equals('foo'));
+      });
+
+      test('should skip non-enumerable properties in object rest', () {
+        final result = interpreter.eval('''
+          let rest;
+          const obj = {a: 1, b: 2};
+          Object.defineProperty(obj, 'hidden', { value: 3, enumerable: false });
+          ({...rest} = obj);
+          Object.getOwnPropertyDescriptor(rest, 'hidden') === undefined && rest.a + rest.b;
+        ''');
+
+        expect(result.toNumber(), equals(3));
+      });
+
       test('should support nested object destructuring', () {
         const code = '''
           const data = {user: {name: 'Alice', age: 30}};
@@ -173,6 +195,50 @@ void main() {
       expect(result.toNumber(), equals(30));
     });
 
+    test('should evaluate computed property names in object destructuring', () {
+      final result = interpreter.eval('''
+        let value;
+        const key = 'answer';
+        ({ [key]: value } = { answer: 42 });
+        value;
+      ''');
+
+      expect(result.toNumber(), equals(42));
+    });
+
+    test('should read numeric property keys from array sources', () {
+      final result = interpreter.eval('''
+        let value;
+        ({ 1: value } = [1, 2, 3]);
+        value;
+      ''');
+
+      expect(result.toNumber(), equals(2));
+    });
+
+    test('should support nested object patterns inside array rest', () {
+      final result = interpreter.eval('''
+        let value;
+        [...{ 1: value }] = [1, 2, 3];
+        value;
+      ''');
+
+      expect(result.toNumber(), equals(2));
+    });
+
+    test(
+      'should forward computed property name errors in object destructuring',
+      () {
+        expect(
+          () => interpreter.eval('''
+          let a, x;
+          0, ({ [a.b]: x } = {});
+        '''),
+          throwsA(isA<JSException>()),
+        );
+      },
+    );
+
     test('should support array destructuring assignment', () {
       const code = '''
         let a, b;
@@ -181,6 +247,54 @@ void main() {
       ''';
       final result = interpreter.eval(code);
       expect(result.toNumber(), equals(3));
+    });
+
+    test('should exhaust iterables for array rest assignment', () {
+      final result =
+          interpreter.eval('''
+        let x;
+        let count = 0;
+          function* values() {
+            count += 1;
+            yield 1;
+            count += 1;
+            yield 2;
+            count += 1;
+            yield 3;
+          }
+
+          [...x] = values();
+        ({ count, size: x.length, last: x[2] });
+      ''')
+              as JSObject;
+
+      expect(result.getProperty('count').toNumber(), equals(3));
+      expect(result.getProperty('size').toNumber(), equals(3));
+      expect(result.getProperty('last').toNumber(), equals(3));
+    });
+
+    test('should close iterators for empty array assignment patterns', () {
+      final result = interpreter.eval('''
+        let closed = 0;
+        const iterable = {
+          [Symbol.iterator]() {
+            return {
+              next() {
+                return { value: 1, done: false };
+              },
+              return() {
+                closed += 1;
+                return {};
+              }
+            };
+          }
+        };
+
+        [] = iterable;
+        closed;
+      ''');
+
+      expect(result.toNumber(), equals(1));
     });
 
     test('should support swapping variables', () {
@@ -192,6 +306,131 @@ void main() {
       final result = interpreter.eval(code);
       expect(result.toNumber(), equals(21));
     });
+
+    test(
+      'should reject arguments and eval in strict destructuring assignment',
+      () {
+        expect(
+          () => interpreter.eval('''
+          "use strict";
+          [arguments] = [];
+        '''),
+          throwsA(isA<JSSyntaxError>()),
+        );
+
+        expect(
+          () => interpreter.eval('''
+          "use strict";
+          ({ eval } = {});
+        '''),
+          throwsA(isA<JSSyntaxError>()),
+        );
+      },
+    );
+
+    test(
+      'should reject invalid rest placement in destructuring assignment',
+      () {
+        expect(
+          () => interpreter.eval('''
+          [...rest,] = [];
+        '''),
+          throwsA(isA<JSSyntaxError>()),
+        );
+
+        expect(
+          () => interpreter.eval('''
+          ({...rest, value} = {});
+        '''),
+          throwsA(isA<JSSyntaxError>()),
+        );
+      },
+    );
+
+    test(
+      'should reject escaped reserved words in destructuring assignment shorthand',
+      () {
+        expect(
+          () => interpreter.eval(r'''
+          ({ bre\u0061k } = { break: 1 });
+        '''),
+          throwsA(isA<JSSyntaxError>()),
+        );
+      },
+    );
+
+    test('should respect TDZ for destructuring assignment targets', () {
+      expect(
+        () => interpreter.eval('''
+          [x] = [];
+          let x;
+        '''),
+        throwsA(isA<JSReferenceError>()),
+      );
+
+      expect(
+        () => interpreter.eval('''
+          [...x] = [];
+          let x;
+        '''),
+        throwsA(isA<JSReferenceError>()),
+      );
+
+      expect(
+        () => interpreter.eval('''
+          ({ a: x } = {});
+          let x;
+        '''),
+        throwsA(isA<JSReferenceError>()),
+      );
+
+      expect(
+        () => interpreter.eval('''
+          (function() {
+            ({ a: x } = {});
+          })();
+          let x;
+        '''),
+        throwsA(anyOf(isA<JSReferenceError>(), isA<JSException>())),
+      );
+    });
+
+    test(
+      'should infer names for anonymous defaults in destructuring assignment',
+      () {
+        final result =
+            interpreter.eval('''
+          let fn, cls, xCls2;
+          [fn = function() {}, cls = class {}, xCls2 = class { static name() {} }] = [];
+
+          const fnDesc = Object.getOwnPropertyDescriptor(fn, 'name');
+          const clsDesc = Object.getOwnPropertyDescriptor(cls, 'name');
+
+          ({
+            fnName: fn.name,
+            fnWritable: fnDesc.writable,
+            fnEnumerable: fnDesc.enumerable,
+            fnConfigurable: fnDesc.configurable,
+            clsName: cls.name,
+            clsWritable: clsDesc.writable,
+            clsEnumerable: clsDesc.enumerable,
+            clsConfigurable: clsDesc.configurable,
+            xCls2Named: xCls2.name === 'xCls2'
+          });
+        ''')
+                as JSObject;
+
+        expect(result.getProperty('fnName').toString(), equals('fn'));
+        expect(result.getProperty('fnWritable').toBoolean(), isFalse);
+        expect(result.getProperty('fnEnumerable').toBoolean(), isFalse);
+        expect(result.getProperty('fnConfigurable').toBoolean(), isTrue);
+        expect(result.getProperty('clsName').toString(), equals('cls'));
+        expect(result.getProperty('clsWritable').toBoolean(), isFalse);
+        expect(result.getProperty('clsEnumerable').toBoolean(), isFalse);
+        expect(result.getProperty('clsConfigurable').toBoolean(), isTrue);
+        expect(result.getProperty('xCls2Named').toBoolean(), isFalse);
+      },
+    );
   });
 
   group('ES6 Destructuring - For-of Loops', () {

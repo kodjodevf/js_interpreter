@@ -2703,14 +2703,15 @@ class RuntimeBootstrap {
     final globalThis = JSObject();
     _define(globals, 'globalThis', globalThis);
     _define(globals, 'global', globalThis);
+    const readonlyGlobals = {'NaN', 'Infinity', 'undefined'};
     for (final entry in globals.entries.toList()) {
       globalThis.defineProperty(
         entry.key,
         PropertyDescriptor(
           value: entry.value,
-          writable: true,
+          writable: !readonlyGlobals.contains(entry.key),
           enumerable: false,
-          configurable: true,
+          configurable: !readonlyGlobals.contains(entry.key),
         ),
       );
     }

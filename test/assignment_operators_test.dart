@@ -194,6 +194,52 @@ void main() {
         expect(result.toNumber(), equals(15));
       });
 
+      test(
+        'simple assignment infers names for anonymous functions and classes',
+        () {
+          final result =
+              interpreter.eval('''
+          var fn;
+          var cls;
+          var xCls2;
+
+          fn = function() {};
+          cls = class {};
+          xCls2 = class { static name() {} };
+
+          const fnDesc = Object.getOwnPropertyDescriptor(fn, 'name');
+          const clsDesc = Object.getOwnPropertyDescriptor(cls, 'name');
+
+          [
+            fn.name,
+            fnDesc.value,
+            fnDesc.writable,
+            fnDesc.enumerable,
+            fnDesc.configurable,
+            cls.name,
+            clsDesc.value,
+            clsDesc.writable,
+            clsDesc.enumerable,
+            clsDesc.configurable,
+            xCls2.name === 'xCls2'
+          ];
+          ''')
+                  as JSArray;
+
+          expect(result.elements[0].toString(), equals('fn'));
+          expect(result.elements[1].toString(), equals('fn'));
+          expect(result.elements[2].toBoolean(), isFalse);
+          expect(result.elements[3].toBoolean(), isFalse);
+          expect(result.elements[4].toBoolean(), isTrue);
+          expect(result.elements[5].toString(), equals('cls'));
+          expect(result.elements[6].toString(), equals('cls'));
+          expect(result.elements[7].toBoolean(), isFalse);
+          expect(result.elements[8].toBoolean(), isFalse);
+          expect(result.elements[9].toBoolean(), isTrue);
+          expect(result.elements[10].toBoolean(), isFalse);
+        },
+      );
+
       test('assignment in expression context', () {
         final result = interpreter.eval('''
           var a = 5;
@@ -203,6 +249,127 @@ void main() {
         ''');
         expect(result.toNumber(), equals(23));
       });
+
+      test('with assignment uses the initially resolved object binding', () {
+        final result =
+            interpreter.eval('''
+          var outerScope = {x: 0};
+          var innerScope = {x: 1};
+
+          with (outerScope) {
+            with (innerScope) {
+              x = (delete innerScope.x, 2);
+            }
+          }
+
+          [innerScope.x, outerScope.x];
+        ''')
+                as JSArray;
+
+        expect(result.elements[0].toNumber(), equals(2));
+        expect(result.elements[1].toNumber(), equals(0));
+      });
+
+      test(
+        'with fallback assignment keeps the original declarative binding',
+        () {
+          final result =
+              interpreter.eval('''
+          (function() {
+            var x = 0;
+            var scope = {};
+
+            with (scope) {
+              x = (scope.x = 2, 1);
+            }
+
+            return [scope.x, x];
+          })();
+        ''')
+                  as JSArray;
+
+          expect(result.elements[0].toNumber(), equals(2));
+          expect(result.elements[1].toNumber(), equals(1));
+        },
+      );
+
+      test('member assignment on nullish base throws after rhs evaluation', () {
+        expect(
+          () => interpreter.eval('''
+            var count = 0;
+            var base = null;
+            base.prop = count += 1;
+          '''),
+          throwsA(isA<JSException>()),
+        );
+
+        final result = interpreter.eval('''
+          var count = 0;
+          var base = undefined;
+          try {
+            base.prop = count += 1;
+          } catch (e) {}
+          count;
+        ''');
+        expect(result.toNumber(), equals(1));
+      });
+
+      test('strict assignment rechecks deleted global bindings', () {
+        expect(
+          () => interpreter.eval('''
+            Object.defineProperty(this, 'x', {
+              configurable: true,
+              value: 1
+            });
+
+            (function() {
+              'use strict';
+              x = (delete globalThis.x, 2);
+            })();
+          '''),
+          throwsA(isA<JSException>()),
+        );
+      });
+
+      test('strict assignment to readonly globals throws', () {
+        expect(
+          () => interpreter.eval('''
+            "use strict";
+            globalThis.Infinity = 42;
+          '''),
+          throwsA(isA<JSException>()),
+        );
+
+        expect(
+          () => interpreter.eval('''
+            "use strict";
+            globalThis.undefined = 42;
+          '''),
+          throwsA(isA<JSException>()),
+        );
+      });
+
+      test(
+        'strict assignment through with uses the initially resolved binding',
+        () {
+          final result =
+              interpreter.eval('''
+            var scope = { x: 1 };
+            with (scope) {
+              (function() {
+                'use strict';
+                x = (delete scope.x, 2);
+              })();
+            }
+
+            [scope.x, typeof x];
+          ''')
+                  as JSArray;
+
+          expect(result.elements[0].toNumber(), equals(2));
+          expect(result.elements[1].toString(), equals('undefined'));
+        },
+      );
 
       test('multiple variables with same operation', () {
         final result = interpreter.eval('''

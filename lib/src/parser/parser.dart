@@ -2770,6 +2770,7 @@ class JSParser {
       // Check if it's a destructuring assignment
       if (operator.lexeme == '=' && _isDestructuringPattern(expr)) {
         final pattern = _expressionToPattern(expr);
+        _validateDestructuringAssignmentPattern(pattern, operator);
         return DestructuringAssignmentExpression(
           left: pattern,
           right: right,
@@ -2843,11 +2844,68 @@ class JSParser {
     }
   }
 
+  void _validateDestructuringAssignmentPattern(Pattern pattern, Token token) {
+    switch (pattern) {
+      case IdentifierPattern(:final name):
+        if (_alwaysReservedIdentifiers.contains(name)) {
+          throw ParseError('Unexpected reserved word', token);
+        }
+        if (_inGeneratorContext && name == 'yield') {
+          throw ParseError('Unexpected reserved word', token);
+        }
+        if (_inAsyncContext && name == 'await') {
+          throw ParseError('Unexpected reserved word', token);
+        }
+        if (_isInStrictMode() &&
+            (_strictModeReservedWords.contains(name) ||
+                name == 'let' ||
+                name == 'static' ||
+                name == 'yield')) {
+          throw ParseError('Unexpected strict mode reserved word', token);
+        }
+        if (_isInStrictMode() && (name == 'arguments' || name == 'eval')) {
+          throw ParseError(
+            'SyntaxError: Unexpected eval or arguments in strict mode',
+            token,
+          );
+        }
+      case AssignmentPattern(:final left):
+        _validateDestructuringAssignmentPattern(left, token);
+      case ArrayPattern(:final elements, :final restElement):
+        for (final element in elements) {
+          if (element != null) {
+            _validateDestructuringAssignmentPattern(element, token);
+          }
+        }
+        if (restElement != null) {
+          _validateDestructuringAssignmentPattern(restElement, token);
+        }
+      case ObjectPattern(:final properties, :final restElement):
+        for (final property in properties) {
+          _validateDestructuringAssignmentPattern(property.value, token);
+        }
+        if (restElement != null) {
+          _validateDestructuringAssignmentPattern(restElement, token);
+        }
+      default:
+        break;
+    }
+  }
+
   /// Convert an ArrayExpression en ArrayPattern
   ArrayPattern _arrayExpressionToPattern(ArrayExpression expr) {
     final elements = <Pattern?>[];
     Pattern? restElement;
     bool hasRestElement = false;
+
+    if (expr.hasTrailingComma &&
+        expr.elements.isNotEmpty &&
+        expr.elements.last is SpreadElement) {
+      throw ParseError(
+        'Rest element must be last element in destructuring pattern',
+        _peek(),
+      );
+    }
 
     for (int i = 0; i < expr.elements.length; i++) {
       final element = expr.elements[i];
@@ -2986,8 +3044,15 @@ class JSParser {
     final properties = <ObjectPatternProperty>[];
     Pattern? restElement;
 
-    for (final prop in expr.properties) {
+    for (var i = 0; i < expr.properties.length; i++) {
+      final prop = expr.properties[i];
       if (prop is SpreadElement) {
+        if (i != expr.properties.length - 1 || expr.hasTrailingComma) {
+          throw ParseError(
+            'Rest element must be last element in destructuring pattern',
+            _peek(),
+          );
+        }
         // Rest pattern: ...rest or ...obj.prop or ...obj[expr], etc.
         if (prop.argument is IdentifierExpression) {
           final identifier = prop.argument as IdentifierExpression;
@@ -3021,25 +3086,26 @@ class JSParser {
       }
 
       String key;
+      Expression? keyExpression;
+      final isComputed = prop.computed;
       Pattern value;
       bool shorthand = false;
 
       // Extract the key
-      if (prop.key is IdentifierExpression) {
+      if (!isComputed && prop.key is IdentifierExpression) {
         key = (prop.key as IdentifierExpression).name;
-      } else if (prop.key is LiteralExpression) {
+      } else if (!isComputed && prop.key is LiteralExpression) {
         final literal = prop.key as LiteralExpression;
         if (literal.type == 'string' ||
             literal.type == 'number' ||
             literal.type == 'bigint') {
-          key = literal.value.toString();
+          key = _destructuringPropertyKeyFromLiteral(literal);
         } else {
           throw ParseError('Invalid property key in destructuring', _peek());
         }
       } else {
-        // Computed property keys: {[expr]: pattern}
-        // Use a placeholder since the key will be evaluated at runtime
         key = '[computed]';
+        keyExpression = prop.key;
       }
 
       // Extraire la valeur/pattern
@@ -3094,12 +3160,15 @@ class JSParser {
           properties.add(
             ObjectPatternProperty(
               key: key,
+              keyExpression: keyExpression,
+              computed: isComputed,
               value: value,
               shorthand:
+                  !isComputed &&
                   key ==
-                  (assignment.left is IdentifierExpression
-                      ? (assignment.left as IdentifierExpression).name
-                      : ''),
+                      (assignment.left is IdentifierExpression
+                          ? (assignment.left as IdentifierExpression).name
+                          : ''),
               defaultValue: assignment.right,
               line: expr.line,
               column: expr.column,
@@ -3120,6 +3189,8 @@ class JSParser {
         properties.add(
           ObjectPatternProperty(
             key: key,
+            keyExpression: keyExpression,
+            computed: isComputed,
             value: value,
             shorthand: false,
             defaultValue: assignment.right,
@@ -3144,6 +3215,8 @@ class JSParser {
       properties.add(
         ObjectPatternProperty(
           key: key,
+          keyExpression: keyExpression,
+          computed: isComputed,
           value: value,
           shorthand: shorthand,
           line: expr.line,
@@ -4400,11 +4473,13 @@ class JSParser {
   ArrayExpression _parseArrayExpression() {
     final start = _previous(); // The token '[' has already been consumed
     final elements = <Expression?>[];
+    var hasTrailingComma = false;
 
     while (!_check(TokenType.rightBracket)) {
       if (_match([TokenType.comma])) {
         // Empty element: we add null to represent the hole
         elements.add(null);
+        hasTrailingComma = _check(TokenType.rightBracket);
       } else if (_match([TokenType.spread])) {
         // Spread element: ...expression
         final spreadStart = _previous();
@@ -4419,6 +4494,7 @@ class JSParser {
         // After a spread, we must have a comma or the end
         if (!_check(TokenType.rightBracket)) {
           _consume(TokenType.comma, 'Expected \',\' after spread element');
+          hasTrailingComma = _check(TokenType.rightBracket);
         }
       } else {
         // Normal expression
@@ -4426,6 +4502,7 @@ class JSParser {
         // After an expression, we must have a comma or the end
         if (!_check(TokenType.rightBracket)) {
           _consume(TokenType.comma, 'Expected \',\' after array element');
+          hasTrailingComma = _check(TokenType.rightBracket);
         }
       }
     }
@@ -4434,6 +4511,7 @@ class JSParser {
 
     return ArrayExpression(
       elements: elements,
+      hasTrailingComma: hasTrailingComma,
       line: start.line,
       column: start.column,
     );
@@ -4443,6 +4521,7 @@ class JSParser {
   ObjectExpression _parseObjectExpression() {
     final start = _previous(); // The token '{' has already been consumed
     final properties = <dynamic>[]; // ObjectProperty or SpreadElement
+    var hasTrailingComma = false;
 
     if (!_check(TokenType.rightBrace)) {
       do {
@@ -5294,14 +5373,20 @@ class JSParser {
         } else {
           throw ParseError('Expected property name', _peek());
         }
-      } while (_match([TokenType.comma]) &&
-          !_check(TokenType.rightBrace)); // Support for trailing comma
+      } while (() {
+        final matchedComma = _match([TokenType.comma]);
+        if (matchedComma) {
+          hasTrailingComma = _check(TokenType.rightBrace);
+        }
+        return matchedComma && !_check(TokenType.rightBrace);
+      }()); // Support for trailing comma
     }
 
     _consume(TokenType.rightBrace, 'Expected \'}\' after object properties');
 
     return ObjectExpression(
       properties: properties,
+      hasTrailingComma: hasTrailingComma,
       line: start.line,
       column: start.column,
     );
@@ -5809,6 +5894,50 @@ class JSParser {
 
   /// Check if a token is a reserved word that cannot be an IdentifierReference
   bool _isReservedWordToken(Token token) {
+    if (token.hasUnicodeEscape && token.type == TokenType.identifier) {
+      final reservedWords = {
+        'break',
+        'case',
+        'catch',
+        'continue',
+        'debugger',
+        'default',
+        'delete',
+        'do',
+        'else',
+        'finally',
+        'for',
+        'function',
+        'if',
+        'in',
+        'instanceof',
+        'new',
+        'return',
+        'switch',
+        'this',
+        'throw',
+        'try',
+        'typeof',
+        'var',
+        'void',
+        'while',
+        'with',
+        'class',
+        'const',
+        'enum',
+        'export',
+        'extends',
+        'import',
+        'super',
+        'true',
+        'false',
+        'null',
+      };
+      if (reservedWords.contains(token.lexeme)) {
+        return true;
+      }
+    }
+
     switch (token.type) {
       case TokenType.keywordThis:
       case TokenType.keywordSuper:
@@ -6512,25 +6641,48 @@ class JSParser {
     );
   }
 
+  String _destructuringPropertyKeyFromLiteral(LiteralExpression literal) {
+    if (literal.type == 'string') {
+      return literal.value as String;
+    }
+    if (literal.type == 'bigint') {
+      return (literal.value as BigInt).toString();
+    }
+    if (literal.type == 'number') {
+      final value = literal.value;
+      if (value is int) {
+        return value.toString();
+      }
+      if (value is double) {
+        return value.truncateToDouble() == value
+            ? value.toInt().toString()
+            : value.toString();
+      }
+    }
+    throw ParseError('Invalid property key in destructuring', _peek());
+  }
+
   /// Convert an ObjectExpression to ObjectPattern for destructuring
   ObjectPattern _convertObjectExpressionToPattern(ObjectExpression expr) {
     final properties = <ObjectPatternProperty>[];
     Pattern? restElement;
 
-    for (final prop in expr.properties) {
+    for (var i = 0; i < expr.properties.length; i++) {
+      final prop = expr.properties[i];
       if (prop is ObjectProperty) {
         final key = prop.key;
         final value = prop.value;
 
         String keyName;
-        if (key is IdentifierExpression) {
+        Expression? keyExpression;
+        final isComputed = prop.computed;
+        if (!isComputed && key is IdentifierExpression) {
           keyName = key.name;
-        } else if (key is LiteralExpression) {
-          keyName = key.value.toString();
-        } else if (key is CallExpression || key is MemberExpression) {
-          // Computed property keys: {[expr]: pattern}
-          // Use a placeholder since the key will be evaluated at runtime
+        } else if (!isComputed && key is LiteralExpression) {
+          keyName = _destructuringPropertyKeyFromLiteral(key);
+        } else if (isComputed) {
           keyName = '[computed]';
+          keyExpression = key;
         } else {
           throw ParseError('Invalid property key in destructuring', _peek());
         }
@@ -6625,6 +6777,8 @@ class JSParser {
         properties.add(
           ObjectPatternProperty(
             key: keyName,
+            keyExpression: keyExpression,
+            computed: isComputed,
             value: valuePattern,
             shorthand: isShorthand,
             line: prop.key.line,
@@ -6632,6 +6786,12 @@ class JSParser {
           ),
         );
       } else if (prop is SpreadElement) {
+        if (i != expr.properties.length - 1 || expr.hasTrailingComma) {
+          throw ParseError(
+            'Rest element must be last element in destructuring pattern',
+            _peek(),
+          );
+        }
         // Rest element: {...rest}
         if (prop.argument is IdentifierExpression) {
           restElement = IdentifierPattern(

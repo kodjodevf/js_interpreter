@@ -404,6 +404,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
   bool _superVarIsHomeObject = false;
 
   int _superHomeObjectCounter = 0;
+  int _objectPatternTempCounter = 0;
 
   /// Extract a property name from an expression that can be IdentifierExpression
   /// or PrivateIdentifierExpression. Used for member access and class keys.
@@ -433,6 +434,90 @@ class BytecodeCompiler implements ASTVisitor<void> {
 
   bool get _isInStaticMethod =>
       _staticMethodStack.isNotEmpty && _staticMethodStack.last;
+
+  bool _isAnonymousFunctionDefinition(Expression expr) {
+    if (expr is ArrowFunctionExpression ||
+        expr is AsyncArrowFunctionExpression) {
+      return true;
+    }
+    if (expr is FunctionExpression) {
+      return expr.id == null;
+    }
+    if (expr is ClassExpression) {
+      return expr.id == null;
+    }
+    return false;
+  }
+
+  bool _classDefinesOwnNameProperty(ClassExpression expr) {
+    for (final member in expr.body.members) {
+      if (member is! MethodDefinition && member is! FieldDeclaration) {
+        continue;
+      }
+
+      final isStatic = member is MethodDefinition
+          ? member.isStatic
+          : (member as FieldDeclaration).isStatic;
+      if (!isStatic) {
+        continue;
+      }
+
+      final key = member is MethodDefinition
+          ? member.key
+          : (member as FieldDeclaration).key;
+      final computed = member is MethodDefinition ? member.computed : false;
+
+      if (!computed && key is IdentifierExpression && key.name == 'name') {
+        return true;
+      }
+      if (!computed && key is LiteralExpression && key.value == 'name') {
+        return true;
+      }
+      if (computed && key is LiteralExpression && key.value == 'name') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  String? _destructuringTargetName(Pattern pattern) {
+    if (pattern is IdentifierPattern) {
+      return pattern.name;
+    }
+    if (pattern is ExpressionPattern &&
+        pattern.expression is IdentifierExpression) {
+      return (pattern.expression as IdentifierExpression).name;
+    }
+    return null;
+  }
+
+  void _compileWithInferredFunctionName(
+    String? name,
+    Expression expr,
+    void Function() compile,
+  ) {
+    final suppressClassInference =
+        expr is ClassExpression && _classDefinesOwnNameProperty(expr);
+    final shouldInfer =
+        name != null &&
+        name.isNotEmpty &&
+        _isAnonymousFunctionDefinition(expr) &&
+        !suppressClassInference;
+    final previousName = _pendingFunctionName;
+    final previousSourceText = _pendingFunctionSourceText;
+
+    if (shouldInfer) {
+      _pendingFunctionName = name;
+      _pendingFunctionSourceText = expr.toString();
+    }
+
+    try {
+      compile();
+    } finally {
+      _pendingFunctionName = previousName;
+      _pendingFunctionSourceText = previousSourceText;
+    }
+  }
 
   String? _resolveMemberPropertyName(Expression expr) {
     if (expr is IdentifierExpression) {
@@ -1197,8 +1282,10 @@ class BytecodeCompiler implements ASTVisitor<void> {
     final res = _ctx.resolveVar(name);
     if (_shouldUseWithLookup(res)) {
       final atom = _ctx.addConstant(name);
-      _bc.emitU32(Op.withPutVar, atom);
-      _ctx.adjustStack(-1);
+      _bc.emitU32(Op.captureVarRef, atom);
+      _ctx.adjustStack(1);
+      _bc.emit(Op.putCapturedVar);
+      _ctx.adjustStack(-2);
       return;
     }
     switch (res.kind) {
@@ -1224,10 +1311,10 @@ class BytecodeCompiler implements ASTVisitor<void> {
     _bc.setLine(line, column);
     final res = _ctx.resolveVar(name);
     if (_shouldUseWithLookup(res)) {
-      _bc.emit(Op.dup);
-      _ctx.adjustStack(1);
       final atom = _ctx.addConstant(name);
-      _bc.emitU32(Op.withPutVar, atom);
+      _bc.emitU32(Op.captureVarRef, atom);
+      _ctx.adjustStack(1);
+      _bc.emit(Op.setCapturedVar);
       _ctx.adjustStack(-1);
       return;
     }
@@ -2034,16 +2121,34 @@ class BytecodeCompiler implements ASTVisitor<void> {
       if (node.left is IdentifierExpression) {
         final left = node.left as IdentifierExpression;
         final name = left.name;
+        final res = _ctx.resolveVar(name);
         // In strict mode, check that the global exists before evaluating the RHS
         if (_ctx.isStrict) {
-          final res = _ctx.resolveVar(name);
           if (res.kind == _VarKind.global) {
             final atom = _ctx.addConstant(name);
             _bc.setLine(left.line, left.column);
             _bc.emitU32(Op.checkVarStrict, atom);
           }
         }
-        node.right.accept(this);
+
+        if (_shouldUseWithLookup(res)) {
+          final atom = _ctx.addConstant(name);
+          _bc.emitU32(Op.captureVarRef, atom);
+          _ctx.adjustStack(1);
+
+          _compileWithInferredFunctionName(name, node.right, () {
+            node.right.accept(this);
+          });
+          _bc.emit(Op.swap);
+          _bc.emit(Op.setCapturedVar);
+          _ctx.adjustStack(-1);
+          _inTailPosition = savedTail;
+          return;
+        }
+
+        _compileWithInferredFunctionName(name, node.right, () {
+          node.right.accept(this);
+        });
         _emitSetVar(name, left.line, left.column);
       } else if (node.left is MemberExpression) {
         _compileMemberAssign(node.left as MemberExpression, node.right);
@@ -4095,18 +4200,10 @@ class BytecodeCompiler implements ASTVisitor<void> {
     );
 
     if (decl.init != null) {
-      // ES6 name inference: only set for direct function/arrow expressions
       final init = decl.init!;
-      if (init is FunctionExpression ||
-          init is ArrowFunctionExpression ||
-          init is AsyncFunctionExpression ||
-          init is AsyncArrowFunctionExpression) {
-        _pendingFunctionName = name;
-        _pendingFunctionSourceText = init.toString();
-      }
-      init.accept(this);
-      _pendingFunctionName = null;
-      _pendingFunctionSourceText = null;
+      _compileWithInferredFunctionName(name, init, () {
+        init.accept(this);
+      });
       _bc.emitU16(Op.putLoc, slot);
       _ctx.adjustStack(-1);
     } else if (kind != 'var') {
@@ -4241,6 +4338,9 @@ class BytecodeCompiler implements ASTVisitor<void> {
   @override
   void visitClassExpression(ClassExpression node) {
     _bc.setLine(node.line);
+    final className = node.id?.name ?? _pendingFunctionName;
+    _pendingFunctionName = null;
+    _pendingFunctionSourceText = null;
     int? classBindingSlot;
     if (node.id != null) {
       _ctx.pushScope();
@@ -4249,8 +4349,15 @@ class BytecodeCompiler implements ASTVisitor<void> {
         scopeLevel: _ctx.scope.depth,
       );
     }
+    final effectiveId = className == null
+        ? null
+        : IdentifierExpression(
+            name: className,
+            line: node.line,
+            column: node.column,
+          );
     _compileClassBody(
-      id: node.id,
+      id: effectiveId,
       superClass: node.superClass,
       body: node.body,
       line: node.line,
@@ -5037,19 +5144,24 @@ class BytecodeCompiler implements ASTVisitor<void> {
 
   void _predeclareClassNames(List<Statement> statements) {
     for (final stmt in statements) {
-      if (stmt is ClassDeclaration && stmt.id != null) {
+      final effectiveStmt = stmt is ExportDeclarationStatement
+          ? stmt.declaration
+          : stmt;
+
+      if (effectiveStmt is ClassDeclaration && effectiveStmt.id != null) {
         _ctx.declareLocal(
-          stmt.id!.name,
+          effectiveStmt.id!.name,
           scope: VarScope.blockScope,
           isLexical: true,
           scopeLevel: _ctx.scope.depth,
         );
-      } else if (stmt is VariableDeclaration && stmt.kind != 'var') {
+      } else if (effectiveStmt is VariableDeclaration &&
+          effectiveStmt.kind != 'var') {
         final isConst =
-            stmt.kind == 'const' ||
-            stmt.kind == 'using' ||
-            stmt.kind == 'await-using';
-        for (final decl in stmt.declarations) {
+            effectiveStmt.kind == 'const' ||
+            effectiveStmt.kind == 'using' ||
+            effectiveStmt.kind == 'await-using';
+        for (final decl in effectiveStmt.declarations) {
           _predeclareLexicalPattern(decl.id, isConst: isConst);
         }
       }
@@ -5113,59 +5225,69 @@ class BytecodeCompiler implements ASTVisitor<void> {
   }
 
   void _collectVarNames(Statement stmt) {
-    if (stmt is VariableDeclaration && stmt.kind == 'var') {
-      for (final decl in stmt.declarations) {
+    final effectiveStmt = stmt is ExportDeclarationStatement
+        ? stmt.declaration
+        : stmt;
+
+    if (effectiveStmt is VariableDeclaration && effectiveStmt.kind == 'var') {
+      for (final decl in effectiveStmt.declarations) {
         _collectVarNamesFromPattern(decl.id);
       }
-    } else if (stmt is BlockStatement) {
-      for (final s in stmt.body) {
+    } else if (effectiveStmt is BlockStatement) {
+      for (final s in effectiveStmt.body) {
         _collectVarNames(s);
       }
-    } else if (stmt is IfStatement) {
-      _collectVarNames(stmt.consequent);
-      if (stmt.alternate != null) _collectVarNames(stmt.alternate!);
-    } else if (stmt is WhileStatement) {
-      _collectVarNames(stmt.body);
-    } else if (stmt is DoWhileStatement) {
-      _collectVarNames(stmt.body);
-    } else if (stmt is ForStatement) {
-      if (stmt.init is VariableDeclaration) {
-        final decl = stmt.init as VariableDeclaration;
+    } else if (effectiveStmt is IfStatement) {
+      _collectVarNames(effectiveStmt.consequent);
+      if (effectiveStmt.alternate != null) {
+        _collectVarNames(effectiveStmt.alternate!);
+      }
+    } else if (effectiveStmt is WhileStatement) {
+      _collectVarNames(effectiveStmt.body);
+    } else if (effectiveStmt is DoWhileStatement) {
+      _collectVarNames(effectiveStmt.body);
+    } else if (effectiveStmt is ForStatement) {
+      if (effectiveStmt.init is VariableDeclaration) {
+        final decl = effectiveStmt.init as VariableDeclaration;
         if (decl.kind == 'var') {
           for (final d in decl.declarations) {
             _collectVarNamesFromPattern(d.id);
           }
         }
       }
-      _collectVarNames(stmt.body);
-    } else if (stmt is ForInStatement) {
-      if (stmt.left is VariableDeclaration) {
-        final decl = stmt.left as VariableDeclaration;
+      _collectVarNames(effectiveStmt.body);
+    } else if (effectiveStmt is ForInStatement) {
+      if (effectiveStmt.left is VariableDeclaration) {
+        final decl = effectiveStmt.left as VariableDeclaration;
         if (decl.kind == 'var') {
           for (final d in decl.declarations) {
             _collectVarNamesFromPattern(d.id);
           }
         }
       }
-      _collectVarNames(stmt.body);
-    } else if (stmt is ForOfStatement) {
-      if (stmt.left is VariableDeclaration) {
-        final decl = stmt.left as VariableDeclaration;
+      _collectVarNames(effectiveStmt.body);
+    } else if (effectiveStmt is ForOfStatement) {
+      if (effectiveStmt.left is VariableDeclaration) {
+        final decl = effectiveStmt.left as VariableDeclaration;
         if (decl.kind == 'var') {
           for (final d in decl.declarations) {
             _collectVarNamesFromPattern(d.id);
           }
         }
       }
-      _collectVarNames(stmt.body);
-    } else if (stmt is LabeledStatement) {
-      _collectVarNames(stmt.body);
-    } else if (stmt is TryStatement) {
-      _collectVarNames(stmt.block);
-      if (stmt.handler != null) _collectVarNames(stmt.handler!.body);
-      if (stmt.finalizer != null) _collectVarNames(stmt.finalizer!);
-    } else if (stmt is SwitchStatement) {
-      for (final c in stmt.cases) {
+      _collectVarNames(effectiveStmt.body);
+    } else if (effectiveStmt is LabeledStatement) {
+      _collectVarNames(effectiveStmt.body);
+    } else if (effectiveStmt is TryStatement) {
+      _collectVarNames(effectiveStmt.block);
+      if (effectiveStmt.handler != null) {
+        _collectVarNames(effectiveStmt.handler!.body);
+      }
+      if (effectiveStmt.finalizer != null) {
+        _collectVarNames(effectiveStmt.finalizer!);
+      }
+    } else if (effectiveStmt is SwitchStatement) {
+      for (final c in effectiveStmt.cases) {
         for (final s in c.consequent) {
           _collectVarNames(s);
         }
@@ -5206,18 +5328,26 @@ class BytecodeCompiler implements ASTVisitor<void> {
 
     final hoistedNodes = _hoistedFunctionDeclStack.last;
     for (final stmt in statements) {
-      if (stmt is AsyncFunctionDeclaration) {
-        _ctx.declareLocal(stmt.id.name, scope: VarScope.funcScope);
-      } else if (stmt is FunctionDeclaration) {
-        _ctx.declareLocal(stmt.id.name, scope: VarScope.funcScope);
+      final effectiveStmt = stmt is ExportDeclarationStatement
+          ? stmt.declaration
+          : stmt;
+
+      if (effectiveStmt is AsyncFunctionDeclaration) {
+        _ctx.declareLocal(effectiveStmt.id.name, scope: VarScope.funcScope);
+      } else if (effectiveStmt is FunctionDeclaration) {
+        _ctx.declareLocal(effectiveStmt.id.name, scope: VarScope.funcScope);
       }
     }
 
     for (final stmt in statements) {
-      if (stmt is AsyncFunctionDeclaration) {
-        _emitHoistedAsyncFunctionDeclaration(stmt, hoistedNodes);
-      } else if (stmt is FunctionDeclaration) {
-        _emitHoistedFunctionDeclaration(stmt, hoistedNodes);
+      final effectiveStmt = stmt is ExportDeclarationStatement
+          ? stmt.declaration
+          : stmt;
+
+      if (effectiveStmt is AsyncFunctionDeclaration) {
+        _emitHoistedAsyncFunctionDeclaration(effectiveStmt, hoistedNodes);
+      } else if (effectiveStmt is FunctionDeclaration) {
+        _emitHoistedFunctionDeclaration(effectiveStmt, hoistedNodes);
       }
     }
   }
@@ -5297,7 +5427,9 @@ class BytecodeCompiler implements ASTVisitor<void> {
         _bc.emitU16(Op.putLoc, slot);
         _ctx.adjustStack(-1);
       } else {
-        _emitPutVar(pattern.name, pattern.line);
+        _emitSetVar(pattern.name, pattern.line);
+        _bc.emit(Op.drop);
+        _ctx.adjustStack(-1);
       }
     } else if (pattern is ObjectPattern) {
       _compileObjectPattern(pattern, declare: declare, kind: kind);
@@ -5337,14 +5469,33 @@ class BytecodeCompiler implements ASTVisitor<void> {
     // Stack: [obj]
     _emitDestructuringValidator('__validateObjectDestructure__', pattern.line);
 
+    final computedKeySlots = <int?>[];
+
     // For each property, dup obj, get property, bind to the pattern value
     for (final prop in pattern.properties) {
       _bc.emit(Op.dup); // [obj, obj]
       _ctx.adjustStack(1);
 
       // Get the property by key
-      final atom = _ctx.addConstant(prop.key);
-      _bc.emitU32(Op.getField, atom); // [obj, value]
+      if (prop.computed) {
+        final keySlot = _ctx.declareLocal(
+          '__obj_pat_key_${_objectPatternTempCounter++}',
+          scopeLevel: _ctx.scope.depth,
+        );
+        computedKeySlots.add(keySlot);
+        _inTailPosition = false;
+        prop.keyExpression!.accept(this);
+        _bc.emitU16(Op.putLoc, keySlot);
+        _ctx.adjustStack(-1);
+        _bc.emitU16(Op.getLoc, keySlot);
+        _ctx.adjustStack(1);
+        _bc.emit(Op.getElem); // [obj, value]
+        _ctx.adjustStack(-1);
+      } else {
+        computedKeySlots.add(null);
+        final atom = _ctx.addConstant(prop.key);
+        _bc.emitU32(Op.getField, atom); // [obj, value]
+      }
 
       // Handle default value
       if (prop.defaultValue != null) {
@@ -5359,7 +5510,13 @@ class BytecodeCompiler implements ASTVisitor<void> {
         _ctx.adjustStack(-1);
         _bc.emit(Op.drop);
         _ctx.adjustStack(-1);
-        prop.defaultValue!.accept(this);
+        _compileWithInferredFunctionName(
+          _destructuringTargetName(prop.value),
+          prop.defaultValue!,
+          () {
+            prop.defaultValue!.accept(this);
+          },
+        );
         _bc.patchJump(skipPatch, _bc.offset);
       }
 
@@ -5371,25 +5528,29 @@ class BytecodeCompiler implements ASTVisitor<void> {
     // Handle rest element: {...rest} = obj
     if (pattern.restElement != null) {
       // Collect already-extracted keys
-      final excludedKeys = <String>[];
-      for (final prop in pattern.properties) {
-        excludedKeys.add(prop.key);
-      }
+      final excludedKeyCount = pattern.properties.length;
 
       // Stack: [obj]
       _bc.emit(Op.dup); // [obj, obj_for_rest]
       _ctx.adjustStack(1);
 
-      // Push excluded key strings onto stack
-      for (final key in excludedKeys) {
-        _emitString(key, 0);
+      // Push excluded property keys onto stack.
+      for (var i = 0; i < pattern.properties.length; i++) {
+        final prop = pattern.properties[i];
+        final keySlot = computedKeySlots[i];
+        if (keySlot != null) {
+          _bc.emitU16(Op.getLoc, keySlot);
+          _ctx.adjustStack(1);
+        } else {
+          _emitString(prop.key, 0);
+        }
       }
       // Stack: [obj, obj_for_rest, key0, key1, ...]
 
       // Op.objectRest pops N keys + the obj, pushes the rest object
-      _bc.emitU16(Op.objectRest, excludedKeys.length);
+      _bc.emitU16(Op.objectRest, excludedKeyCount);
       _ctx.adjustStack(
-        -excludedKeys.length,
+        -excludedKeyCount,
       ); // net: consumed keys, obj stays as rest obj
       // Stack: [obj, restObj]
 
@@ -5414,53 +5575,126 @@ class BytecodeCompiler implements ASTVisitor<void> {
     // Stack: [iterable]
     _emitDestructuringValidator('__validateArrayDestructure__', pattern.line);
 
-    // We need to iterate. For simplicity, use indexed access.
-    // This works for arrays and array-like. For general iterables, we'd need
-    // the iterator protocol, but it covers the vast majority of cases.
+    _bc.emit(Op.forOfStart);
+
+    final iteratorSlot = _ctx.declareLocal(
+      '__array_pattern_iter_${_objectPatternTempCounter++}',
+      scopeLevel: _ctx.scope.depth,
+    );
+    _bc.emitU16(Op.putLoc, iteratorSlot);
+    _ctx.adjustStack(-1);
+
+    final doneSlot = _ctx.declareLocal(
+      '__array_pattern_done_${_objectPatternTempCounter++}',
+      scopeLevel: _ctx.scope.depth,
+    );
+    _bc.emit(Op.pushFalse);
+    _ctx.adjustStack(1);
+    _bc.emitU16(Op.putLoc, doneSlot);
+    _ctx.adjustStack(-1);
 
     for (var i = 0; i < pattern.elements.length; i++) {
       final elem = pattern.elements[i];
+      _emitArrayPatternNextValue(iteratorSlot, doneSlot, pattern.line);
+
       if (elem == null) {
-        // Hole — skip this index
-        continue;
+        _bc.emit(Op.drop);
+        _ctx.adjustStack(-1);
+      } else {
+        _compileDestructuringBinding(elem, declare: declare, kind: kind);
       }
-
-      _bc.emit(Op.dup); // [arr, arr]
-      _ctx.adjustStack(1);
-      _emitNumber(i.toDouble(), pattern.line); // [arr, arr, index]
-      _bc.emit(Op.getElem); // [arr, value]
-      _ctx.adjustStack(-1);
-
-      _compileDestructuringBinding(elem, declare: declare, kind: kind);
-      // Stack: [arr]
     }
 
-    // Handle rest element
     if (pattern.restElement != null) {
-      // Stack: [arr]
-      _bc.emit(Op.dup); // [arr, arr] — obj for method call
+      _bc.emit(Op.array);
       _ctx.adjustStack(1);
-      _bc.emit(Op.dup); // [arr, arr, arr]
+
+      final restLoopStart = _bc.offset;
+      _bc.emitU16(Op.getLoc, doneSlot);
       _ctx.adjustStack(1);
-      final sliceAtom = _ctx.addConstant('slice');
-      _bc.emitU32(Op.getField, sliceAtom); // [arr, arr, sliceFn]
-      _emitNumber(
-        pattern.elements.length.toDouble(),
-        pattern.line,
-      ); // [arr, arr, sliceFn, n]
-      _bc.emitU16(Op.callMethod, 1); // [arr, result]
-      _ctx.adjustStack(-2); // consumed arr+sliceFn+arg, pushed result
+      final restLoopExit = _bc.emitJump(Op.ifTrue);
+      _ctx.adjustStack(-1);
+
+      _bc.emitU16(Op.getLoc, iteratorSlot);
+      _ctx.adjustStack(1);
+      _bc.emit(Op.forOfNext);
+      _ctx.adjustStack(2);
+      _bc.emitU16(Op.setLoc, doneSlot);
+      final restDonePatch = _bc.emitJump(Op.ifTrue);
+      _ctx.adjustStack(-1);
+      final restDoneDepth = _ctx._currentStackDepth;
+
+      _bc.emit(Op.swap);
+      _bc.emit(Op.drop);
+      _ctx.adjustStack(-1);
+      _bc.emit(Op.arrayAppend);
+      _ctx.adjustStack(-1);
+      _bc.emitI32(Op.goto_, restLoopStart);
+
+      _bc.patchJump(restDonePatch, _bc.offset);
+      _ctx._currentStackDepth = restDoneDepth;
+      _bc.emit(Op.drop);
+      _ctx.adjustStack(-1);
+      _bc.emit(Op.drop);
+      _ctx.adjustStack(-1);
+      _bc.patchJump(restLoopExit, _bc.offset);
 
       _compileDestructuringBinding(
         pattern.restElement!,
         declare: declare,
         kind: kind,
       );
+    } else {
+      _emitArrayPatternCloseIfNeeded(iteratorSlot, doneSlot, pattern.line);
     }
+  }
 
-    // Drop the original array/iterable
+  void _emitArrayPatternNextValue(int iteratorSlot, int doneSlot, int line) {
+    _bc.emitU16(Op.getLoc, doneSlot);
+    _ctx.adjustStack(1);
+    final alreadyDonePatch = _bc.emitJump(Op.ifTrue);
+    _ctx.adjustStack(-1);
+    final alreadyDoneDepth = _ctx._currentStackDepth;
+
+    _bc.emitU16(Op.getLoc, iteratorSlot);
+    _ctx.adjustStack(1);
+    _bc.setLine(line);
+    _bc.emit(Op.forOfNext);
+    _ctx.adjustStack(2);
+    _bc.emitU16(Op.setLoc, doneSlot);
     _bc.emit(Op.drop);
     _ctx.adjustStack(-1);
+    _bc.emit(Op.swap);
+    _bc.emit(Op.drop);
+    _ctx.adjustStack(-1);
+    final mergedDepth = _ctx._currentStackDepth;
+    final endPatch = _bc.emitJump(Op.goto_);
+
+    _bc.patchJump(alreadyDonePatch, _bc.offset);
+    _ctx._currentStackDepth = alreadyDoneDepth;
+    _bc.emit(Op.pushUndefined);
+    _ctx.adjustStack(1);
+    _bc.patchJump(endPatch, _bc.offset);
+    _ctx._currentStackDepth = mergedDepth;
+  }
+
+  void _emitArrayPatternCloseIfNeeded(
+    int iteratorSlot,
+    int doneSlot,
+    int line,
+  ) {
+    _bc.emitU16(Op.getLoc, doneSlot);
+    _ctx.adjustStack(1);
+    final skipPatch = _bc.emitJump(Op.ifTrue);
+    _ctx.adjustStack(-1);
+
+    _bc.emitU16(Op.getLoc, iteratorSlot);
+    _ctx.adjustStack(1);
+    _bc.setLine(line);
+    _bc.emit(Op.iteratorClose);
+    _ctx.adjustStack(-1);
+
+    _bc.patchJump(skipPatch, _bc.offset);
   }
 
   void _compileAssignmentPattern(
@@ -5480,7 +5714,13 @@ class BytecodeCompiler implements ASTVisitor<void> {
     _ctx.adjustStack(-1);
     _bc.emit(Op.drop);
     _ctx.adjustStack(-1);
-    pattern.right.accept(this);
+    _compileWithInferredFunctionName(
+      _destructuringTargetName(pattern.left),
+      pattern.right,
+      () {
+        pattern.right.accept(this);
+      },
+    );
     _bc.patchJump(skipPatch, _bc.offset);
 
     // Now bind the resolved value to the left pattern
@@ -5492,7 +5732,11 @@ class BytecodeCompiler implements ASTVisitor<void> {
     // The expression pattern is used for rest targets like ...obj.prop
     // Compile the expression as an assignment target
     final expr = pattern.expression;
-    if (expr is MemberExpression) {
+    if (expr is IdentifierExpression) {
+      _emitSetVar(expr.name, expr.line, expr.column);
+      _bc.emit(Op.drop);
+      _ctx.adjustStack(-1);
+    } else if (expr is MemberExpression) {
       expr.object.accept(this); // [value, obj]
       if (expr.computed) {
         expr.property.accept(this); // [value, obj, key]

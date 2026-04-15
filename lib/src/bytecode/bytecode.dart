@@ -372,6 +372,9 @@ class LocalBindingVarRef extends VarRef {
   @override
   set value(JSValue newValue) {
     final current = super.value;
+    if (isLexical && identical(current, JSTemporalDeadZone.instance)) {
+      throw JSReferenceError('Cannot access \'$name\' before initialization');
+    }
     if (isConst && !identical(current, JSTemporalDeadZone.instance)) {
       throw JSTypeError('Assignment to constant variable: $name');
     }

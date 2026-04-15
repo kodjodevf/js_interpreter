@@ -342,6 +342,9 @@ enum Op {
   /// Enter 'with' statement scope
   withGetVar, // [obj, ...] -> [...] (like get_var but through with-scope)
   withPutVar,
+  captureVarRef,
+  putCapturedVar,
+  setCapturedVar,
   enterWith, // [obj] -> []
   leaveWith,
 
@@ -626,6 +629,9 @@ const Map<Op, OpInfo> opInfo = {
   // With/Scope
   Op.withGetVar: OpInfo('with_get_var', OpFmt.u32, 1, 1),
   Op.withPutVar: OpInfo('with_put_var', OpFmt.u32, 2, 0),
+  Op.captureVarRef: OpInfo('capture_var_ref', OpFmt.u32, 0, 1),
+  Op.putCapturedVar: OpInfo('put_captured_var', OpFmt.none, 2, 0),
+  Op.setCapturedVar: OpInfo('set_captured_var', OpFmt.none, 2, 1),
   Op.enterWith: OpInfo('enter_with', OpFmt.none, 1, 0),
   Op.leaveWith: OpInfo('leave_with', OpFmt.none, 0, 0),
   Op.enterScope: OpInfo('enter_scope', OpFmt.u16, 0, 0),
