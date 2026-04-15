@@ -297,6 +297,119 @@ void main() {
       expect(result.toNumber(), equals(1));
     });
 
+    test('should evaluate array member targets before iterator advance', () {
+      final result = interpreter.eval('''
+        var log = [];
+
+        function source() {
+          log.push('source');
+          var iterator = {
+            next: function() {
+              log.push('iterator-step');
+              return {
+                get done() {
+                  log.push('iterator-done');
+                  return true;
+                }
+              };
+            }
+          };
+          var source = {};
+          source[Symbol.iterator] = function() {
+            log.push('iterator');
+            return iterator;
+          };
+          return source;
+        }
+
+        function target() {
+          log.push('target');
+          return {
+            set q(v) {
+              log.push('set');
+            }
+          };
+        }
+
+        function targetKey() {
+          log.push('target-key');
+          return {
+            toString: function() {
+              log.push('target-key-tostring');
+              return 'q';
+            }
+          };
+        }
+
+        [target()[targetKey()]] = source();
+        log.join(',');
+      ''');
+
+      expect(
+        result.toString(),
+        equals(
+          'source,iterator,target,target-key,iterator-step,iterator-done,target-key-tostring,set',
+        ),
+      );
+    });
+
+    test(
+      'should evaluate object member targets before reading source values',
+      () {
+        final result = interpreter.eval('''
+        var log = [];
+
+        function source() {
+          log.push('source');
+          return {
+            get p() {
+              log.push('get');
+            }
+          };
+        }
+
+        function target() {
+          log.push('target');
+          return {
+            set q(v) {
+              log.push('set');
+            }
+          };
+        }
+
+        function sourceKey() {
+          log.push('source-key');
+          return {
+            toString: function() {
+              log.push('source-key-tostring');
+              return 'p';
+            }
+          };
+        }
+
+        function targetKey() {
+          log.push('target-key');
+          return {
+            toString: function() {
+              log.push('target-key-tostring');
+              return 'q';
+            }
+          };
+        }
+
+        ({ [sourceKey()]: target()[targetKey()] } = source());
+        log.join(',');
+      ''');
+
+        expect(
+          result.toString(),
+          equals(
+            'source,source-key,source-key-tostring,target,target-key,get,target-key-tostring,set',
+          ),
+        );
+      },
+    );
+
     test('should support swapping variables', () {
       const code = '''
         let a = 1, b = 2;

@@ -5449,6 +5449,15 @@ class BytecodeCompiler implements ASTVisitor<void> {
 
   void _emitDestructuringValidator(String helperName, int line) {
     _bc.setLine(line);
+    if (helperName == '__validateArrayDestructure__') {
+      _bc.emit(Op.validateArrayDestructure);
+      return;
+    }
+    if (helperName == '__validateObjectDestructure__') {
+      _bc.emit(Op.validateObjectDestructure);
+      return;
+    }
+
     final atom = _ctx.addConstant(helperName);
     _bc.emit(Op.dup);
     _ctx.adjustStack(1);
@@ -5476,6 +5485,18 @@ class BytecodeCompiler implements ASTVisitor<void> {
       _bc.emit(Op.dup); // [obj, obj]
       _ctx.adjustStack(1);
 
+      final captureRef = _canCaptureDestructuringReference(prop.value);
+      int? sourceObjSlot;
+
+      if (captureRef) {
+        sourceObjSlot = _ctx.declareLocal(
+          '__obj_pat_src_${_objectPatternTempCounter++}',
+          scopeLevel: _ctx.scope.depth,
+        );
+        _bc.emitU16(Op.putLoc, sourceObjSlot);
+        _ctx.adjustStack(-1);
+      }
+
       // Get the property by key
       if (prop.computed) {
         final keySlot = _ctx.declareLocal(
@@ -5485,20 +5506,51 @@ class BytecodeCompiler implements ASTVisitor<void> {
         computedKeySlots.add(keySlot);
         _inTailPosition = false;
         prop.keyExpression!.accept(this);
+        _bc.emit(Op.toPropertyKey);
         _bc.emitU16(Op.putLoc, keySlot);
         _ctx.adjustStack(-1);
-        _bc.emitU16(Op.getLoc, keySlot);
-        _ctx.adjustStack(1);
-        _bc.emit(Op.getElem); // [obj, value]
-        _ctx.adjustStack(-1);
+
+        if (captureRef) {
+          _emitCaptureDestructuringReference(prop.value);
+          _bc.emitU16(Op.getLoc, sourceObjSlot!);
+          _ctx.adjustStack(1);
+          _bc.emitU16(Op.getLoc, keySlot);
+          _ctx.adjustStack(1);
+          _bc.emit(Op.getElem); // [obj, ref, value]
+          _ctx.adjustStack(-1);
+        } else {
+          _bc.emitU16(Op.getLoc, keySlot);
+          _ctx.adjustStack(1);
+          _bc.emit(Op.getElem); // [obj, value]
+          _ctx.adjustStack(-1);
+        }
       } else {
         computedKeySlots.add(null);
         final atom = _ctx.addConstant(prop.key);
-        _bc.emitU32(Op.getField, atom); // [obj, value]
+        if (captureRef) {
+          _emitCaptureDestructuringReference(prop.value);
+          _bc.emitU16(Op.getLoc, sourceObjSlot!);
+          _ctx.adjustStack(1);
+          _bc.emitU32(Op.getField, atom); // [obj, ref, value]
+        } else {
+          _bc.emitU32(Op.getField, atom); // [obj, value]
+        }
       }
 
       // Handle default value
       if (prop.defaultValue != null) {
+        if (captureRef) {
+          _compileCapturedDestructuringReferenceBinding(
+            AssignmentPattern(
+              left: prop.value,
+              right: prop.defaultValue!,
+              line: prop.line,
+              column: prop.column,
+            ),
+          );
+          continue;
+        }
+
         // If value is undefined, use default
         _bc.emit(Op.dup);
         _ctx.adjustStack(1);
@@ -5518,6 +5570,11 @@ class BytecodeCompiler implements ASTVisitor<void> {
           },
         );
         _bc.patchJump(skipPatch, _bc.offset);
+      }
+
+      if (captureRef) {
+        _compileCapturedDestructuringReferenceBinding(prop.value);
+        continue;
       }
 
       // Stack: [obj, value]
@@ -5595,14 +5652,14 @@ class BytecodeCompiler implements ASTVisitor<void> {
 
     for (var i = 0; i < pattern.elements.length; i++) {
       final elem = pattern.elements[i];
-      _emitArrayPatternNextValue(iteratorSlot, doneSlot, pattern.line);
-
-      if (elem == null) {
-        _bc.emit(Op.drop);
-        _ctx.adjustStack(-1);
-      } else {
-        _compileDestructuringBinding(elem, declare: declare, kind: kind);
-      }
+      _compileArrayPatternElement(
+        elem,
+        iteratorSlot: iteratorSlot,
+        doneSlot: doneSlot,
+        line: pattern.line,
+        declare: declare,
+        kind: kind,
+      );
     }
 
     if (pattern.restElement != null) {
@@ -5695,6 +5752,96 @@ class BytecodeCompiler implements ASTVisitor<void> {
     _ctx.adjustStack(-1);
 
     _bc.patchJump(skipPatch, _bc.offset);
+  }
+
+  bool _canCaptureDestructuringReference(Pattern pattern) {
+    final target = pattern is AssignmentPattern ? pattern.left : pattern;
+    if (target is! ExpressionPattern) {
+      return false;
+    }
+
+    final expr = target.expression;
+    return expr is IdentifierExpression || expr is MemberExpression;
+  }
+
+  void _emitCaptureDestructuringReference(Pattern pattern) {
+    final target = pattern is AssignmentPattern ? pattern.left : pattern;
+    final expr = (target as ExpressionPattern).expression;
+
+    if (expr is IdentifierExpression) {
+      final atom = _ctx.addConstant(expr.name);
+      _bc.emitU32(Op.captureVarRef, atom);
+      _ctx.adjustStack(1);
+      return;
+    }
+
+    final member = expr as MemberExpression;
+    member.object.accept(this);
+    if (member.computed) {
+      member.property.accept(this);
+      _bc.emit(Op.captureElemRef);
+      _ctx.adjustStack(-1);
+      return;
+    }
+
+    final atom = _ctx.addConstant(_propName(member.property));
+    _bc.emitU32(Op.captureFieldRef, atom);
+  }
+
+  void _compileCapturedDestructuringReferenceBinding(Pattern pattern) {
+    if (pattern is AssignmentPattern) {
+      _bc.emit(Op.dup);
+      _ctx.adjustStack(1);
+      _bc.emit(Op.pushUndefined);
+      _ctx.adjustStack(1);
+      _bc.emit(Op.strictEq);
+      _ctx.adjustStack(-1);
+      final skipPatch = _bc.emitJump(Op.ifFalse);
+      _ctx.adjustStack(-1);
+      _bc.emit(Op.drop);
+      _ctx.adjustStack(-1);
+      _compileWithInferredFunctionName(
+        _destructuringTargetName(pattern.left),
+        pattern.right,
+        () {
+          pattern.right.accept(this);
+        },
+      );
+      _bc.patchJump(skipPatch, _bc.offset);
+      _bc.emit(Op.swap);
+      _bc.emit(Op.putCapturedVar);
+      _ctx.adjustStack(-2);
+      return;
+    }
+
+    _bc.emit(Op.swap);
+    _bc.emit(Op.putCapturedVar);
+    _ctx.adjustStack(-2);
+  }
+
+  void _compileArrayPatternElement(
+    Pattern? elem, {
+    required int iteratorSlot,
+    required int doneSlot,
+    required int line,
+    required bool declare,
+    required String kind,
+  }) {
+    if (elem == null) {
+      _emitArrayPatternNextValue(iteratorSlot, doneSlot, line);
+      _bc.emit(Op.drop);
+      _ctx.adjustStack(-1);
+      return;
+    }
+
+    if (_canCaptureDestructuringReference(elem)) {
+      _emitCaptureDestructuringReference(elem);
+      _emitArrayPatternNextValue(iteratorSlot, doneSlot, line);
+      _compileCapturedDestructuringReferenceBinding(elem);
+    } else {
+      _emitArrayPatternNextValue(iteratorSlot, doneSlot, line);
+      _compileDestructuringBinding(elem, declare: declare, kind: kind);
+    }
   }
 
   void _compileAssignmentPattern(

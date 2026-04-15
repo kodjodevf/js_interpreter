@@ -196,6 +196,7 @@ enum Op {
   neg, // [a] -> [-a]
   plus, // [a] -> [+a] (ToNumber)
   toNumeric, // [a] -> [ToNumeric(a)] (preserves BigInt)
+  toPropertyKey, // [a] -> [ToPropertyKey(a)]
   bitNot, // [a] -> [~a]
   not, // [a] -> [!a]
   typeOf, // [a] -> [typeof a]
@@ -343,8 +344,12 @@ enum Op {
   withGetVar, // [obj, ...] -> [...] (like get_var but through with-scope)
   withPutVar,
   captureVarRef,
+  captureFieldRef,
+  captureElemRef,
   putCapturedVar,
   setCapturedVar,
+  validateArrayDestructure,
+  validateObjectDestructure,
   enterWith, // [obj] -> []
   leaveWith,
 
@@ -556,6 +561,7 @@ const Map<Op, OpInfo> opInfo = {
   Op.neg: OpInfo('neg', OpFmt.none, 1, 1),
   Op.plus: OpInfo('plus', OpFmt.none, 1, 1),
   Op.toNumeric: OpInfo('to_numeric', OpFmt.none, 1, 1),
+  Op.toPropertyKey: OpInfo('to_property_key', OpFmt.none, 1, 1),
   Op.bitNot: OpInfo('not', OpFmt.none, 1, 1),
   Op.not: OpInfo('lnot', OpFmt.none, 1, 1),
   Op.typeOf: OpInfo('typeof', OpFmt.none, 1, 1),
@@ -630,8 +636,22 @@ const Map<Op, OpInfo> opInfo = {
   Op.withGetVar: OpInfo('with_get_var', OpFmt.u32, 1, 1),
   Op.withPutVar: OpInfo('with_put_var', OpFmt.u32, 2, 0),
   Op.captureVarRef: OpInfo('capture_var_ref', OpFmt.u32, 0, 1),
+  Op.captureFieldRef: OpInfo('capture_field_ref', OpFmt.u32, 1, 1),
+  Op.captureElemRef: OpInfo('capture_elem_ref', OpFmt.none, 2, 1),
   Op.putCapturedVar: OpInfo('put_captured_var', OpFmt.none, 2, 0),
   Op.setCapturedVar: OpInfo('set_captured_var', OpFmt.none, 2, 1),
+  Op.validateArrayDestructure: OpInfo(
+    'validate_array_destructure',
+    OpFmt.none,
+    0,
+    0,
+  ),
+  Op.validateObjectDestructure: OpInfo(
+    'validate_object_destructure',
+    OpFmt.none,
+    0,
+    0,
+  ),
   Op.enterWith: OpInfo('enter_with', OpFmt.none, 1, 0),
   Op.leaveWith: OpInfo('leave_with', OpFmt.none, 0, 0),
   Op.enterScope: OpInfo('enter_scope', OpFmt.u16, 0, 0),

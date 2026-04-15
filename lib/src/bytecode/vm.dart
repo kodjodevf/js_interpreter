@@ -3354,32 +3354,13 @@ class BytecodeVM implements JSRuntime {
             case Op.getElem:
               final key = pop();
               final obj = pop();
-              if (key is JSSymbol) {
-                push(
-                  obj is JSObject || obj is JSFunction
-                      ? _getProperty(obj, key.propertyKey)
-                      : JSUndefined.instance,
-                );
-              } else {
-                final keyStr = _jsToString(key);
-                push(_getProperty(obj, keyStr));
-              }
+              push(_getPropertyByValue(obj, key));
 
             case Op.putElem:
               final val = pop();
               final key = pop();
               final obj = pop();
-              if (key is JSSymbol) {
-                if (obj is JSObject) {
-                  obj.setPropertyWithSymbol(key.propertyKey, val, key);
-                } else if (obj is JSFunction) {
-                  obj.setProperty(key.propertyKey, val);
-                  obj.registerSymbolKey(key.propertyKey, key);
-                }
-              } else {
-                final keyStr = _jsToString(key);
-                _setProperty(obj, keyStr, val);
-              }
+              _setPropertyByValue(obj, key, val);
 
             case Op.deleteField:
               final atom = readU32(bc, pc);
@@ -3622,6 +3603,10 @@ class BytecodeVM implements JSRuntime {
               } else {
                 push(JSNumber(v.toNumber()));
               }
+
+            case Op.toPropertyKey:
+              final key = pop();
+              push(_toPropertyKeyValue(key));
 
             case Op.bitNot:
               final v = pop();
@@ -4150,6 +4135,20 @@ class BytecodeVM implements JSRuntime {
               final name = cpool[atom] as String;
               push(_VarRefWrapper(_resolveDynamicAssignmentRef(name)));
 
+            case Op.captureFieldRef:
+              final atom = readU32(bc, pc);
+              pc += 4;
+              final name = cpool[atom] as String;
+              final obj = pop();
+              push(
+                _VarRefWrapper(_PropertyValueVarRef(this, obj, JSString(name))),
+              );
+
+            case Op.captureElemRef:
+              final key = pop();
+              final obj = pop();
+              push(_VarRefWrapper(_PropertyValueVarRef(this, obj, key)));
+
             case Op.putCapturedVar:
               final ref = (pop() as _VarRefWrapper).ref;
               final newVal = pop();
@@ -4159,6 +4158,31 @@ class BytecodeVM implements JSRuntime {
               final ref = (pop() as _VarRefWrapper).ref;
               final newVal = stack[sp - 1];
               ref.value = newVal;
+
+            case Op.validateArrayDestructure:
+              final value = stack[sp - 1];
+              final isIterable =
+                  value is JSArray ||
+                  value is JSString ||
+                  (value is JSObject &&
+                      value.hasProperty(JSSymbol.iterator.propertyKey));
+              if (!isIterable) {
+                final typeName = value.isNull ? 'null' : value.type.name;
+                throw _ThrowSignal(
+                  _makeError('TypeError', '$typeName is not iterable'),
+                );
+              }
+
+            case Op.validateObjectDestructure:
+              final value = stack[sp - 1];
+              if (value == JSNull.instance || value == JSUndefined.instance) {
+                throw _ThrowSignal(
+                  _makeError(
+                    'TypeError',
+                    'Cannot destructure \'${value == JSNull.instance ? "null" : "undefined"}\' as it is ${value == JSNull.instance ? "null" : "undefined"}.',
+                  ),
+                );
+              }
 
             case Op.enterWith:
               final obj = pop();
@@ -5098,6 +5122,15 @@ class BytecodeVM implements JSRuntime {
     return JSUndefined.instance;
   }
 
+  JSValue _getPropertyByValue(JSValue obj, JSValue key) {
+    if (key is JSSymbol) {
+      return obj is JSObject || obj is JSFunction
+          ? _getProperty(obj, key.propertyKey)
+          : JSUndefined.instance;
+    }
+    return _getProperty(obj, _coercePropertyKeyName(key));
+  }
+
   void _setProperty(JSValue obj, String name, JSValue value) {
     try {
       if (obj.isNull || obj.isUndefined) {
@@ -5128,6 +5161,36 @@ class BytecodeVM implements JSRuntime {
     } on JSError catch (e) {
       throw _ThrowSignal(_makeError(e.name, e.message));
     }
+  }
+
+  void _setPropertyByValue(JSValue obj, JSValue key, JSValue value) {
+    if (key is JSSymbol) {
+      if (obj is JSObject) {
+        obj.setPropertyWithSymbol(key.propertyKey, value, key);
+      } else if (obj is JSFunction) {
+        obj.setProperty(key.propertyKey, value);
+        obj.registerSymbolKey(key.propertyKey, key);
+      }
+      return;
+    }
+
+    _setProperty(obj, _coercePropertyKeyName(key), value);
+  }
+
+  String _coercePropertyKeyName(JSValue key) {
+    return _jsToString(_toPropertyKeyValue(key));
+  }
+
+  JSValue _toPropertyKeyValue(JSValue key) {
+    if (key is JSSymbol) {
+      return key;
+    }
+
+    final primitive = key is JSObject ? _toPrimitive(key, hint: 'string') : key;
+    if (primitive is JSSymbol) {
+      return primitive;
+    }
+    return JSString(_jsToString(primitive));
   }
 
   JSValue? _getFunctionPrototypeChainValue(JSFunction function) {
@@ -5956,6 +6019,28 @@ class _ObjectPropertyVarRef extends VarRef {
   @override
   void initialize(JSValue newValue) {
     object.setProperty(name, newValue);
+  }
+}
+
+class _PropertyValueVarRef extends VarRef {
+  final BytecodeVM vm;
+  final JSValue object;
+  final JSValue key;
+
+  _PropertyValueVarRef(this.vm, this.object, this.key)
+    : super(JSUndefined.instance);
+
+  @override
+  JSValue get value => vm._getPropertyByValue(object, key);
+
+  @override
+  set value(JSValue newValue) {
+    vm._setPropertyByValue(object, key, newValue);
+  }
+
+  @override
+  void initialize(JSValue newValue) {
+    vm._setPropertyByValue(object, key, newValue);
   }
 }
 
