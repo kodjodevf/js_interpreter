@@ -1145,12 +1145,28 @@ class BytecodeVM implements JSRuntime {
   void _persistTopLevelLocals(StackFrame frame) {
     final vars = frame.func.vars;
     for (var i = 0; i < vars.length; i++) {
-      final name = vars[i].name;
+      final variable = vars[i];
+      if (!_shouldPersistTopLevelBinding(variable)) {
+        continue;
+      }
+
+      final name = variable.name;
       final value = frame.locals[i];
       if (value is _VarRefWrapper) {
         // Preserve the VarRef so future closure writes propagate
         if (!value.ref.value.isUndefined || !globals.containsKey(name)) {
           globals[name] = value;
+        }
+      } else if (variable.isLexical || variable.isConst) {
+        if (!value.isUndefined || !globals.containsKey(name)) {
+          globals[name] = _VarRefWrapper(
+            LocalBindingVarRef(
+              name,
+              isConst: variable.isConst,
+              isLexical: variable.isLexical,
+              value: value,
+            ),
+          );
         }
       } else {
         if (!value.isUndefined || !globals.containsKey(name)) {
@@ -1158,6 +1174,19 @@ class BytecodeVM implements JSRuntime {
         }
       }
     }
+  }
+
+  bool _shouldPersistTopLevelBinding(VarDef variable) {
+    if (variable.scope == VarScope.funcScope) {
+      return true;
+    }
+    return variable.isLexical && variable.scopeLevel == 0;
+  }
+
+  bool _isPersistentLexicalGlobal(JSValue? value) {
+    return value is _VarRefWrapper &&
+        value.ref is LocalBindingVarRef &&
+        (value.ref as LocalBindingVarRef).isLexical;
   }
 
   void _syncTopLevelLocalToGlobal(StackFrame frame, int index, JSValue value) {
@@ -1184,6 +1213,9 @@ class BytecodeVM implements JSRuntime {
 
   void _syncGlobalCacheValue(String name, JSValue value) {
     final existing = globals[name];
+    if (_isPersistentLexicalGlobal(existing)) {
+      return;
+    }
     if (existing is _VarRefWrapper) {
       existing.ref.value = value;
       return;
@@ -1194,7 +1226,9 @@ class BytecodeVM implements JSRuntime {
   void _syncGlobalCacheFromObject(String name, JSObject globalThis) {
     final descriptor = globalThis.getOwnPropertyDescriptor(name);
     if (descriptor == null) {
-      globals.remove(name);
+      if (!_isPersistentLexicalGlobal(globals[name])) {
+        globals.remove(name);
+      }
       return;
     }
     _syncGlobalCacheValue(name, globalThis.getProperty(name));
@@ -2002,6 +2036,9 @@ class BytecodeVM implements JSRuntime {
     }
 
     final cachedValue = globals[name];
+    if (_isPersistentLexicalGlobal(cachedValue)) {
+      return (cachedValue as _VarRefWrapper).ref.value;
+    }
     final globalThis = globals['globalThis'];
     if (cachedValue is _VarRefWrapper) {
       if (globalThis is JSObject) {
@@ -2069,6 +2106,9 @@ class BytecodeVM implements JSRuntime {
     }
 
     final cachedValue = globals[name];
+    if (_isPersistentLexicalGlobal(cachedValue)) {
+      return (cachedValue as _VarRefWrapper).ref.value;
+    }
     final globalThis = globals['globalThis'];
     if (cachedValue is _VarRefWrapper) {
       if (globalThis is JSObject) {
@@ -2111,6 +2151,10 @@ class BytecodeVM implements JSRuntime {
           null) {
         return true;
       }
+    }
+
+    if (_isPersistentLexicalGlobal(globals[name])) {
+      return true;
     }
 
     final globalThis = globals['globalThis'];
@@ -2165,6 +2209,12 @@ class BytecodeVM implements JSRuntime {
       )) {
         return;
       }
+    }
+
+    final existing = globals[name];
+    if (existing is _VarRefWrapper) {
+      existing.ref.value = value;
+      return;
     }
 
     final globalThis = globals['globalThis'];
