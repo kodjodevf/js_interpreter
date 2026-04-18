@@ -5137,7 +5137,7 @@ class BytecodeVM implements JSRuntime {
         throw _ThrowSignal(
           _makeError(
             'TypeError',
-            'Cannot set properties of ${obj.isNull ? 'null' : 'undefined'} (setting \"$name\")',
+            'Cannot set properties of ${obj.isNull ? 'null' : 'undefined'} (setting "$name")',
           ),
         );
       }
@@ -6305,9 +6305,8 @@ class _ForOfIterator extends JSValue {
   bool _closed = false;
   JSValue _bufferedValue = JSUndefined.instance;
 
-  _ForOfIterator.values(List<JSValue> values)
-    : values = values,
-      _nextStep = null,
+  _ForOfIterator.values(List<JSValue> this.values)
+    : _nextStep = null,
       _closeStep = null;
 
   _ForOfIterator.iterator({
