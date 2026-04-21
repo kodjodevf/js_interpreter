@@ -1,3 +1,8 @@
+## 0.0.4
+- add support for capturing destructuring references and validation for array/object destructuring
+- enhance destructuring assignment support and validation
+- enhance global eval bindings to support top-level lexical shadowing
+
 ## 0.0.3
 - Migrate to bytecode and improvements
 
