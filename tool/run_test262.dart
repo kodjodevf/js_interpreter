@@ -3,10 +3,21 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:js_interpreter/js_interpreter.dart';
 
-class _Test262IsHtmlDdaObject extends JSObject {
-  _Test262IsHtmlDdaObject() {
+class _Test262IsHtmlDdaObject extends JSNativeFunction {
+  _Test262IsHtmlDdaObject()
+    : super(
+        functionName: 'IsHTMLDDA',
+        nativeImpl: (_) => JSValueFactory.nullValue(),
+        expectedArgs: 1,
+      ) {
     setInternalSlot('IsHTMLDDA', true);
   }
+
+  @override
+  JSValueType get type => JSValueType.object;
+
+  @override
+  bool toBoolean() => false;
 }
 
 enum TestMode { defaultNoStrict, defaultStrict, noStrict, strict, all }

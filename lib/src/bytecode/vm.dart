@@ -1689,6 +1689,64 @@ class BytecodeVM implements JSRuntime {
     callback = (JSValue inputValue, GeneratorState previousState) {
       // Handle active yield* delegation
       if (delegatedIterator != null) {
+        if (previousState == GeneratorState.suspendedYieldReturn) {
+          final returnFn = delegatedIterator!.getProperty('return');
+          if (returnFn.isUndefined) {
+            delegatedIterator = null;
+            delegatedNextFn = null;
+            return {'value': inputValue, 'done': true};
+          }
+
+          final returnResult = _callFunction(returnFn, delegatedIterator!, [
+            inputValue,
+          ]);
+          if (returnResult is! JSObject) {
+            throw JSTypeError('Iterator result is not an object');
+          }
+
+          delegatedIterator = null;
+          delegatedNextFn = null;
+          return {'value': returnResult.getProperty('value'), 'done': true};
+        }
+
+        if (previousState == GeneratorState.suspendedYieldThrow) {
+          final throwFn = delegatedIterator!.getProperty('throw');
+          if (throwFn.isUndefined) {
+            final returnFn = delegatedIterator!.getProperty('return');
+            if (!returnFn.isUndefined) {
+              final returnResult = _callFunction(
+                returnFn,
+                delegatedIterator!,
+                [],
+              );
+              if (returnResult is! JSObject) {
+                throw JSTypeError('Iterator result is not an object');
+              }
+            }
+            delegatedIterator = null;
+            delegatedNextFn = null;
+            throw JSTypeError('iterator.throw is not a function');
+          }
+
+          final throwResult = _callFunction(throwFn, delegatedIterator!, [
+            inputValue,
+          ]);
+          if (throwResult is! JSObject) {
+            throw JSTypeError('Iterator result is not an object');
+          }
+
+          final done = throwResult.getProperty('done');
+          if (done is JSBoolean && done.value) {
+            final retVal = throwResult.getProperty('value');
+            delegatedIterator = null;
+            delegatedNextFn = null;
+            frame.push(retVal);
+            return callback(retVal, GeneratorState.suspendedYield);
+          }
+
+          return {'value': throwResult.getProperty('value'), 'done': false};
+        }
+
         final nextResult = _callFunction(
           delegatedNextFn!,
           delegatedIterator!,
@@ -1803,7 +1861,20 @@ class BytecodeVM implements JSRuntime {
       }
     };
 
-    return JSGenerator(generatorFunction: callback);
+    return JSGenerator(
+      generatorFunction: callback,
+      returnHandler: (value) {
+        if (delegatedIterator != null) {
+          return callback(value, GeneratorState.suspendedYieldReturn);
+        }
+        delegatedIterator = null;
+        delegatedNextFn = null;
+        return {'value': value, 'done': true};
+      },
+      throwHandler: (exception) {
+        return callback(exception, GeneratorState.suspendedYieldThrow);
+      },
+    );
   }
 
   /// Create a JSAsyncGenerator that wraps bytecode execution with
@@ -5496,7 +5567,8 @@ class BytecodeVM implements JSRuntime {
   }
 
   bool _isHtmlDda(JSValue value) {
-    return value is JSObject && value.hasInternalSlot('IsHTMLDDA');
+    return (value is JSObject && value.hasInternalSlot('IsHTMLDDA')) ||
+        (value is JSFunction && value.hasInternalSlot('IsHTMLDDA'));
   }
 
   static String _jsToString(JSValue val) {

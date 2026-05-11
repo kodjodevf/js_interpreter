@@ -9,6 +9,8 @@ import 'js_symbol.dart';
 enum GeneratorState {
   suspendedStart, // Created but not yet executed
   suspendedYield, // Suspended after a yield
+  suspendedYieldReturn, // Suspended and resumed via .return()
+  suspendedYieldThrow, // Suspended and resumed via .throw()
   executing, // Currently executing
   completed, // Completed (return or end of function)
 }
@@ -24,14 +26,20 @@ class JSGenerator extends JSObject {
   final Map<String, dynamic> Function(JSValue, GeneratorState)
   generatorFunction;
 
+  final Map<String, dynamic> Function(JSValue)? returnHandler;
+  final Map<String, dynamic> Function(JSValue)? throwHandler;
+
   /// The last yielded value
   JSValue? lastYieldedValue;
 
   /// The value returned by the generator (if terminated with return)
   JSValue? returnValue;
 
-  JSGenerator({required this.generatorFunction})
-    : state = GeneratorState.suspendedStart {
+  JSGenerator({
+    required this.generatorFunction,
+    this.returnHandler,
+    this.throwHandler,
+  }) : state = GeneratorState.suspendedStart {
     // Expose next(), return(), throw() methods
     setProperty(
       'next',
@@ -122,10 +130,34 @@ class JSGenerator extends JSObject {
       return _createIteratorResult(value, true);
     }
 
-    state = GeneratorState.completed;
-    returnValue = value;
+    if (state == GeneratorState.executing) {
+      throw JSError('Generator is already executing');
+    }
 
-    return _createIteratorResult(value, true);
+    if (returnHandler == null) {
+      state = GeneratorState.completed;
+      returnValue = value;
+      return _createIteratorResult(value, true);
+    }
+
+    state = GeneratorState.executing;
+
+    try {
+      final result = returnHandler!(value);
+
+      if (result['done'] == true) {
+        state = GeneratorState.completed;
+        returnValue = result['value'];
+      } else {
+        state = GeneratorState.suspendedYield;
+        lastYieldedValue = result['value'];
+      }
+
+      return _createIteratorResult(result['value'], result['done']);
+    } catch (e) {
+      state = GeneratorState.completed;
+      rethrow;
+    }
   }
 
   /// Method throw(exception)
@@ -142,17 +174,16 @@ class JSGenerator extends JSObject {
     state = GeneratorState.executing;
 
     try {
-      // The exception will be thrown in the generator
-      // We pass the exception as input value with a special state
-      final result = _executeGenerator(
-        exception,
-        GeneratorState.suspendedYield,
-      );
+      final result = throwHandler != null
+          ? throwHandler!(exception)
+          : _executeGenerator(exception, GeneratorState.suspendedYield);
 
       if (result['done'] == true) {
         state = GeneratorState.completed;
+        returnValue = result['value'];
       } else {
         state = GeneratorState.suspendedYield;
+        lastYieldedValue = result['value'];
       }
 
       return _createIteratorResult(result['value'], result['done']);

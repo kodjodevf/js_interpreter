@@ -597,7 +597,42 @@ class JSLexer {
             buffer.write('\v');
             break;
           case '0':
-            buffer.write('\x00');
+            if (!_isAtEnd() &&
+                _peek().compareTo('0') >= 0 &&
+                _peek().compareTo('7') <= 0) {
+              final octal = StringBuffer()..write('0');
+              for (var i = 0; i < 2; i++) {
+                if (_isAtEnd()) break;
+                final next = _peek();
+                if (next.compareTo('0') >= 0 && next.compareTo('7') <= 0) {
+                  octal.write(_advance());
+                } else {
+                  break;
+                }
+              }
+              buffer.writeCharCode(int.parse(octal.toString(), radix: 8));
+            } else {
+              buffer.write('\x00');
+            }
+            break;
+          case '1':
+          case '2':
+          case '3':
+          case '4':
+          case '5':
+          case '6':
+          case '7':
+            final octal = StringBuffer()..write(escaped);
+            for (var i = 0; i < 2; i++) {
+              if (_isAtEnd()) break;
+              final next = _peek();
+              if (next.compareTo('0') >= 0 && next.compareTo('7') <= 0) {
+                octal.write(_advance());
+              } else {
+                break;
+              }
+            }
+            buffer.writeCharCode(int.parse(octal.toString(), radix: 8));
             break;
           case '\\':
             buffer.write('\\');
@@ -710,7 +745,7 @@ class JSLexer {
     _advance();
 
     final value = buffer.toString();
-    final lexeme = '$quote$value$quote';
+    final lexeme = source.substring(start, _current);
     _addTokenWithLiteral(
       TokenType.string,
       lexeme,

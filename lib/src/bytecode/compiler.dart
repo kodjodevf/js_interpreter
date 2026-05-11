@@ -585,6 +585,27 @@ class BytecodeCompiler implements ASTVisitor<void> {
     _bc.emitAtomU8(Op.throwError, atom, 2);
   }
 
+  bool _isRuntimeInvalidCallAssignmentTarget(Expression expr) {
+    return !_ctx.isStrict && expr is CallExpression;
+  }
+
+  void _emitRuntimeInvalidAssignmentTarget(
+    Expression expr,
+    int line, {
+    bool hasAssignedValueOnStack = false,
+  }) {
+    expr.accept(this);
+    _bc.emit(Op.drop);
+    _ctx.adjustStack(-1);
+    if (hasAssignedValueOnStack) {
+      _bc.emit(Op.drop);
+      _ctx.adjustStack(-1);
+    }
+    final atom = _ctx.addConstant('Invalid left-hand side in assignment');
+    _bc.setLine(line);
+    _bc.emitAtomU8(Op.throwError, atom, 1);
+  }
+
   /// Quick access to current function context
   _FunctionContext get _ctx => _funcStack.last;
 
@@ -1815,6 +1836,12 @@ class BytecodeCompiler implements ASTVisitor<void> {
         return;
       }
 
+      if ((node.operator == '++' || node.operator == '--') &&
+          _isRuntimeInvalidCallAssignmentTarget(node.operand)) {
+        _emitRuntimeInvalidAssignmentTarget(node.operand, node.line);
+        return;
+      }
+
       // Special case: prefix ++/-- on member expressions
       if ((node.operator == '++' || node.operator == '--') &&
           node.operand is MemberExpression) {
@@ -1863,6 +1890,10 @@ class BytecodeCompiler implements ASTVisitor<void> {
           node.operand as MemberExpression,
           node.operator == '++' ? Op.inc : Op.dec,
         );
+        return;
+      }
+      if (_isRuntimeInvalidCallAssignmentTarget(node.operand)) {
+        _emitRuntimeInvalidAssignmentTarget(node.operand, node.line);
         return;
       }
       // Postfix: ++/-- on identifiers
@@ -2152,6 +2183,8 @@ class BytecodeCompiler implements ASTVisitor<void> {
         _emitSetVar(name, left.line, left.column);
       } else if (node.left is MemberExpression) {
         _compileMemberAssign(node.left as MemberExpression, node.right);
+      } else if (_isRuntimeInvalidCallAssignmentTarget(node.left)) {
+        _emitRuntimeInvalidAssignmentTarget(node.left, node.line);
       } else {
         throw CompileError('Invalid assignment target', node.line);
       }
@@ -2185,6 +2218,8 @@ class BytecodeCompiler implements ASTVisitor<void> {
           baseOp,
           node.right,
         );
+      } else if (_isRuntimeInvalidCallAssignmentTarget(node.left)) {
+        _emitRuntimeInvalidAssignmentTarget(node.left, node.line);
       } else {
         throw CompileError('Invalid assignment target', node.line);
       }
@@ -3575,6 +3610,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
     Pattern? pattern;
     String? varName;
     MemberExpression? memberTarget;
+    Expression? invalidRuntimeTarget;
     String kind = 'let';
 
     if (node.left is VariableDeclaration) {
@@ -3598,6 +3634,9 @@ class BytecodeCompiler implements ASTVisitor<void> {
         varName = (node.left as IdentifierExpression).name;
       } else if (node.left is MemberExpression) {
         memberTarget = node.left as MemberExpression;
+      } else if (node.left is Expression &&
+          _isRuntimeInvalidCallAssignmentTarget(node.left as Expression)) {
+        invalidRuntimeTarget = node.left as Expression;
       }
     }
 
@@ -3617,6 +3656,12 @@ class BytecodeCompiler implements ASTVisitor<void> {
       _compileDestructuringBinding(pattern, declare: true, kind: kind);
     } else if (memberTarget != null) {
       _emitAssignLoopValueToMember(memberTarget);
+    } else if (invalidRuntimeTarget != null) {
+      _emitRuntimeInvalidAssignmentTarget(
+        invalidRuntimeTarget,
+        node.line,
+        hasAssignedValueOnStack: true,
+      );
     } else {
       _emitPutVar(varName!, node.line);
     }
@@ -3662,6 +3707,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
     Pattern? pattern;
     String? varName;
     MemberExpression? memberTarget;
+    Expression? invalidRuntimeTarget;
     String kind = 'let';
 
     if (node.left is VariableDeclaration) {
@@ -3685,6 +3731,9 @@ class BytecodeCompiler implements ASTVisitor<void> {
         varName = (node.left as IdentifierExpression).name;
       } else if (node.left is MemberExpression) {
         memberTarget = node.left as MemberExpression;
+      } else if (node.left is Expression &&
+          _isRuntimeInvalidCallAssignmentTarget(node.left as Expression)) {
+        invalidRuntimeTarget = node.left as Expression;
       }
     }
 
@@ -3710,6 +3759,12 @@ class BytecodeCompiler implements ASTVisitor<void> {
       _compileDestructuringBinding(pattern, declare: true, kind: kind);
     } else if (memberTarget != null) {
       _emitAssignLoopValueToMember(memberTarget);
+    } else if (invalidRuntimeTarget != null) {
+      _emitRuntimeInvalidAssignmentTarget(
+        invalidRuntimeTarget,
+        node.line,
+        hasAssignedValueOnStack: true,
+      );
     } else {
       _emitPutVar(varName!, node.line);
     }

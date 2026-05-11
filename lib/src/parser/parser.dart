@@ -792,10 +792,14 @@ class JSParser {
   }
 
   /// Parse a simple JavaScript expression
-  static Expression parseExpression(String source) {
+  static Expression parseExpression(
+    String source, {
+    bool initialStrictMode = false,
+  }) {
     final lexer = JSLexer(source);
     final tokens = lexer.tokenize();
-    final parser = JSParser(tokens, initialStrictMode: false);
+    final parser = JSParser(tokens, initialStrictMode: initialStrictMode);
+    parser._strictMode = initialStrictMode;
     return parser._expression();
   }
 
@@ -3989,6 +3993,12 @@ class JSParser {
 
     if (_match([TokenType.string])) {
       final token = _previous();
+      if (_isInStrictMode() && _hasLegacyOctalEscapeInStringToken(token)) {
+        throw ParseError(
+          'Octal escape sequences are not allowed in strict mode',
+          token,
+        );
+      }
       return LiteralExpression(
         value: token.literal,
         type: 'string',
@@ -4266,7 +4276,16 @@ class JSParser {
         // Parse arrow function parameters
         Expression params;
 
-        if (_match([TokenType.leftParen])) {
+        if (_check(TokenType.leftParen)) {
+          if (!_hasArrowAfterCurrentParenGroup()) {
+            return IdentifierExpression(
+              name: 'async',
+              line: asyncToken.line,
+              column: asyncToken.column,
+            );
+          }
+
+          _advance();
           // async (param1, param2) => body or async () => body
           if (_check(TokenType.rightParen)) {
             // Special case for async () =>
@@ -6160,6 +6179,56 @@ class JSParser {
     throw ParseError(message, _peek());
   }
 
+  bool _hasArrowAfterCurrentParenGroup() {
+    if (!_check(TokenType.leftParen)) {
+      return false;
+    }
+
+    var depth = 0;
+    for (var index = _current; index < tokens.length; index++) {
+      final type = tokens[index].type;
+      if (type == TokenType.leftParen) {
+        depth++;
+      } else if (type == TokenType.rightParen) {
+        depth--;
+        if (depth == 0) {
+          return index + 1 < tokens.length &&
+              tokens[index + 1].type == TokenType.arrow;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  bool _hasLegacyOctalEscapeInStringToken(Token token) {
+    final raw = token.lexeme.length >= 2
+        ? token.lexeme.substring(1, token.lexeme.length - 1)
+        : token.lexeme;
+
+    for (var index = 0; index < raw.length; index++) {
+      if (raw[index] != r'\') {
+        continue;
+      }
+      if (index + 1 >= raw.length) {
+        break;
+      }
+
+      final next = raw[index + 1];
+      if ((next.compareTo('1') >= 0 && next.compareTo('7') <= 0) ||
+          (next == '0' &&
+              index + 2 < raw.length &&
+              raw[index + 2].compareTo('0') >= 0 &&
+              raw[index + 2].compareTo('7') <= 0)) {
+        return true;
+      }
+
+      index++;
+    }
+
+    return false;
+  }
+
   /// Parse an arrow from already parsed parameters
   ArrowFunctionExpression _parseArrowFunction(Expression params) {
     final token = _advance(); // Consomme '=>'
@@ -6945,7 +7014,10 @@ class JSParser {
 
       // Parser l'expression
       try {
-        final expression = JSParser.parseExpression(expressionCode);
+        final expression = JSParser.parseExpression(
+          expressionCode,
+          initialStrictMode: _isInStrictMode(),
+        );
         expressions.add(expression);
       } catch (e) {
         throw ParseError(
