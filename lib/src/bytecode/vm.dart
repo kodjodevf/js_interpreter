@@ -4953,6 +4953,7 @@ class BytecodeVM implements JSRuntime {
   }
 
   String _typeOf(JSValue val) {
+    if (_isHtmlDda(val)) return 'undefined';
     if (val.isUndefined) return 'undefined';
     if (val.isNull) return 'object';
     if (val.isBoolean) return 'boolean';
@@ -5458,6 +5459,9 @@ class BytecodeVM implements JSRuntime {
     // Same type: delegate to equals/strictEquals
     if (x.type == y.type) return x.strictEquals(y);
 
+    if (_isHtmlDda(x) && (y.isNull || y.isUndefined)) return true;
+    if (_isHtmlDda(y) && (x.isNull || x.isUndefined)) return true;
+
     // null == undefined
     if (x.isNull && y.isUndefined) return true;
     if (x.isUndefined && y.isNull) return true;
@@ -5489,6 +5493,10 @@ class BytecodeVM implements JSRuntime {
     if (x.isNumber && y.isBigInt) return y.equals(x);
 
     return false;
+  }
+
+  bool _isHtmlDda(JSValue value) {
+    return value is JSObject && value.hasInternalSlot('IsHTMLDDA');
   }
 
   static String _jsToString(JSValue val) {

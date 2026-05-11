@@ -895,7 +895,12 @@ class JSObject extends JSValue {
   dynamic get primitiveValue => this;
 
   @override
-  bool toBoolean() => true; // Objects are always truthy
+  bool toBoolean() {
+    if (hasInternalSlot('IsHTMLDDA')) {
+      return false;
+    }
+    return true;
+  }
 
   // Getter to check if object is extensible
   bool isExtensible = true;

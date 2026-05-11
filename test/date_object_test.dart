@@ -108,5 +108,45 @@ void main() {
       final result = interpreter.eval('new Date("invalid")');
       expect(result.toString(), equals('Invalid Date'));
     });
+
+    test('Date.prototype.getYear is installed on the shared prototype', () {
+      final result = interpreter.eval('''
+        typeof Date.prototype.getYear === 'function' &&
+        new Date(2001, 0, 1).getYear() === 101
+      ''');
+
+      expect(result.toBoolean(), isTrue);
+    });
+
+    test('Date.prototype.setYear uses MakeFullYear semantics', () {
+      final result = interpreter.eval('''
+        const d = new Date(0);
+        const timestamp = d.setYear(1);
+        d.getYear() === 1 && timestamp === d.getTime();
+      ''');
+
+      expect(result.toBoolean(), isTrue);
+    });
+
+    test('Date.prototype.getYear throws on incompatible receiver', () {
+      final result = interpreter.eval('''
+        try {
+          Date.prototype.getYear.call({});
+          false;
+        } catch (error) {
+          error instanceof TypeError;
+        }
+      ''');
+
+      expect(result.toBoolean(), isTrue);
+    });
+
+    test('Date.prototype.toGMTString formats as GMT', () {
+      final result = interpreter.eval('''
+        new Date('2023-01-01T00:00:00.000Z').toGMTString()
+      ''');
+
+      expect(result.toString(), equals('Sun, 01 Jan 2023 00:00:00 GMT'));
+    });
   });
 }

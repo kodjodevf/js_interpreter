@@ -341,6 +341,422 @@ String _formatIsoString(DateTime value) {
       'Z';
 }
 
+String _formatUtcString(DateTime value) {
+  const weekDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+
+  final utc = value.toUtc();
+  final dayName = weekDays[utc.weekday - 1];
+  final monthName = months[utc.month - 1];
+  final day = utc.day.toString().padLeft(2, '0');
+  final year = utc.year.toString().padLeft(4, '0');
+  final hour = utc.hour.toString().padLeft(2, '0');
+  final minute = utc.minute.toString().padLeft(2, '0');
+  final second = utc.second.toString().padLeft(2, '0');
+  return '$dayName, $day $monthName $year $hour:$minute:$second GMT';
+}
+
+int _makeFullYear(double year) {
+  final truncated = year.truncate();
+  if (truncated >= 0 && truncated <= 99) {
+    return truncated + 1900;
+  }
+  return truncated;
+}
+
+JSDate _requireDateThis(List<JSValue> args, String methodName) {
+  if (args.isEmpty || args[0] is! JSDate) {
+    throw JSTypeError(
+      'Date.prototype.$methodName called on incompatible receiver',
+    );
+  }
+  return args[0] as JSDate;
+}
+
+void _defineDatePrototypeMethod(
+  JSObject prototype,
+  String name,
+  NativeFunction nativeImpl, {
+  int expectedArgs = 0,
+}) {
+  prototype.defineProperty(
+    name,
+    PropertyDescriptor(
+      value: JSNativeFunction(
+        functionName: name,
+        nativeImpl: nativeImpl,
+        expectedArgs: expectedArgs,
+      ),
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    ),
+  );
+}
+
+void _installDatePrototypeMethods(JSObject prototype) {
+  final toUtcStringFunction = JSNativeFunction(
+    functionName: 'toUTCString',
+    nativeImpl: (args) {
+      final date = _requireDateThis(args, 'toUTCString');
+      if (!date._isValid) return JSValueFactory.string('Invalid Date');
+      return JSValueFactory.string(_formatUtcString(date._dateTime));
+    },
+    expectedArgs: 0,
+  );
+
+  _defineDatePrototypeMethod(
+    prototype,
+    'getTime',
+    (args) =>
+        JSValueFactory.number(_requireDateThis(args, 'getTime').toNumber()),
+  );
+
+  _defineDatePrototypeMethod(prototype, 'getFullYear', (args) {
+    final date = _requireDateThis(args, 'getFullYear');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(date._dateTime.year.toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getYear', (args) {
+    final date = _requireDateThis(args, 'getYear');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number((date._dateTime.year - 1900).toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getMonth', (args) {
+    final date = _requireDateThis(args, 'getMonth');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number((date._dateTime.month - 1).toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getDate', (args) {
+    final date = _requireDateThis(args, 'getDate');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(date._dateTime.day.toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getDay', (args) {
+    final date = _requireDateThis(args, 'getDay');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(
+      date._dateTime.weekday == 7 ? 0.0 : date._dateTime.weekday.toDouble(),
+    );
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getHours', (args) {
+    final date = _requireDateThis(args, 'getHours');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(date._dateTime.hour.toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getMinutes', (args) {
+    final date = _requireDateThis(args, 'getMinutes');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(date._dateTime.minute.toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getSeconds', (args) {
+    final date = _requireDateThis(args, 'getSeconds');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(date._dateTime.second.toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getMilliseconds', (args) {
+    final date = _requireDateThis(args, 'getMilliseconds');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(date._dateTime.millisecond.toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getTimezoneOffset', (args) {
+    final date = _requireDateThis(args, 'getTimezoneOffset');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(
+      -date._dateTime.timeZoneOffset.inMinutes.toDouble(),
+    );
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getUTCFullYear', (args) {
+    final date = _requireDateThis(args, 'getUTCFullYear');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(date._dateTime.toUtc().year.toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getUTCMonth', (args) {
+    final date = _requireDateThis(args, 'getUTCMonth');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number((date._dateTime.toUtc().month - 1).toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getUTCDate', (args) {
+    final date = _requireDateThis(args, 'getUTCDate');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(date._dateTime.toUtc().day.toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getUTCHours', (args) {
+    final date = _requireDateThis(args, 'getUTCHours');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(date._dateTime.toUtc().hour.toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getUTCMinutes', (args) {
+    final date = _requireDateThis(args, 'getUTCMinutes');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(date._dateTime.toUtc().minute.toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getUTCSeconds', (args) {
+    final date = _requireDateThis(args, 'getUTCSeconds');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(date._dateTime.toUtc().second.toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'getUTCMilliseconds', (args) {
+    final date = _requireDateThis(args, 'getUTCMilliseconds');
+    if (!date._isValid) return JSValueFactory.number(double.nan);
+    return JSValueFactory.number(date._dateTime.toUtc().millisecond.toDouble());
+  });
+
+  _defineDatePrototypeMethod(prototype, 'setUTCFullYear', (args) {
+    final date = _requireDateThis(args, 'setUTCFullYear');
+    if (args.length < 2) {
+      return JSValueFactory.number(date.toNumber());
+    }
+
+    final year = _toIntegerOrNull(args[1]);
+    final utc = date._isValid
+        ? date._dateTime.toUtc()
+        : DateTime.fromMillisecondsSinceEpoch(0).toUtc();
+    final month = args.length > 2
+        ? _toIntegerOrNull(args[2])?.toInt()
+        : utc.month - 1;
+    final day = args.length > 3 ? _toIntegerOrNull(args[3])?.toInt() : utc.day;
+    if (year == null || month == null || day == null) {
+      date._isValid = false;
+      return JSValueFactory.number(double.nan);
+    }
+
+    date._dateTime = DateTime.utc(
+      year,
+      month + 1,
+      day,
+      utc.hour,
+      utc.minute,
+      utc.second,
+      utc.millisecond,
+    ).toLocal();
+    date._isValid = true;
+    return JSValueFactory.number(date.toNumber());
+  }, expectedArgs: 3);
+
+  _defineDatePrototypeMethod(prototype, 'setUTCHours', (args) {
+    final date = _requireDateThis(args, 'setUTCHours');
+    if (args.length < 2) {
+      return JSValueFactory.number(date.toNumber());
+    }
+
+    final utc = date._isValid
+        ? date._dateTime.toUtc()
+        : DateTime.fromMillisecondsSinceEpoch(0).toUtc();
+    final hour = _toIntegerOrNull(args[1]);
+    final minute = args.length > 2 ? _toIntegerOrNull(args[2]) : utc.minute;
+    final second = args.length > 3 ? _toIntegerOrNull(args[3]) : utc.second;
+    final millisecond = args.length > 4
+        ? _toIntegerOrNull(args[4])
+        : utc.millisecond;
+    if (hour == null ||
+        minute == null ||
+        second == null ||
+        millisecond == null) {
+      date._isValid = false;
+      return JSValueFactory.number(double.nan);
+    }
+
+    date._dateTime = DateTime.utc(
+      utc.year,
+      utc.month,
+      utc.day,
+      hour,
+      minute,
+      second,
+      millisecond,
+    ).toLocal();
+    date._isValid = true;
+    return JSValueFactory.number(date.toNumber());
+  }, expectedArgs: 4);
+
+  _defineDatePrototypeMethod(prototype, 'setTime', (args) {
+    final date = _requireDateThis(args, 'setTime');
+    if (args.length < 2) {
+      return JSValueFactory.number(date.toNumber());
+    }
+    final value = args[1].toNumber();
+    if (value.isNaN || value.isInfinite) {
+      date._isValid = false;
+      return JSValueFactory.number(double.nan);
+    }
+    date._dateTime = DateTime.fromMillisecondsSinceEpoch(value.truncate());
+    date._isValid = true;
+    return JSValueFactory.number(date.toNumber());
+  }, expectedArgs: 1);
+
+  _defineDatePrototypeMethod(prototype, 'setFullYear', (args) {
+    final date = _requireDateThis(args, 'setFullYear');
+    if (args.length < 2) {
+      return JSValueFactory.number(date.toNumber());
+    }
+
+    final yearNumber = args[1].toNumber();
+    final base = date._isValid ? date._dateTime : DateTime(1970, 1, 1);
+    if (yearNumber.isNaN || yearNumber.isInfinite) {
+      date._isValid = false;
+      return JSValueFactory.number(double.nan);
+    }
+
+    final month = args.length > 2 ? _toIntegerOrNull(args[2]) : base.month - 1;
+    final day = args.length > 3 ? _toIntegerOrNull(args[3]) : base.day;
+    if (month == null || day == null) {
+      date._isValid = false;
+      return JSValueFactory.number(double.nan);
+    }
+
+    date._dateTime = DateTime(
+      yearNumber.truncate(),
+      month + 1,
+      day,
+      base.hour,
+      base.minute,
+      base.second,
+      base.millisecond,
+    );
+    date._isValid = true;
+    return JSValueFactory.number(date.toNumber());
+  }, expectedArgs: 3);
+
+  _defineDatePrototypeMethod(prototype, 'setYear', (args) {
+    final date = _requireDateThis(args, 'setYear');
+    final base = date._isValid ? date._dateTime : DateTime(1970, 1, 1);
+    if (args.length < 2) {
+      date._isValid = false;
+      return JSValueFactory.number(double.nan);
+    }
+
+    final yearNumber = args[1].toNumber();
+    if (yearNumber.isNaN || yearNumber.isInfinite) {
+      date._isValid = false;
+      return JSValueFactory.number(double.nan);
+    }
+
+    try {
+      final updated = DateTime(
+        _makeFullYear(yearNumber),
+        base.month,
+        base.day,
+        base.hour,
+        base.minute,
+        base.second,
+        base.millisecond,
+      );
+      final clipped = _timeClip(updated.millisecondsSinceEpoch.toDouble());
+      if (clipped.isNaN) {
+        date._isValid = false;
+        return JSValueFactory.number(double.nan);
+      }
+      date._dateTime = DateTime.fromMillisecondsSinceEpoch(clipped.truncate());
+      date._isValid = true;
+      return JSValueFactory.number(date.toNumber());
+    } catch (e) {
+      date._isValid = false;
+      return JSValueFactory.number(double.nan);
+    }
+  }, expectedArgs: 1);
+
+  _defineDatePrototypeMethod(prototype, 'setDate', (args) {
+    final date = _requireDateThis(args, 'setDate');
+    if (args.length < 2) {
+      return JSValueFactory.number(date.toNumber());
+    }
+    final day = _toIntegerOrNull(args[1]);
+    if (day == null) {
+      date._isValid = false;
+      return JSValueFactory.number(double.nan);
+    }
+    final base = date._isValid ? date._dateTime : DateTime(1970, 1, 1);
+    date._dateTime = DateTime(
+      base.year,
+      base.month,
+      day,
+      base.hour,
+      base.minute,
+      base.second,
+      base.millisecond,
+    );
+    date._isValid = true;
+    return JSValueFactory.number(date.toNumber());
+  }, expectedArgs: 1);
+
+  _defineDatePrototypeMethod(
+    prototype,
+    'toString',
+    (args) =>
+        JSValueFactory.string(_requireDateThis(args, 'toString').toString()),
+  );
+
+  _defineDatePrototypeMethod(prototype, 'toISOString', (args) {
+    final date = _requireDateThis(args, 'toISOString');
+    if (!date._isValid) return JSValueFactory.string('Invalid Date');
+    return JSValueFactory.string(_formatIsoString(date._dateTime));
+  });
+
+  _defineDatePrototypeMethod(prototype, 'toJSON', (args) {
+    final date = _requireDateThis(args, 'toJSON');
+    if (!date._isValid) {
+      return JSValueFactory.nullValue();
+    }
+    return JSValueFactory.string(_formatIsoString(date._dateTime));
+  });
+
+  _defineDatePrototypeMethod(
+    prototype,
+    'valueOf',
+    (args) =>
+        JSValueFactory.number(_requireDateThis(args, 'valueOf').toNumber()),
+  );
+
+  prototype.defineProperty(
+    'toUTCString',
+    PropertyDescriptor(
+      value: toUtcStringFunction,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    ),
+  );
+  prototype.defineProperty(
+    'toGMTString',
+    PropertyDescriptor(
+      value: toUtcStringFunction,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    ),
+  );
+}
+
 /// JavaScript Date Object implementation
 class DateObject {
   /// Creates the global Date constructor and prototype
@@ -358,20 +774,29 @@ class DateObject {
           final arg = args[0];
           if (arg.type == JSValueType.number) {
             // new Date(milliseconds)
-            final ms = arg.toNumber().floor();
-            return JSDate(DateTime.fromMillisecondsSinceEpoch(ms));
-          } else if (arg.type == JSValueType.string) {
-            // new Date(dateString)
-            final parsed = _parseEcmaDateString(arg.toString());
-            if (parsed != null) {
-              return JSDate(parsed.isUtc ? parsed.toLocal() : parsed);
+            final clipped = _timeClip(arg.toNumber());
+            if (clipped.isNaN) {
+              return JSDate.invalid();
             }
             try {
-              final fallback = DateTime.parse(arg.toString());
-              return JSDate(fallback.isUtc ? fallback.toLocal() : fallback);
+              return JSDate(
+                DateTime.fromMillisecondsSinceEpoch(clipped.truncate()),
+              );
             } catch (e) {
               return JSDate.invalid(); // Invalid Date
             }
+          }
+
+          final dateStr = arg.toString();
+          final parsed = _parseEcmaDateString(dateStr);
+          if (parsed != null) {
+            return JSDate(parsed.isUtc ? parsed.toLocal() : parsed);
+          }
+          try {
+            final fallback = DateTime.parse(dateStr);
+            return JSDate(fallback.isUtc ? fallback.toLocal() : fallback);
+          } catch (e) {
+            return JSDate.invalid(); // Invalid Date
           }
         } else {
           // new Date(year, month, day, hour, minute, second, millisecond)
@@ -400,8 +825,6 @@ class DateObject {
             return JSDate.invalid(); // Invalid Date
           }
         }
-
-        return JSDate(DateTime.now());
       },
       expectedArgs: 7,
       isConstructor: true, // Date is a constructor
@@ -409,6 +832,11 @@ class DateObject {
 
     // Add static methods to Date constructor
     _addStaticMethods(dateImpl);
+    final datePrototype = JSObject();
+    _installDatePrototypeMethods(datePrototype);
+    dateImpl.setProperty('prototype', datePrototype);
+    datePrototype.defineConstructorProperty(dateImpl);
+    JSDate.setDatePrototype(datePrototype);
 
     return dateImpl;
   }
@@ -513,19 +941,29 @@ class DateObject {
 
 /// JavaScript Date value type
 class JSDate extends JSObject {
+  static JSObject? _datePrototype;
+
+  static void setDatePrototype(JSObject prototype) {
+    _datePrototype = prototype;
+  }
+
   late DateTime _dateTime;
   bool _isValid = true;
 
   JSDate(DateTime dateTime) : super() {
     _dateTime = dateTime;
-    _setupPrototypeMethods();
+    if (_datePrototype != null) {
+      setPrototype(_datePrototype!);
+    }
   }
 
   /// Invalid Date constructor
   JSDate.invalid() : super() {
     _dateTime = DateTime.fromMillisecondsSinceEpoch(0);
     _isValid = false;
-    _setupPrototypeMethods();
+    if (_datePrototype != null) {
+      setPrototype(_datePrototype!);
+    }
   }
 
   @override
@@ -551,376 +989,4 @@ class JSDate extends JSObject {
 
   @override
   dynamic get primitiveValue => _isValid ? _dateTime : null;
-
-  /// Setup Date prototype methods
-  void _setupPrototypeMethods() {
-    // getTime() - returns timestamp
-    super.setProperty(
-      'getTime',
-      JSNativeFunction(
-        functionName: 'getTime',
-        nativeImpl: (args) => JSValueFactory.number(toNumber()),
-      ),
-    );
-
-    // getFullYear() - returns year
-    super.setProperty(
-      'getFullYear',
-      JSNativeFunction(
-        functionName: 'getFullYear',
-        nativeImpl: (args) => JSValueFactory.number(_dateTime.year.toDouble()),
-      ),
-    );
-
-    // getMonth() - returns month (0-based)
-    super.setProperty(
-      'getMonth',
-      JSNativeFunction(
-        functionName: 'getMonth',
-        nativeImpl: (args) =>
-            JSValueFactory.number((_dateTime.month - 1).toDouble()),
-      ),
-    );
-
-    // getDate() - returns day of month
-    super.setProperty(
-      'getDate',
-      JSNativeFunction(
-        functionName: 'getDate',
-        nativeImpl: (args) => JSValueFactory.number(_dateTime.day.toDouble()),
-      ),
-    );
-
-    // getDay() - returns day of week (0=Sunday)
-    super.setProperty(
-      'getDay',
-      JSNativeFunction(
-        functionName: 'getDay',
-        nativeImpl: (args) => JSValueFactory.number(
-          _dateTime.weekday == 7 ? 0.0 : _dateTime.weekday.toDouble(),
-        ),
-      ),
-    );
-
-    // getHours() - returns hour
-    super.setProperty(
-      'getHours',
-      JSNativeFunction(
-        functionName: 'getHours',
-        nativeImpl: (args) => JSValueFactory.number(_dateTime.hour.toDouble()),
-      ),
-    );
-
-    // getMinutes() - returns minutes
-    super.setProperty(
-      'getMinutes',
-      JSNativeFunction(
-        functionName: 'getMinutes',
-        nativeImpl: (args) =>
-            JSValueFactory.number(_dateTime.minute.toDouble()),
-      ),
-    );
-
-    // getSeconds() - returns seconds
-    super.setProperty(
-      'getSeconds',
-      JSNativeFunction(
-        functionName: 'getSeconds',
-        nativeImpl: (args) =>
-            JSValueFactory.number(_dateTime.second.toDouble()),
-      ),
-    );
-
-    // getMilliseconds() - returns milliseconds
-    super.setProperty(
-      'getMilliseconds',
-      JSNativeFunction(
-        functionName: 'getMilliseconds',
-        nativeImpl: (args) =>
-            JSValueFactory.number(_dateTime.millisecond.toDouble()),
-      ),
-    );
-
-    // getTimezoneOffset() - returns timezone offset in minutes
-    super.setProperty(
-      'getTimezoneOffset',
-      JSNativeFunction(
-        functionName: 'getTimezoneOffset',
-        nativeImpl: (args) => JSValueFactory.number(
-          -_dateTime.timeZoneOffset.inMinutes.toDouble(),
-        ),
-      ),
-    );
-
-    // UTC methods
-    // getUTCFullYear() - returns UTC year
-    super.setProperty(
-      'getUTCFullYear',
-      JSNativeFunction(
-        functionName: 'getUTCFullYear',
-        nativeImpl: (args) =>
-            JSValueFactory.number(_dateTime.toUtc().year.toDouble()),
-      ),
-    );
-
-    // getUTCMonth() - returns UTC month (0-based)
-    super.setProperty(
-      'getUTCMonth',
-      JSNativeFunction(
-        functionName: 'getUTCMonth',
-        nativeImpl: (args) =>
-            JSValueFactory.number((_dateTime.toUtc().month - 1).toDouble()),
-      ),
-    );
-
-    // getUTCDate() - returns UTC day of month
-    super.setProperty(
-      'getUTCDate',
-      JSNativeFunction(
-        functionName: 'getUTCDate',
-        nativeImpl: (args) =>
-            JSValueFactory.number(_dateTime.toUtc().day.toDouble()),
-      ),
-    );
-
-    // getUTCHours() - returns UTC hour
-    super.setProperty(
-      'getUTCHours',
-      JSNativeFunction(
-        functionName: 'getUTCHours',
-        nativeImpl: (args) =>
-            JSValueFactory.number(_dateTime.toUtc().hour.toDouble()),
-      ),
-    );
-
-    // getUTCMinutes() - returns UTC minutes
-    super.setProperty(
-      'getUTCMinutes',
-      JSNativeFunction(
-        functionName: 'getUTCMinutes',
-        nativeImpl: (args) =>
-            JSValueFactory.number(_dateTime.toUtc().minute.toDouble()),
-      ),
-    );
-
-    // getUTCSeconds() - returns UTC seconds
-    super.setProperty(
-      'getUTCSeconds',
-      JSNativeFunction(
-        functionName: 'getUTCSeconds',
-        nativeImpl: (args) =>
-            JSValueFactory.number(_dateTime.toUtc().second.toDouble()),
-      ),
-    );
-
-    // getUTCMilliseconds() - returns UTC milliseconds
-    super.setProperty(
-      'getUTCMilliseconds',
-      JSNativeFunction(
-        functionName: 'getUTCMilliseconds',
-        nativeImpl: (args) =>
-            JSValueFactory.number(_dateTime.toUtc().millisecond.toDouble()),
-      ),
-    );
-
-    // setUTCFullYear(year, month, day) - sets UTC year
-    super.setProperty(
-      'setUTCFullYear',
-      JSNativeFunction(
-        functionName: 'setUTCFullYear',
-        nativeImpl: (args) {
-          if (args.isNotEmpty) {
-            final year = args[0].toNumber().floor();
-            final month = args.length > 1
-                ? args[1].toNumber().floor() + 1
-                : _dateTime.toUtc().month;
-            final day = args.length > 2
-                ? args[2].toNumber().floor()
-                : _dateTime.toUtc().day;
-
-            try {
-              final utcDateTime = DateTime.utc(
-                year,
-                month,
-                day,
-                _dateTime.toUtc().hour,
-                _dateTime.toUtc().minute,
-                _dateTime.toUtc().second,
-                _dateTime.toUtc().millisecond,
-              );
-              _dateTime = utcDateTime;
-              _isValid = true;
-            } catch (e) {
-              _isValid = false;
-            }
-          }
-          return JSValueFactory.number(toNumber());
-        },
-      ),
-    );
-
-    super.setProperty(
-      'setUTCHours',
-      JSNativeFunction(
-        functionName: 'setUTCHours',
-        nativeImpl: (args) {
-          if (args.isEmpty) {
-            return JSValueFactory.number(toNumber());
-          }
-
-          final utc = _dateTime.toUtc();
-          final hour = _toIntegerOrNull(args[0]);
-          final minute = args.length > 1
-              ? _toIntegerOrNull(args[1])
-              : utc.minute;
-          final second = args.length > 2
-              ? _toIntegerOrNull(args[2])
-              : utc.second;
-          final millisecond = args.length > 3
-              ? _toIntegerOrNull(args[3])
-              : utc.millisecond;
-
-          if (hour == null ||
-              minute == null ||
-              second == null ||
-              millisecond == null) {
-            _isValid = false;
-            return JSValueFactory.number(double.nan);
-          }
-
-          _dateTime = DateTime.utc(
-            utc.year,
-            utc.month,
-            utc.day,
-            hour,
-            minute,
-            second,
-            millisecond,
-          ).toLocal();
-          _isValid = true;
-          return JSValueFactory.number(toNumber());
-        },
-      ),
-    );
-
-    // setTime(milliseconds) - sets time from timestamp
-    super.setProperty(
-      'setTime',
-      JSNativeFunction(
-        functionName: 'setTime',
-        nativeImpl: (args) {
-          if (args.isNotEmpty) {
-            final ms = args[0].toNumber().floor();
-            _dateTime = DateTime.fromMillisecondsSinceEpoch(ms);
-            _isValid = true;
-          }
-          return JSValueFactory.number(toNumber());
-        },
-      ),
-    );
-
-    // setFullYear(year, month, day) - sets year
-    super.setProperty(
-      'setFullYear',
-      JSNativeFunction(
-        functionName: 'setFullYear',
-        nativeImpl: (args) {
-          if (args.isNotEmpty) {
-            final year = args[0].toNumber().floor();
-            final month = args.length > 1
-                ? args[1].toNumber().floor() + 1
-                : _dateTime.month;
-            final day = args.length > 2
-                ? args[2].toNumber().floor()
-                : _dateTime.day;
-
-            try {
-              _dateTime = DateTime(
-                year,
-                month,
-                day,
-                _dateTime.hour,
-                _dateTime.minute,
-                _dateTime.second,
-                _dateTime.millisecond,
-              );
-              _isValid = true;
-            } catch (e) {
-              _isValid = false;
-            }
-          }
-          return JSValueFactory.number(toNumber());
-        },
-      ),
-    );
-
-    // setDate(day) - sets day of month
-    super.setProperty(
-      'setDate',
-      JSNativeFunction(
-        functionName: 'setDate',
-        nativeImpl: (args) {
-          if (args.isNotEmpty) {
-            final day = args[0].toNumber().floor();
-            try {
-              _dateTime = DateTime(
-                _dateTime.year,
-                _dateTime.month,
-                day,
-                _dateTime.hour,
-                _dateTime.minute,
-                _dateTime.second,
-                _dateTime.millisecond,
-              );
-              _isValid = true;
-            } catch (e) {
-              _isValid = false;
-            }
-          }
-          return JSValueFactory.number(toNumber());
-        },
-      ),
-    );
-    super.setProperty(
-      'toString',
-      JSNativeFunction(
-        functionName: 'toString',
-        nativeImpl: (args) => JSValueFactory.string(toString()),
-      ),
-    );
-
-    // toISOString() - returns ISO string
-    super.setProperty(
-      'toISOString',
-      JSNativeFunction(
-        functionName: 'toISOString',
-        nativeImpl: (args) {
-          if (!_isValid) return JSValueFactory.string('Invalid Date');
-          return JSValueFactory.string(_formatIsoString(_dateTime));
-        },
-      ),
-    );
-
-    super.setProperty(
-      'toJSON',
-      JSNativeFunction(
-        functionName: 'toJSON',
-        nativeImpl: (args) {
-          if (!_isValid) {
-            return JSValueFactory.nullValue();
-          }
-          return JSValueFactory.string(_formatIsoString(_dateTime));
-        },
-      ),
-    );
-
-    // valueOf() - returns primitive value (timestamp)
-    super.setProperty(
-      'valueOf',
-      JSNativeFunction(
-        functionName: 'valueOf',
-        nativeImpl: (args) => JSValueFactory.number(toNumber()),
-      ),
-    );
-  }
 }

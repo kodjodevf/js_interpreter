@@ -325,7 +325,7 @@ class JSONObject {
   static dynamic _jsValueToDart(JSValue jsValue, JSValue? replacer) {
     final Set<JSValue> visited = <JSValue>{};
 
-    // If we have a replacer function, create a wrapper object to call it on the root
+    // A function replacer is called on a synthetic holder for the root value.
     if (replacer != null &&
         (replacer is JSNativeFunction || replacer is JSFunction)) {
       final wrapper = JSObject();
@@ -337,7 +337,22 @@ class JSONObject {
       return result;
     }
 
-    return _jsValueToDartRecursive(jsValue, replacer, '', visited);
+    final rootValue = _applyToJsonIfPresent(jsValue, '');
+    return _jsValueToDartRecursive(rootValue, replacer, '', visited);
+  }
+
+  static JSValue _callFunctionWithThis(
+    JSValue function,
+    List<JSValue> args,
+    JSValue thisBinding,
+  ) {
+    if (function is JSNativeFunction) {
+      return function.callWithThis(args, thisBinding);
+    }
+    if (function is JSFunction && JSRuntime.current != null) {
+      return JSRuntime.current!.callFunction(function, args, thisBinding);
+    }
+    throw JSTypeError('${function.toString()} is not callable');
   }
 
   static JSValue _applyToJsonIfPresent(JSValue value, String key) {
@@ -347,17 +362,10 @@ class JSONObject {
 
     try {
       final toJson = value.getProperty('toJSON');
-      if (toJson is JSNativeFunction) {
-        return toJson.nativeImpl([JSValueFactory.string(key)]);
-      }
-      if (toJson is JSFunction && _functionExecutor != null) {
-        return _functionExecutor!(toJson, [JSValueFactory.string(key)]);
-      }
+      return _callFunctionWithThis(toJson, [JSValueFactory.string(key)], value);
     } catch (_) {
       return value;
     }
-
-    return value;
   }
 
   /// Convert JSValue to native Dart types (public API)
@@ -441,20 +449,6 @@ class JSONObject {
       return result;
     } else if (jsValue is JSObject) {
       visited.add(jsValue);
-
-      // Check if it's a Date object - call toISOString() if available
-      if (jsValue.hasProperty('toISOString')) {
-        try {
-          final toISOString = jsValue.getProperty('toISOString');
-          if (toISOString is JSNativeFunction) {
-            final isoString = toISOString.nativeImpl([]);
-            visited.remove(jsValue);
-            return isoString.toString();
-          }
-        } catch (e) {
-          // Fall through to regular object handling
-        }
-      }
 
       final Map<String, dynamic> result = {};
 

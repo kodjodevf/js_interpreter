@@ -3,6 +3,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:js_interpreter/js_interpreter.dart';
 
+class _Test262IsHtmlDdaObject extends JSObject {
+  _Test262IsHtmlDdaObject() {
+    setInternalSlot('IsHTMLDDA', true);
+  }
+}
+
 enum TestMode { defaultNoStrict, defaultStrict, noStrict, strict, all }
 
 class Test262Runner {
@@ -545,6 +551,7 @@ class Test262Runner {
   JSValue _createTest262Object(JSInterpreter interpreter) {
     final obj = JSObject();
     obj.setProperty('global', interpreter.eval('this'));
+    obj.setProperty('IsHTMLDDA', _Test262IsHtmlDdaObject());
     obj.setProperty('createRealm', interpreter.createRealmFunction());
     obj.setProperty(
       'detachArrayBuffer',

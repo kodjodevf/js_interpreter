@@ -4426,6 +4426,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
       final savedSuperVarName = _superVarName;
       if (superClass != null) {
         superClass.accept(this);
+        _emitDestructuringValidator('__validateClassHeritage__', line);
         superSlot = _ctx.declareLocal(
           '__super_$className',
           scope: VarScope.blockScope,

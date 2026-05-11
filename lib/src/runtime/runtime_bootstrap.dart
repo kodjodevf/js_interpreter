@@ -86,6 +86,7 @@ class RuntimeBootstrap {
         globals,
         getInterpreterInstanceId: getInterpreterInstanceId,
       );
+      _installCompilerHelpers(globals);
       _define(globals, 'global_var0', JSValueFactory.number(0));
       _installCommonJsGlobals(globals);
       _installGlobalThis(globals);
@@ -718,8 +719,13 @@ class RuntimeBootstrap {
 
   static JSNativeFunction _createDateConstructor() {
     final dateConstructor = DateObject.createDateConstructor();
-    final datePrototype = JSObject();
-    dateConstructor.setProperty('prototype', datePrototype);
+    final datePrototype = dateConstructor.getProperty('prototype');
+    if (datePrototype is! JSObject) {
+      final fallbackPrototype = JSObject();
+      dateConstructor.setProperty('prototype', fallbackPrototype);
+      fallbackPrototype.defineConstructorProperty(dateConstructor);
+      return dateConstructor;
+    }
     datePrototype.defineConstructorProperty(dateConstructor);
     return dateConstructor;
   }
@@ -2695,6 +2701,27 @@ class RuntimeBootstrap {
           }
           return JSValueFactory.createObject();
         },
+      ),
+    );
+  }
+
+  static void _installCompilerHelpers(Map<String, JSValue> globals) {
+    _define(
+      globals,
+      '__validateClassHeritage__',
+      JSNativeFunction(
+        functionName: '__validateClassHeritage__',
+        nativeImpl: (args) {
+          final value = args.isNotEmpty ? args[0] : JSUndefined.instance;
+          if (value.isNull) {
+            return value;
+          }
+          if (value is JSFunction && value.isConstructor) {
+            return value;
+          }
+          throw JSTypeError('${value.toString()} is not a constructor');
+        },
+        expectedArgs: 1,
       ),
     );
   }
