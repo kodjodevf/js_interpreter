@@ -5235,6 +5235,8 @@ class BytecodeVM implements JSRuntime {
         if (identical(obj, globals['globalThis'])) {
           _syncGlobalCacheFromObject(name, obj);
         }
+      } else if (obj is JSClass) {
+        obj.setProperty(name, value);
       } else if (obj is JSFunction) {
         obj.setProperty(name, value);
       }

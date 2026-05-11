@@ -2655,6 +2655,60 @@ class JSFunction extends JSValue {
         return; // Silently ignore in non-strict mode
       }
     }
+
+    JSValue? current = _getOwnFunctionPrototypeLink(this);
+    bool foundGetterWithoutSetter = false;
+    while (current != null) {
+      PropertyDescriptor? inheritedDescriptor;
+      if (current is JSFunction) {
+        inheritedDescriptor = current.getOwnPropertyDescriptor(name);
+        current = _getOwnFunctionPrototypeLink(current);
+      } else if (current is JSObject) {
+        inheritedDescriptor = current.getOwnPropertyDescriptor(name);
+        current = current.getPrototype();
+      } else {
+        break;
+      }
+
+      if (inheritedDescriptor == null) {
+        continue;
+      }
+
+      if (inheritedDescriptor.isAccessor) {
+        if (inheritedDescriptor.setter != null) {
+          final runtime = JSRuntime.current;
+          if (runtime != null) {
+            runtime.callFunction(inheritedDescriptor.setter!, [value], this);
+            return;
+          }
+          throw JSError(
+            'No evaluator available for inherited setter execution',
+          );
+        }
+        if (inheritedDescriptor.getter != null) {
+          foundGetterWithoutSetter = true;
+        }
+      } else if (!inheritedDescriptor.writable) {
+        final runtime = JSRuntime.current;
+        bool isStrictMode = false;
+        if (runtime != null) {
+          try {
+            isStrictMode = runtime.isStrictMode();
+          } catch (_) {
+            isStrictMode = false;
+          }
+        }
+        if (isStrictMode) {
+          throw JSTypeError('Cannot assign to read only property \'$name\'');
+        }
+        return;
+      }
+    }
+
+    if (foundGetterWithoutSetter) {
+      return;
+    }
+
     _properties[name] = value;
   }
 
@@ -3325,6 +3379,50 @@ class JSClass extends JSValue {
       if (descriptor.getter != null) {
         // In strict mode, this should throw an error
         throw JSTypeError('Cannot set property $name which has only a getter');
+      }
+    }
+
+    JSClass? currentClass = superClass;
+    while (currentClass != null) {
+      final inheritedDescriptor = currentClass._accessorProperties[name];
+      if (inheritedDescriptor != null) {
+        if (inheritedDescriptor.setter != null) {
+          final runtime = JSRuntime.current;
+          if (runtime != null) {
+            runtime.callFunction(inheritedDescriptor.setter!, [value], this);
+            return;
+          }
+          throw JSError(
+            'No evaluator available for inherited setter execution',
+          );
+        }
+        if (inheritedDescriptor.getter != null) {
+          throw JSTypeError(
+            'Cannot set property $name which has only a getter',
+          );
+        }
+      }
+      currentClass = currentClass.superClass;
+    }
+
+    if (superFunction != null) {
+      final inheritedDescriptor = superFunction!.getOwnPropertyDescriptor(name);
+      if (inheritedDescriptor != null) {
+        if (inheritedDescriptor.setter != null) {
+          final runtime = JSRuntime.current;
+          if (runtime != null) {
+            runtime.callFunction(inheritedDescriptor.setter!, [value], this);
+            return;
+          }
+          throw JSError(
+            'No evaluator available for inherited setter execution',
+          );
+        }
+        if (inheritedDescriptor.getter != null) {
+          throw JSTypeError(
+            'Cannot set property $name which has only a getter',
+          );
+        }
       }
     }
 

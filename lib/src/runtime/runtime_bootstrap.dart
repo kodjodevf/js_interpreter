@@ -710,6 +710,77 @@ class RuntimeBootstrap {
       expectedArgs: 2,
       isConstructor: true,
     );
+
+    JSValue readLegacyProperty(JSValue thisValue, JSValue Function() reader) {
+      if (!identical(thisValue, regexpConstructor)) {
+        throw JSTypeError(
+          'RegExp legacy accessor called on incompatible receiver',
+        );
+      }
+      return reader();
+    }
+
+    void defineLegacyAccessor(
+      String name,
+      JSValue Function() reader, {
+      JSFunction? setter,
+    }) {
+      regexpConstructor.defineProperty(
+        name,
+        PropertyDescriptor(
+          getter: JSNativeFunction(
+            functionName: 'get $name',
+            expectedArgs: 0,
+            nativeImpl: (args) {
+              final thisValue = args.isNotEmpty
+                  ? args[0]
+                  : JSValueFactory.undefined();
+              return readLegacyProperty(thisValue, reader);
+            },
+          ),
+          setter: setter,
+          enumerable: false,
+          configurable: true,
+          hasValueProperty: false,
+        ),
+      );
+    }
+
+    final inputSetter = JSNativeFunction(
+      functionName: 'set input',
+      expectedArgs: 1,
+      nativeImpl: (args) {
+        final thisValue = args.isNotEmpty
+            ? args[0]
+            : JSValueFactory.undefined();
+        if (!identical(thisValue, regexpConstructor)) {
+          throw JSTypeError(
+            'RegExp legacy accessor called on incompatible receiver',
+          );
+        }
+        JSRegExp.setLegacyInput(args.length > 1 ? args[1].toString() : '');
+        return JSValueFactory.undefined();
+      },
+    );
+
+    defineLegacyAccessor('input', JSRegExp.legacyInput, setter: inputSetter);
+    defineLegacyAccessor(r'$_', JSRegExp.legacyInput, setter: inputSetter);
+    defineLegacyAccessor('lastMatch', JSRegExp.legacyLastMatch);
+    defineLegacyAccessor(r'$&', JSRegExp.legacyLastMatch);
+    defineLegacyAccessor('lastParen', JSRegExp.legacyLastParen);
+    defineLegacyAccessor(r'$+', JSRegExp.legacyLastParen);
+    defineLegacyAccessor('leftContext', JSRegExp.legacyLeftContext);
+    defineLegacyAccessor(r'$`', JSRegExp.legacyLeftContext);
+    defineLegacyAccessor('rightContext', JSRegExp.legacyRightContext);
+    defineLegacyAccessor(r"$'", JSRegExp.legacyRightContext);
+    for (var i = 1; i <= 9; i++) {
+      final captureIndex = i;
+      defineLegacyAccessor(
+        '\$$captureIndex',
+        () => JSRegExp.legacyCapture(captureIndex),
+      );
+    }
+
     final regexpPrototype = JSObject();
     regexpConstructor.setProperty('prototype', regexpPrototype);
     regexpPrototype.defineConstructorProperty(regexpConstructor);

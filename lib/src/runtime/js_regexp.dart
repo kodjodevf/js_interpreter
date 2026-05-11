@@ -13,6 +13,12 @@ class JSRegExp extends JSObject {
   final List<String> _groupNames; // ES2018: Named capture groups
 
   static JSObject? _regExpPrototype;
+  static String _legacyInput = '';
+  static String _legacyLastMatch = '';
+  static String _legacyLastParen = '';
+  static String _legacyLeftContext = '';
+  static String _legacyRightContext = '';
+  static List<String> _legacyCaptures = List<String>.filled(9, '');
 
   static void setRegExpPrototype(JSObject prototype) {
     _regExpPrototype = prototype;
@@ -224,6 +230,7 @@ class JSRegExp extends JSObject {
         // Adjust indices for the complete string
         final adjustedMatch = _AdjustedMatch(match, start);
         lastIndex = start + match.end;
+        _updateLegacyStaticResults(adjustedMatch, input);
         return _createMatchArray(adjustedMatch, input, match);
       } else {
         lastIndex = 0;
@@ -232,11 +239,46 @@ class JSRegExp extends JSObject {
     } else {
       match = _dartRegExp.firstMatch(input);
       if (match != null) {
+        _updateLegacyStaticResults(match, input);
         return _createMatchArray(match, input, match);
       } else {
         return JSValueFactory.nullValue();
       }
     }
+  }
+
+  void _updateLegacyStaticResults(Match match, String input) {
+    _legacyInput = input;
+    _legacyLastMatch = match.group(0) ?? '';
+    _legacyLeftContext = input.substring(0, match.start);
+    _legacyRightContext = input.substring(match.end);
+
+    final captures = List<String>.filled(9, '');
+    final captureCount = match.groupCount < 9 ? match.groupCount : 9;
+    for (var i = 1; i <= captureCount; i++) {
+      captures[i - 1] = match.group(i) ?? '';
+    }
+    _legacyCaptures = captures;
+    _legacyLastParen = captureCount > 0 ? captures[captureCount - 1] : '';
+  }
+
+  static JSValue legacyCapture(int index) {
+    if (index < 1 || index > 9) {
+      return JSValueFactory.string('');
+    }
+    return JSValueFactory.string(_legacyCaptures[index - 1]);
+  }
+
+  static JSValue legacyInput() => JSValueFactory.string(_legacyInput);
+  static JSValue legacyLastMatch() => JSValueFactory.string(_legacyLastMatch);
+  static JSValue legacyLastParen() => JSValueFactory.string(_legacyLastParen);
+  static JSValue legacyLeftContext() =>
+      JSValueFactory.string(_legacyLeftContext);
+  static JSValue legacyRightContext() =>
+      JSValueFactory.string(_legacyRightContext);
+
+  static void setLegacyInput(String value) {
+    _legacyInput = value;
   }
 
   /// Creates a JavaScript array to represent a RegExp match
@@ -466,44 +508,115 @@ class RegExpGlobal {
   /// Create the global RegExp object with its constructor
   static JSObject createRegExpGlobal() {
     final regexpGlobal = JSObject();
+    late final JSNativeFunction regexpConstructor;
 
     // RegExp constructor
-    regexpGlobal.setProperty(
-      'RegExp',
-      JSNativeFunction(
-        functionName: 'RegExp',
-        nativeImpl: (args) {
-          String pattern = '';
-          String flags = '';
+    regexpConstructor = JSNativeFunction(
+      functionName: 'RegExp',
+      nativeImpl: (args) {
+        String pattern = '';
+        String flags = '';
 
-          if (args.isNotEmpty) {
-            final firstArg = args[0];
-            if (firstArg is JSRegExp) {
-              // RegExp(regex) or RegExp(regex, flags)
-              pattern = firstArg._source;
-              if (args.length > 1) {
-                flags = args[1].toString();
-              } else {
-                flags = firstArg._flags;
-              }
+        if (args.isNotEmpty) {
+          final firstArg = args[0];
+          if (firstArg is JSRegExp) {
+            // RegExp(regex) or RegExp(regex, flags)
+            pattern = firstArg._source;
+            if (args.length > 1) {
+              flags = args[1].toString();
             } else {
-              // RegExp(pattern, flags)
-              pattern = firstArg.toString();
-              if (args.length > 1) {
-                flags = args[1].toString();
-              }
+              flags = firstArg._flags;
+            }
+          } else {
+            // RegExp(pattern, flags)
+            pattern = firstArg.toString();
+            if (args.length > 1) {
+              flags = args[1].toString();
             }
           }
+        }
 
-          try {
-            final validatedFlags = JSRegExpFactory.parseFlags(flags);
-            return JSRegExp(pattern, validatedFlags);
-          } catch (e) {
-            throw JSSyntaxError('Invalid regular expression: $e');
-          }
-        },
-      ),
+        try {
+          final validatedFlags = JSRegExpFactory.parseFlags(flags);
+          return JSRegExp(pattern, validatedFlags);
+        } catch (e) {
+          throw JSSyntaxError('Invalid regular expression: $e');
+        }
+      },
     );
+
+    JSValue readLegacyProperty(JSValue thisValue, JSValue Function() reader) {
+      if (!identical(thisValue, regexpConstructor)) {
+        throw JSTypeError(
+          'RegExp legacy accessor called on incompatible receiver',
+        );
+      }
+      return reader();
+    }
+
+    void defineLegacyGetter(
+      String name,
+      JSValue Function() reader, {
+      JSFunction? setter,
+    }) {
+      regexpConstructor.defineProperty(
+        name,
+        PropertyDescriptor(
+          getter: JSNativeFunction(
+            functionName: 'get $name',
+            expectedArgs: 0,
+            nativeImpl: (args) {
+              final thisValue = args.isNotEmpty
+                  ? args[0]
+                  : JSValueFactory.undefined();
+              return readLegacyProperty(thisValue, reader);
+            },
+          ),
+          setter: setter,
+          enumerable: false,
+          configurable: true,
+          hasValueProperty: false,
+        ),
+      );
+    }
+
+    final inputSetter = JSNativeFunction(
+      functionName: 'set input',
+      expectedArgs: 1,
+      nativeImpl: (args) {
+        final thisValue = args.isNotEmpty
+            ? args[0]
+            : JSValueFactory.undefined();
+        if (!identical(thisValue, regexpConstructor)) {
+          throw JSTypeError(
+            'RegExp legacy accessor called on incompatible receiver',
+          );
+        }
+        final newValue = args.length > 1 ? args[1].toString() : '';
+        JSRegExp.setLegacyInput(newValue);
+        return JSValueFactory.undefined();
+      },
+    );
+
+    defineLegacyGetter('input', JSRegExp.legacyInput, setter: inputSetter);
+    defineLegacyGetter(r'$_', JSRegExp.legacyInput, setter: inputSetter);
+    defineLegacyGetter('lastMatch', JSRegExp.legacyLastMatch);
+    defineLegacyGetter(r'$&', JSRegExp.legacyLastMatch);
+    defineLegacyGetter('lastParen', JSRegExp.legacyLastParen);
+    defineLegacyGetter(r'$+', JSRegExp.legacyLastParen);
+    defineLegacyGetter('leftContext', JSRegExp.legacyLeftContext);
+    defineLegacyGetter(r'$`', JSRegExp.legacyLeftContext);
+    defineLegacyGetter('rightContext', JSRegExp.legacyRightContext);
+    defineLegacyGetter(r"$'", JSRegExp.legacyRightContext);
+    for (var i = 1; i <= 9; i++) {
+      final captureIndex = i;
+      defineLegacyGetter(
+        '4$captureIndex',
+        () => JSRegExp.legacyCapture(captureIndex),
+      );
+    }
+
+    regexpGlobal.setProperty('RegExp', regexpConstructor);
 
     return regexpGlobal;
   }

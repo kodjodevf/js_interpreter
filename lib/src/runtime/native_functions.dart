@@ -127,6 +127,9 @@ class JSNativeFunction extends JSFunction {
     // Handle 'name' and 'length' specially - they have deleted flags
     if (name == 'name') return !_nameDeleted;
     if (name == 'length') return !_lengthDeleted;
+    if (super.getOwnPropertyDescriptor(name) != null) {
+      return true;
+    }
     // For other properties, check parent's _properties (but exclude 'name' and 'length')
     if (super.containsOwnProperty(name) && name != 'name' && name != 'length') {
       return true;
