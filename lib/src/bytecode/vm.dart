@@ -41,6 +41,9 @@ class VMResult {
 ///
 /// Holds global state and executes FunctionBytecode objects.
 class BytecodeVM implements JSRuntime {
+  @override
+  bool get captureNativeDefinitionRuntime => true;
+
   /// Global variables
   final Map<String, JSValue> globals = {};
 
@@ -1070,16 +1073,25 @@ class BytecodeVM implements JSRuntime {
 
   @override
   void performHostGarbageCollection() {
-    for (final weakRef in _registeredWeakRefs.toList(growable: false)) {
-      weakRef.clearIfCollected(this);
-    }
-    for (final weakMap in _registeredWeakMaps.toList(growable: false)) {
-      weakMap.purgeCollectedEntries(this);
-    }
-    for (final registry in _registeredFinalizationRegistries.toList(
-      growable: false,
-    )) {
-      registry.collectGarbage(this);
+    final savedFrame = _currentFrame;
+    final savedCallee = _currentCalleeFunction;
+    _currentFrame = null;
+    _currentCalleeFunction = null;
+    try {
+      for (final weakRef in _registeredWeakRefs.toList(growable: false)) {
+        weakRef.clearIfCollected(this);
+      }
+      for (final weakMap in _registeredWeakMaps.toList(growable: false)) {
+        weakMap.purgeCollectedEntries(this);
+      }
+      for (final registry in _registeredFinalizationRegistries.toList(
+        growable: false,
+      )) {
+        registry.collectGarbage(this);
+      }
+    } finally {
+      _currentFrame = savedFrame;
+      _currentCalleeFunction = savedCallee;
     }
   }
 

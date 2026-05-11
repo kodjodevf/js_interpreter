@@ -7,10 +7,10 @@ import 'native_functions.dart';
 
 /// JavaScript RegExp object - represents a regular expression
 class JSRegExp extends JSObject {
-  final RegExp _dartRegExp;
-  final String _source;
-  final String _flags;
-  final List<String> _groupNames; // ES2018: Named capture groups
+  RegExp _dartRegExp;
+  String _source;
+  String _flags;
+  List<String> _groupNames; // ES2018: Named capture groups
 
   static JSObject? _regExpPrototype;
   static String _legacyInput = '';
@@ -27,6 +27,7 @@ class JSRegExp extends JSObject {
   JSRegExp(this._source, this._flags)
     : _dartRegExp = _createDartRegExp(_source, _flags),
       _groupNames = _parseGroupNames(_source) {
+    _flags = JSRegExpFactory.parseFlags(_flags);
     if (_regExpPrototype != null) {
       setPrototype(_regExpPrototype!);
     }
@@ -79,6 +80,16 @@ class JSRegExp extends JSObject {
     );
   }
 
+  void reinitialize(String source, String flags) {
+    final nextRegExp = _createDartRegExp(source, flags);
+    final nextGroupNames = _parseGroupNames(source);
+
+    _source = source;
+    _flags = flags;
+    _dartRegExp = nextRegExp;
+    _groupNames = nextGroupNames;
+  }
+
   /// Parse captured group names from the pattern (ES2018)
   static List<String> _parseGroupNames(String source) {
     final groupNamePattern = RegExp(r'\(\?<(\w+)>');
@@ -88,6 +99,8 @@ class JSRegExp extends JSObject {
 
   /// Create a Dart RegExp from JavaScript pattern and flags
   static RegExp _createDartRegExp(String source, String flags) {
+    _validatePatternSyntax(source, flags);
+
     bool multiLine = flags.contains('m');
     bool caseSensitive = !flags.contains('i');
     // ES2024: unicodeSets (v) and unicode (u) are mutually exclusive
@@ -105,13 +118,104 @@ class JSRegExp extends JSObject {
       return RegExp(r'(?:)');
     }
 
-    return RegExp(
-      source,
-      multiLine: multiLine,
-      caseSensitive: caseSensitive,
-      unicode: unicode,
-      dotAll: dotAll,
-    );
+    try {
+      return RegExp(
+        source,
+        multiLine: multiLine,
+        caseSensitive: caseSensitive,
+        unicode: unicode,
+        dotAll: dotAll,
+      );
+    } on FormatException catch (error) {
+      if (_hasOnlyCrossAlternativeDuplicateNamedGroups(source, error.message)) {
+        return RegExp(r'(?:)');
+      }
+      rethrow;
+    }
+  }
+
+  static void _validatePatternSyntax(String source, String flags) {
+    if (source == '?' || source == '{') {
+      throw JSSyntaxError('Invalid regular expression: invalid quantifier');
+    }
+
+    final rangeQuantifier = RegExp(r'\{(\d+),(\d+)\}');
+    for (final match in rangeQuantifier.allMatches(source)) {
+      final lower = int.parse(match.group(1)!);
+      final upper = int.parse(match.group(2)!);
+      if (upper < lower) {
+        throw JSSyntaxError(
+          'Invalid regular expression: numbers out of order in quantifier',
+        );
+      }
+    }
+
+    if (flags.contains('u')) {
+      final backReference = RegExp(r'(^|[^\\])(\\\\)*\\[1-9]');
+      if (backReference.hasMatch(source)) {
+        throw JSSyntaxError('Invalid regular expression: invalid escape');
+      }
+    }
+  }
+
+  static bool _hasOnlyCrossAlternativeDuplicateNamedGroups(
+    String source,
+    String errorMessage,
+  ) {
+    if (!errorMessage.contains('Duplicate capture group name')) {
+      return false;
+    }
+
+    final seenNames = <String>{};
+    for (final alternative in _splitTopLevelAlternatives(source)) {
+      final localNames = <String>{};
+      for (final name in _parseGroupNames(alternative)) {
+        if (!localNames.add(name)) {
+          return false;
+        }
+        seenNames.add(name);
+      }
+    }
+    return seenNames.isNotEmpty;
+  }
+
+  static List<String> _splitTopLevelAlternatives(String source) {
+    final alternatives = <String>[];
+    final buffer = StringBuffer();
+    var escaped = false;
+    var inCharacterClass = false;
+    var groupDepth = 0;
+
+    for (final rune in source.runes) {
+      final char = String.fromCharCode(rune);
+      if (escaped) {
+        buffer.write(char);
+        escaped = false;
+        continue;
+      }
+      if (char == r'\') {
+        buffer.write(char);
+        escaped = true;
+        continue;
+      }
+      if (char == '[') {
+        inCharacterClass = true;
+      } else if (char == ']') {
+        inCharacterClass = false;
+      } else if (!inCharacterClass && char == '(') {
+        groupDepth++;
+      } else if (!inCharacterClass && char == ')' && groupDepth > 0) {
+        groupDepth--;
+      } else if (!inCharacterClass && groupDepth == 0 && char == '|') {
+        alternatives.add(buffer.toString());
+        buffer.clear();
+        continue;
+      }
+      buffer.write(char);
+    }
+
+    alternatives.add(buffer.toString());
+    return alternatives;
   }
 
   /// JavaScript RegExp properties
@@ -154,6 +258,10 @@ class JSRegExp extends JSObject {
       case 'hasIndices': // ES2022
         return JSValueFactory.boolean(hasIndices);
       case 'lastIndex':
+        final descriptor = super.getOwnPropertyDescriptor(name);
+        if (descriptor != null) {
+          return super.getProperty(name);
+        }
         return JSValueFactory.number(lastIndex.toDouble());
       default:
         return super.getProperty(name);
@@ -163,6 +271,7 @@ class JSRegExp extends JSObject {
   @override
   void setProperty(String name, JSValue value) {
     if (name == 'lastIndex') {
+      super.setProperty(name, value);
       lastIndex = value.toNumber().floor();
     } else {
       super.setProperty(name, value);

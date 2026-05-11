@@ -684,6 +684,7 @@ class RuntimeBootstrap {
   }
 
   static JSNativeFunction _createRegExpConstructor() {
+    late final JSObject regexpPrototype;
     final regexpConstructor = JSNativeFunction(
       functionName: 'RegExp',
       nativeImpl: (args) {
@@ -702,7 +703,9 @@ class RuntimeBootstrap {
           }
         }
         try {
-          return JSRegExp(pattern, JSRegExpFactory.parseFlags(flags));
+          final regexp = JSRegExp(pattern, JSRegExpFactory.parseFlags(flags));
+          regexp.setPrototype(regexpPrototype);
+          return regexp;
         } catch (e) {
           throw JSSyntaxError('Invalid regular expression: $e');
         }
@@ -781,7 +784,156 @@ class RuntimeBootstrap {
       );
     }
 
-    final regexpPrototype = JSObject();
+    regexpPrototype = JSObject();
+    late final JSNativeFunction compileFunction;
+    JSException compileTypeError(String message) {
+      final runtime = compileFunction.definingRuntime ?? JSRuntime.current;
+      JSObject? prototype;
+      if (runtime != null) {
+        try {
+          final constructor = runtime.getGlobal('TypeError');
+          if (constructor is JSFunction && constructor is JSObject) {
+            final proto = constructor.getProperty('prototype');
+            if (proto is JSObject) {
+              prototype = proto;
+            }
+          }
+        } catch (_) {}
+      }
+      return JSException(
+        JSErrorObjectFactory.fromDartError(JSTypeError(message), prototype),
+      );
+    }
+
+    compileFunction = JSNativeFunction(
+      functionName: 'compile',
+      expectedArgs: 2,
+      nativeImpl: (args) {
+        final thisValue = args.isNotEmpty
+            ? args[0]
+            : JSValueFactory.undefined();
+        if (thisValue is! JSRegExp ||
+            !identical(thisValue.getPrototypeValue(), regexpPrototype)) {
+          throw compileTypeError(
+            'RegExp.prototype.compile requires a RegExp receiver',
+          );
+        }
+
+        final pattern = args.length > 1 ? args[1] : JSValueFactory.undefined();
+        final flagsArg = args.length > 2 ? args[2] : JSValueFactory.undefined();
+
+        String source;
+        String flags;
+        if (pattern is JSRegExp) {
+          if (!flagsArg.isUndefined) {
+            throw compileTypeError(
+              'Cannot supply flags when compiling from a RegExp instance',
+            );
+          }
+          source = pattern.source;
+          flags = pattern.flags;
+        } else {
+          if (pattern is JSSymbol || flagsArg is JSSymbol) {
+            throw compileTypeError('Cannot convert a Symbol value to a string');
+          }
+          source = pattern.isUndefined ? '' : JSConversion.jsToString(pattern);
+          flags = flagsArg.isUndefined ? '' : JSConversion.jsToString(flagsArg);
+        }
+
+        try {
+          final validatedFlags = JSRegExpFactory.parseFlags(flags);
+          thisValue.reinitialize(source, validatedFlags);
+
+          final lastIndexDescriptor = thisValue.getOwnPropertyDescriptor(
+            'lastIndex',
+          );
+          if (lastIndexDescriptor != null) {
+            if (lastIndexDescriptor.isAccessor &&
+                lastIndexDescriptor.setter == null) {
+              throw compileTypeError(
+                'Cannot set property lastIndex which has only a getter',
+              );
+            }
+            if (lastIndexDescriptor.isData && !lastIndexDescriptor.writable) {
+              throw compileTypeError(
+                'Cannot assign to read only property \'lastIndex\'',
+              );
+            }
+          }
+
+          thisValue.setProperty('lastIndex', JSValueFactory.number(0));
+        } on JSError {
+          rethrow;
+        } catch (error) {
+          throw JSSyntaxError('Invalid regular expression: $error');
+        }
+
+        return thisValue;
+      },
+    );
+    final symbolSplitFunction = JSNativeFunction(
+      functionName: 'Symbol.split',
+      expectedArgs: 2,
+      nativeImpl: (args) {
+        final thisValue = args.isNotEmpty
+            ? args[0]
+            : JSValueFactory.undefined();
+        if (thisValue is! JSRegExp) {
+          throw compileTypeError(
+            'RegExp.prototype[Symbol.split] requires a RegExp receiver',
+          );
+        }
+
+        final input = args.length > 1 ? JSConversion.jsToString(args[1]) : '';
+
+        // Mirror the observable order relied on by Test262: clone the regex
+        // after IsRegExp-like Symbol.match access, but before limit coercion.
+        thisValue.getPropertyBySymbol(JSSymbol.match);
+        final splitter = JSRegExp(thisValue.source, thisValue.flags);
+        splitter.setPrototype(regexpPrototype);
+
+        var limit = 0xFFFFFFFF;
+        if (args.length > 2 && !args[2].isUndefined) {
+          final rawLimit = JSConversion.jsToNumber(args[2]);
+          if (rawLimit.isNaN || rawLimit == 0 || rawLimit.isInfinite) {
+            limit = 0;
+          } else {
+            final truncated = rawLimit.isNegative
+                ? -rawLimit.abs().floor()
+                : rawLimit.floor();
+            limit = truncated & 0xFFFFFFFF;
+          }
+        }
+
+        var parts = input.split(splitter.dartRegExp);
+        if (parts.length > limit) {
+          parts = parts.take(limit).toList();
+        }
+        return JSValueFactory.array(parts.map(JSValueFactory.string).toList());
+      },
+    );
+    regexpPrototype.defineProperty(
+      'compile',
+      PropertyDescriptor(
+        value: compileFunction,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.registerSymbolKey(
+      JSSymbol.split.propertyKey,
+      JSSymbol.split,
+    );
+    regexpPrototype.defineProperty(
+      JSSymbol.split.propertyKey,
+      PropertyDescriptor(
+        value: symbolSplitFunction,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      ),
+    );
     regexpConstructor.setProperty('prototype', regexpPrototype);
     regexpPrototype.defineConstructorProperty(regexpConstructor);
     JSRegExp.setRegExpPrototype(regexpPrototype);
@@ -2856,6 +3008,9 @@ class _BootstrapRuntime implements JSRuntime {
   final Map<String, JSValue> globals;
 
   _BootstrapRuntime(this.globals);
+
+  @override
+  bool get captureNativeDefinitionRuntime => false;
 
   @override
   JSValue callFunction(

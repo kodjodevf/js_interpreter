@@ -29,6 +29,7 @@ class JSNativeFunction extends JSFunction {
   final String functionName;
   final NativeFunction nativeImpl;
   final int expectedArgs;
+  final JSRuntime? definingRuntime;
 
   /// If true, the function already has its context (this) bound via closure,
   /// so callWithThis should NOT prepend thisBinding to args
@@ -55,7 +56,11 @@ class JSNativeFunction extends JSFunction {
     bool isConstructor = false, // Default: not a constructor
     this.isAsync = false, // Default: not async
     JSObject? functionPrototype, // Add optional prototype parameter
-  }) : _isConstructorInternal = isConstructor,
+  }) : definingRuntime =
+           JSRuntime.current?.captureNativeDefinitionRuntime == true
+           ? JSRuntime.current
+           : null,
+       _isConstructorInternal = isConstructor,
        super(
          null,
          null,
@@ -228,6 +233,11 @@ class JSNativeFunction extends JSFunction {
 
   /// Call native function with argument conversion
   JSValue call(List<JSValue> args) {
+    final previousRuntime = JSRuntime.current;
+    if (definingRuntime != null &&
+        !identical(previousRuntime, definingRuntime)) {
+      JSRuntime.setCurrent(definingRuntime);
+    }
     try {
       return nativeImpl(args);
     } catch (e) {
@@ -240,6 +250,10 @@ class JSNativeFunction extends JSFunction {
         rethrow;
       }
       throw JSError('Native function error in $functionName: $e');
+    } finally {
+      if (!identical(JSRuntime.current, previousRuntime)) {
+        JSRuntime.setCurrent(previousRuntime);
+      }
     }
   }
 
@@ -314,6 +328,7 @@ class JSNativeFunction extends JSFunction {
       'valueOf',
       'toString',
       'toLocaleString',
+      'compile',
       // Function.prototype methods that need the function as first arg
       'call',
       'apply',
@@ -359,6 +374,7 @@ class JSNativeFunction extends JSFunction {
       'fill',
       'copyWithin',
       'Symbol.iterator',
+      'Symbol.split',
     };
 
     if (thisBindingMethods.contains(functionName)) {

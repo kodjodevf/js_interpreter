@@ -26,6 +26,10 @@ abstract class JSRuntime {
     _current = runtime;
   }
 
+  /// Whether native functions created under this runtime should capture it as
+  /// their defining runtime when later invoked.
+  bool get captureNativeDefinitionRuntime => true;
+
   // ---------------------------------------------------------------------------
   // Function calling
   // ---------------------------------------------------------------------------

@@ -5239,7 +5239,6 @@ class JSWeakMap extends JSObject {
           return JSValueFactory.undefined();
         }
 
-        purgeCollectedEntries();
         final index = _findEntryIndex(key);
         if (index < 0) {
           return JSValueFactory.undefined();
@@ -5260,7 +5259,6 @@ class JSWeakMap extends JSObject {
           return JSValueFactory.boolean(false);
         }
 
-        purgeCollectedEntries();
         return JSValueFactory.boolean(_findEntryIndex(key) >= 0);
       },
     );
@@ -5277,7 +5275,6 @@ class JSWeakMap extends JSObject {
           return JSValueFactory.boolean(false);
         }
 
-        purgeCollectedEntries();
         final index = _findEntryIndex(key);
         final hadKey = index >= 0;
         if (hadKey) {
@@ -5311,12 +5308,6 @@ class JSWeakRefObject extends JSObject {
   JSValue deref() {
     final target = _target;
     if (target == null) {
-      return JSUndefined.instance;
-    }
-
-    final runtime = JSRuntime.current;
-    if (runtime != null && !runtime.isValueReachable(target)) {
-      _target = null;
       return JSUndefined.instance;
     }
     return target;
