@@ -89,6 +89,7 @@ class JSInterpreter {
         code,
         allowTopLevelAwait: allowTopLevelAwait,
       );
+      _vm!.validateGlobalScriptDeclarations(program);
       final compiler = BytecodeCompiler();
       final bytecode = compiler.compile(program);
       return _vm!.execute(bytecode);

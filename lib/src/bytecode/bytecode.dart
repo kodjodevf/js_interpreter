@@ -628,6 +628,12 @@ class BytecodeBuilder {
     _buffer.add(value & 0xFF);
   }
 
+  /// Emit opcode + 4 byte unsigned operand + 1 byte unsigned operand.
+  void emitU32U8(Op op, int value32, int value8) {
+    emitU32(op, value32);
+    _buffer.add(value8 & 0xFF);
+  }
+
   /// Emit opcode + 4 byte signed operand
   void emitI32(Op op, int value) {
     emitU32(op, value);

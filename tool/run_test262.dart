@@ -565,6 +565,18 @@ class Test262Runner {
     obj.setProperty('IsHTMLDDA', _Test262IsHtmlDdaObject());
     obj.setProperty('createRealm', interpreter.createRealmFunction());
     obj.setProperty(
+      'evalScript',
+      JSNativeFunction(
+        functionName: 'evalScript',
+        nativeImpl: (args) {
+          if (args.isEmpty) {
+            return JSValueFactory.undefined();
+          }
+          return interpreter.eval(args[0].toString());
+        },
+      ),
+    );
+    obj.setProperty(
       'detachArrayBuffer',
       JSNativeFunction(
         functionName: 'detachArrayBuffer',

@@ -204,6 +204,27 @@ class _FunctionContext {
     return index;
   }
 
+  int? lookupLocal(String name, {VarScope scope = VarScope.blockScope}) {
+    var targetScope = this.scope;
+    if (scope == VarScope.funcScope) {
+      while (!targetScope.isFunctionScope && targetScope.parent != null) {
+        targetScope = targetScope.parent!;
+      }
+    }
+    return targetScope.vars[name];
+  }
+
+  int? lookupVarLikeLocal(String name, {VarScope scope = VarScope.blockScope}) {
+    final slot = lookupLocal(name, scope: scope);
+    if (slot == null) {
+      return null;
+    }
+    if (slot < 0) {
+      return slot;
+    }
+    return vars[slot].isLexical ? null : slot;
+  }
+
   /// Declare an argument, returns its slot index
   int declareArg(String name) {
     final index = argNames.length;
@@ -691,6 +712,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
     try {
       _predeclareClassNames(body);
       _hoistVarDeclarations(body);
+      _hoistAnnexBBlockFunctionNames(body);
       _hoistFunctionDeclarations(body);
 
       // Completion value accumulator: tracks the script's completion value
@@ -963,7 +985,11 @@ class BytecodeCompiler implements ASTVisitor<void> {
       return;
     }
 
-    stmt.accept(this);
+    if (stmt is FunctionDeclaration || stmt is AsyncFunctionDeclaration) {
+      _compileIfClauseWithAnnexBScope(stmt);
+    } else {
+      stmt.accept(this);
+    }
     _bc.emit(Op.pushUndefined);
     _ctx.adjustStack(1);
   }
@@ -1096,7 +1122,11 @@ class BytecodeCompiler implements ASTVisitor<void> {
       // All other statements (including function declarations):
       // compile normally, don't update completion value.
       // Per spec, function declarations have completion value "empty".
-      stmt.accept(this);
+      if (stmt is FunctionDeclaration || stmt is AsyncFunctionDeclaration) {
+        _compileIfClauseWithAnnexBScope(stmt);
+      } else {
+        stmt.accept(this);
+      }
     }
   }
 
@@ -1463,6 +1493,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
     FunctionKind kind = FunctionKind.normal,
     required List<Parameter> params,
     required dynamic body, // BlockStatement or Expression
+    bool createSelfBinding = true,
     bool isStrict = false,
     int? sourceLine,
     int? sourceColumn,
@@ -1525,7 +1556,8 @@ class BytecodeCompiler implements ASTVisitor<void> {
 
       // Named functions need a self-binding so recursive references like
       // `function fact() { return fact(); }` resolve inside bytecode mode.
-      if (name.isNotEmpty &&
+      if (createSelfBinding &&
+          name.isNotEmpty &&
           kind != FunctionKind.arrow &&
           kind != FunctionKind.asyncArrow) {
         _ctx.declareLocal(name, scope: VarScope.funcScope);
@@ -1600,6 +1632,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
       if (body is BlockStatement) {
         _predeclareClassNames(body.body);
         _hoistVarDeclarations(body.body);
+        _hoistAnnexBBlockFunctionNames(body.body);
         _hoistFunctionDeclarations(body.body);
         for (final stmt in body.body) {
           stmt.accept(this);
@@ -3446,17 +3479,32 @@ class BytecodeCompiler implements ASTVisitor<void> {
     if (node.alternate != null) {
       final elsePatch = _bc.emitJump(Op.ifFalse);
       _ctx.adjustStack(-1);
-      node.consequent.accept(this);
+      _compileIfClauseWithAnnexBScope(node.consequent);
       final endPatch = _bc.emitJump(Op.goto_);
       _bc.patchJump(elsePatch, _bc.offset);
-      node.alternate!.accept(this);
+      _compileIfClauseWithAnnexBScope(node.alternate!);
       _bc.patchJump(endPatch, _bc.offset);
     } else {
       final endPatch = _bc.emitJump(Op.ifFalse);
       _ctx.adjustStack(-1);
-      node.consequent.accept(this);
+      _compileIfClauseWithAnnexBScope(node.consequent);
       _bc.patchJump(endPatch, _bc.offset);
     }
+  }
+
+  void _compileIfClauseWithAnnexBScope(Statement clause) {
+    if (clause is FunctionDeclaration || clause is AsyncFunctionDeclaration) {
+      _ctx.pushScope();
+      try {
+        clause.accept(this);
+      } finally {
+        _emitScopeDisposals();
+        _ctx.popScope();
+      }
+      return;
+    }
+
+    clause.accept(this);
   }
 
   @override
@@ -4131,6 +4179,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
   @override
   void visitSwitchStatement(SwitchStatement node) {
     _bc.setLine(node.line);
+    _ctx.pushScope();
 
     final target = _LabelTarget(
       stackDepth: _ctx._currentStackDepth,
@@ -4197,6 +4246,8 @@ class BytecodeCompiler implements ASTVisitor<void> {
 
     _patchJumpsHere(target.breakPatches);
     _ctx.labelStack.removeLast();
+    _emitScopeDisposals();
+    _ctx.popScope();
   }
 
   @override
@@ -4317,9 +4368,19 @@ class BytecodeCompiler implements ASTVisitor<void> {
 
     _bc.setLine(node.line);
 
-    // Declare the function name FIRST (hoisted) so the body can reference it
     final name = node.id.name;
-    final slot = _ctx.declareLocal(name, scope: VarScope.funcScope);
+    final annexBBlockFunction = !_ctx.isStrict && !_ctx.scope.isFunctionScope;
+    final outerSlot = annexBBlockFunction
+        ? _ctx.lookupVarLikeLocal(name, scope: VarScope.funcScope)
+        : null;
+    final slot = annexBBlockFunction
+        ? _ctx.declareLocal(
+            name,
+            scope: VarScope.blockScope,
+            isLexical: true,
+            scopeLevel: _ctx.scope.depth,
+          )
+        : _ctx.declareLocal(name, scope: VarScope.funcScope);
 
     // Compile the function body into its own FunctionBytecode
     final funcBytecode = _compileFunction(
@@ -4327,6 +4388,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
       kind: node.isGenerator ? FunctionKind.generator : FunctionKind.normal,
       params: node.params,
       body: node.body,
+      createSelfBinding: false,
       sourceLine: node.line,
       sourceColumn: node.column,
       sourceText: node.toString(),
@@ -4336,8 +4398,19 @@ class BytecodeCompiler implements ASTVisitor<void> {
     final idx = _ctx.addConstant(funcBytecode);
     _bc.emitU16(Op.fclosure, idx);
     _ctx.adjustStack(1);
-    _bc.emitU16(Op.putLoc, slot);
-    _ctx.adjustStack(-1);
+    if (annexBBlockFunction) {
+      _bc.emitU16(Op.putLoc, slot);
+      _ctx.adjustStack(-1);
+      if (outerSlot != null) {
+        _bc.emitU16(Op.getLoc, slot);
+        _ctx.adjustStack(1);
+        _bc.emitU16(Op.putLoc, outerSlot);
+        _ctx.adjustStack(-1);
+      }
+    } else {
+      _bc.emitU16(Op.putLoc, slot);
+      _ctx.adjustStack(-1);
+    }
   }
 
   @override
@@ -4358,6 +4431,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
           : FunctionKind.asyncFunction,
       params: node.params,
       body: node.body,
+      createSelfBinding: false,
       sourceLine: node.line,
       sourceColumn: node.column,
       sourceText: node.toString(),
@@ -5301,6 +5375,233 @@ class BytecodeCompiler implements ASTVisitor<void> {
     }
   }
 
+  void _hoistAnnexBBlockFunctionNames(List<Statement> statements) {
+    if (_ctx.isStrict) {
+      return;
+    }
+
+    final declaredNames = <String>{};
+
+    void declareAnnexBOuterName(String name) {
+      if (!declaredNames.add(name)) {
+        return;
+      }
+
+      if (_ctx.parent == null) {
+        final atom = _ctx.addConstant(name);
+        _bc.emitU32U8(Op.defineVar, atom, 0);
+      }
+      _ctx.declareLocal(name, scope: VarScope.funcScope);
+    }
+
+    void addPatternNames(Pattern pattern, Set<String> names) {
+      if (pattern is IdentifierPattern) {
+        names.add(pattern.name);
+        return;
+      }
+      if (pattern is ObjectPattern) {
+        for (final property in pattern.properties) {
+          addPatternNames(property.value, names);
+        }
+        if (pattern.restElement != null) {
+          addPatternNames(pattern.restElement!, names);
+        }
+        return;
+      }
+      if (pattern is ArrayPattern) {
+        for (final element in pattern.elements) {
+          if (element != null) {
+            addPatternNames(element, names);
+          }
+        }
+        if (pattern.restElement != null) {
+          addPatternNames(pattern.restElement!, names);
+        }
+        return;
+      }
+      if (pattern is AssignmentPattern) {
+        addPatternNames(pattern.left, names);
+      }
+    }
+
+    Set<String> lexicalNamesFromVariableDeclaration(VariableDeclaration node) {
+      if (node.kind == 'var') {
+        return const <String>{};
+      }
+
+      final names = <String>{};
+      for (final declaration in node.declarations) {
+        addPatternNames(declaration.id, names);
+      }
+      return names;
+    }
+
+    Set<String> lexicalNamesFromNode(ASTNode? node) {
+      if (node is VariableDeclaration) {
+        return lexicalNamesFromVariableDeclaration(node);
+      }
+      return const <String>{};
+    }
+
+    Set<String> collectImmediateLexicalNames(List<Statement> body) {
+      final names = <String>{};
+      for (final statement in body) {
+        final effectiveStatement = statement is ExportDeclarationStatement
+            ? statement.declaration
+            : statement;
+        if (effectiveStatement is VariableDeclaration) {
+          names.addAll(lexicalNamesFromVariableDeclaration(effectiveStatement));
+        } else if (effectiveStatement is AwaitUsingDeclaration) {
+          for (final declaration in effectiveStatement.declarations) {
+            addPatternNames(declaration.id, names);
+          }
+        } else if (effectiveStatement is ClassDeclaration &&
+            effectiveStatement.id != null) {
+          names.add(effectiveStatement.id!.name);
+        }
+      }
+      return names;
+    }
+
+    void walk(
+      List<Statement> body, {
+      required bool nested,
+      required Set<String> blockedNames,
+    }) {
+      final scopedBlockedNames = <String>{
+        ...blockedNames,
+        ...collectImmediateLexicalNames(body),
+      };
+
+      for (final stmt in body) {
+        final effectiveStmt = stmt is ExportDeclarationStatement
+            ? stmt.declaration
+            : stmt;
+
+        if (nested && effectiveStmt is FunctionDeclaration) {
+          if (!scopedBlockedNames.contains(effectiveStmt.id.name)) {
+            declareAnnexBOuterName(effectiveStmt.id.name);
+          }
+          continue;
+        }
+
+        if (nested && effectiveStmt is AsyncFunctionDeclaration) {
+          if (!scopedBlockedNames.contains(effectiveStmt.id.name)) {
+            declareAnnexBOuterName(effectiveStmt.id.name);
+          }
+          continue;
+        }
+
+        if (effectiveStmt is BlockStatement) {
+          walk(
+            effectiveStmt.body,
+            nested: true,
+            blockedNames: scopedBlockedNames,
+          );
+        } else if (effectiveStmt is IfStatement) {
+          walk(
+            [effectiveStmt.consequent],
+            nested: true,
+            blockedNames: scopedBlockedNames,
+          );
+          if (effectiveStmt.alternate != null) {
+            walk(
+              [effectiveStmt.alternate!],
+              nested: true,
+              blockedNames: scopedBlockedNames,
+            );
+          }
+        } else if (effectiveStmt is SwitchStatement) {
+          final switchBlockedNames = <String>{...scopedBlockedNames};
+          for (final switchCase in effectiveStmt.cases) {
+            switchBlockedNames.addAll(
+              collectImmediateLexicalNames(switchCase.consequent),
+            );
+          }
+          for (final switchCase in effectiveStmt.cases) {
+            walk(
+              switchCase.consequent,
+              nested: true,
+              blockedNames: switchBlockedNames,
+            );
+          }
+        } else if (effectiveStmt is LabeledStatement) {
+          walk(
+            [effectiveStmt.body],
+            nested: true,
+            blockedNames: scopedBlockedNames,
+          );
+        } else if (effectiveStmt is ForStatement) {
+          walk(
+            [effectiveStmt.body],
+            nested: true,
+            blockedNames: <String>{
+              ...scopedBlockedNames,
+              ...lexicalNamesFromNode(effectiveStmt.init),
+            },
+          );
+        } else if (effectiveStmt is ForInStatement) {
+          walk(
+            [effectiveStmt.body],
+            nested: true,
+            blockedNames: <String>{
+              ...scopedBlockedNames,
+              ...lexicalNamesFromNode(effectiveStmt.left),
+            },
+          );
+        } else if (effectiveStmt is ForOfStatement) {
+          walk(
+            [effectiveStmt.body],
+            nested: true,
+            blockedNames: <String>{
+              ...scopedBlockedNames,
+              ...lexicalNamesFromNode(effectiveStmt.left),
+            },
+          );
+        } else if (effectiveStmt is WhileStatement) {
+          walk(
+            [effectiveStmt.body],
+            nested: true,
+            blockedNames: scopedBlockedNames,
+          );
+        } else if (effectiveStmt is DoWhileStatement) {
+          walk(
+            [effectiveStmt.body],
+            nested: true,
+            blockedNames: scopedBlockedNames,
+          );
+        } else if (effectiveStmt is TryStatement) {
+          walk(
+            effectiveStmt.block.body,
+            nested: true,
+            blockedNames: scopedBlockedNames,
+          );
+          if (effectiveStmt.handler != null) {
+            final catchBlockedNames = <String>{...scopedBlockedNames};
+            final pattern = effectiveStmt.handler!.paramPattern;
+            if (pattern != null) {
+              addPatternNames(pattern, catchBlockedNames);
+            }
+            walk(
+              effectiveStmt.handler!.body.body,
+              nested: true,
+              blockedNames: catchBlockedNames,
+            );
+          }
+          if (effectiveStmt.finalizer != null) {
+            walk(
+              effectiveStmt.finalizer!.body,
+              nested: true,
+              blockedNames: scopedBlockedNames,
+            );
+          }
+        }
+      }
+    }
+
+    walk(statements, nested: false, blockedNames: const <String>{});
+  }
+
   void _collectVarNames(Statement stmt) {
     final effectiveStmt = stmt is ExportDeclarationStatement
         ? stmt.declaration
@@ -5440,6 +5741,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
       kind: node.isGenerator ? FunctionKind.generator : FunctionKind.normal,
       params: node.params,
       body: node.body,
+      createSelfBinding: false,
       sourceLine: node.line,
       sourceColumn: node.column,
       sourceText: node.toString(),
@@ -5466,6 +5768,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
           : FunctionKind.asyncFunction,
       params: node.params,
       body: node.body,
+      createSelfBinding: false,
       sourceLine: node.line,
       sourceColumn: node.column,
       sourceText: node.toString(),

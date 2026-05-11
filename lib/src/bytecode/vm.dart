@@ -954,6 +954,9 @@ class BytecodeVM implements JSRuntime {
       initialFunctionDepth: initialFunctionDepth,
       initialClassContext: forcedSuperVarName != null,
     );
+    if (!directEval) {
+      validateGlobalScriptDeclarations(program);
+    }
     final compiler = BytecodeCompiler();
     final bytecode = compiler.compile(
       program,
@@ -991,6 +994,121 @@ class BytecodeVM implements JSRuntime {
     }
 
     return execute(bytecode);
+  }
+
+  void validateGlobalScriptDeclarations(Program program) {
+    final lexicalNames = <String>{};
+    final varNames = <String>{};
+
+    void addPatternNames(Pattern pattern, Set<String> names) {
+      if (pattern is IdentifierPattern) {
+        names.add(pattern.name);
+        return;
+      }
+      if (pattern is ObjectPattern) {
+        for (final property in pattern.properties) {
+          addPatternNames(property.value, names);
+        }
+        if (pattern.restElement != null) {
+          addPatternNames(pattern.restElement!, names);
+        }
+        return;
+      }
+      if (pattern is ArrayPattern) {
+        for (final element in pattern.elements) {
+          if (element != null) {
+            addPatternNames(element, names);
+          }
+        }
+        if (pattern.restElement != null) {
+          addPatternNames(pattern.restElement!, names);
+        }
+        return;
+      }
+      if (pattern is AssignmentPattern) {
+        addPatternNames(pattern.left, names);
+      }
+    }
+
+    void collectNames(List<Statement> statements, {required bool nested}) {
+      for (final statement in statements) {
+        final effectiveStatement = statement is ExportDeclarationStatement
+            ? statement.declaration
+            : statement;
+
+        if (effectiveStatement is VariableDeclaration) {
+          final targetNames = effectiveStatement.kind == 'var'
+              ? varNames
+              : lexicalNames;
+          for (final declaration in effectiveStatement.declarations) {
+            addPatternNames(declaration.id, targetNames);
+          }
+          continue;
+        }
+
+        if (effectiveStatement is AwaitUsingDeclaration) {
+          for (final declaration in effectiveStatement.declarations) {
+            addPatternNames(declaration.id, lexicalNames);
+          }
+          continue;
+        }
+
+        if (effectiveStatement is ClassDeclaration &&
+            effectiveStatement.id != null) {
+          lexicalNames.add(effectiveStatement.id!.name);
+          continue;
+        }
+
+        if (effectiveStatement is FunctionDeclaration) {
+          if (nested) {
+            varNames.add(effectiveStatement.id.name);
+          } else {
+            varNames.add(effectiveStatement.id.name);
+          }
+          continue;
+        }
+
+        if (effectiveStatement is AsyncFunctionDeclaration) {
+          if (nested) {
+            varNames.add(effectiveStatement.id.name);
+          } else {
+            varNames.add(effectiveStatement.id.name);
+          }
+          continue;
+        }
+
+        if (effectiveStatement is BlockStatement) {
+          collectNames(effectiveStatement.body, nested: true);
+        } else if (effectiveStatement is IfStatement) {
+          collectNames([effectiveStatement.consequent], nested: true);
+          if (effectiveStatement.alternate != null) {
+            collectNames([effectiveStatement.alternate!], nested: true);
+          }
+        } else if (effectiveStatement is SwitchStatement) {
+          for (final switchCase in effectiveStatement.cases) {
+            collectNames(switchCase.consequent, nested: true);
+          }
+        } else if (effectiveStatement is LabeledStatement) {
+          collectNames([effectiveStatement.body], nested: true);
+        }
+      }
+    }
+
+    collectNames(program.body, nested: false);
+
+    for (final name in lexicalNames) {
+      if (_hasExistingGlobalVarLikeBinding(name) ||
+          _hasRestrictedGlobalProperty(name) ||
+          _hasExistingGlobalLexicalBinding(name)) {
+        throw JSSyntaxError("Identifier '$name' has already been declared");
+      }
+    }
+
+    for (final name in varNames) {
+      if (_hasExistingGlobalLexicalBinding(name)) {
+        throw JSSyntaxError("Identifier '$name' has already been declared");
+      }
+    }
   }
 
   @override
@@ -2349,6 +2467,34 @@ class BytecodeVM implements JSRuntime {
     return false;
   }
 
+  bool _hasExistingGlobalLexicalBinding(String name) {
+    return _isPersistentLexicalGlobal(globals[name]);
+  }
+
+  bool _hasExistingGlobalVarLikeBinding(String name) {
+    final globalThis = globals['globalThis'];
+    if (globalThis is! JSObject) {
+      return false;
+    }
+
+    final descriptor = globalThis.getOwnPropertyDescriptor(name);
+    if (descriptor == null || descriptor.isAccessor) {
+      return false;
+    }
+
+    return descriptor.enumerable;
+  }
+
+  bool _hasRestrictedGlobalProperty(String name) {
+    final globalThis = globals['globalThis'];
+    if (globalThis is! JSObject) {
+      return false;
+    }
+
+    final descriptor = globalThis.getOwnPropertyDescriptor(name);
+    return descriptor != null && !descriptor.configurable;
+  }
+
   String? _findVisibleSuperBindingName(StackFrame? frame) {
     StackFrame? current = frame;
     while (current != null) {
@@ -3417,8 +3563,24 @@ class BytecodeVM implements JSRuntime {
                         null) {
                   _ensureDirectEvalHostBinding(host, name);
                 }
-              } else if (!globals.containsKey(name)) {
-                globals[name] = JSUndefined.instance;
+              } else {
+                final globalThis = globals['globalThis'];
+                if (globalThis is JSObject) {
+                  if (globalThis.getOwnPropertyDescriptor(name) == null) {
+                    globalThis.defineProperty(
+                      name,
+                      PropertyDescriptor(
+                        value: JSUndefined.instance,
+                        writable: true,
+                        enumerable: true,
+                        configurable: false,
+                      ),
+                    );
+                  }
+                  _syncGlobalCacheFromObject(name, globalThis);
+                } else if (!globals.containsKey(name)) {
+                  globals[name] = JSUndefined.instance;
+                }
               }
 
             // ============================================================

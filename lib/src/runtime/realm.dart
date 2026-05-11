@@ -32,6 +32,7 @@ class JSRealm {
   /// Evaluate code in this realm
   JSValue eval(String code) {
     final program = JSParser.parseString(code);
+    _vm.validateGlobalScriptDeclarations(program);
     final compiler = BytecodeCompiler();
     final bytecode = compiler.compile(program);
     return _vm.execute(bytecode);
