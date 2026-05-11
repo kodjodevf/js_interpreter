@@ -1678,8 +1678,45 @@ class JSParser {
         initExpr = _assignmentExpression();
       }
 
+      Expression? annexBForInInit;
+      Expression? annexBForInRight;
       if (initExpr is BinaryExpression && initExpr.operator == 'in') {
-        final declarator = VariableDeclarator(id: id, init: initExpr.left);
+        annexBForInInit = initExpr.left;
+        annexBForInRight = initExpr.right;
+      } else if (initExpr is AssignmentExpression &&
+          initExpr.operator == '=' &&
+          initExpr.left is BinaryExpression &&
+          (initExpr.left as BinaryExpression).operator == 'in') {
+        final inExpression = initExpr.left as BinaryExpression;
+        annexBForInInit = inExpression.left;
+        annexBForInRight = AssignmentExpression(
+          left: inExpression.right,
+          operator: initExpr.operator,
+          right: initExpr.right,
+          line: initExpr.line,
+          column: initExpr.column,
+        );
+      }
+
+      if (annexBForInInit != null && annexBForInRight != null) {
+        if (_isInStrictMode() || kind != 'var' || id is! IdentifierPattern) {
+          throw ParseError('Invalid initializer in for-in statement', _peek());
+        }
+
+        Expression right = annexBForInRight;
+        if (_match([TokenType.comma])) {
+          final rightExpressions = <Expression>[right];
+          do {
+            rightExpressions.add(_assignmentExpression());
+          } while (_match([TokenType.comma]));
+          right = SequenceExpression(
+            expressions: rightExpressions,
+            line: annexBForInRight.line,
+            column: annexBForInRight.column,
+          );
+        }
+
+        final declarator = VariableDeclarator(id: id, init: annexBForInInit);
         _consume(TokenType.rightParen, 'Expected ")" after for-in expression');
         final body = _loopBody();
 
@@ -1692,7 +1729,7 @@ class JSParser {
 
         return ForInStatement(
           left: leftSide,
-          right: initExpr.right,
+          right: right,
           body: body,
           line: previous.line,
           column: previous.column,

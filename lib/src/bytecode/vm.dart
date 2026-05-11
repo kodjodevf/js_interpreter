@@ -1621,6 +1621,8 @@ class BytecodeVM implements JSRuntime {
     } on _JSException catch (e) {
       // Async function threw — reject the outer promise.
       promise.reject(e.value);
+    } on JSError catch (e) {
+      promise.reject(_makeError(e.name, e.message));
     } catch (e) {
       // Unexpected error
       promise.reject(e is JSValue ? e : JSValueFactory.string(e.toString()));

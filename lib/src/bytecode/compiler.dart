@@ -3634,6 +3634,11 @@ class BytecodeCompiler implements ASTVisitor<void> {
           isLexical: kind != 'var',
           scopeLevel: _ctx.scope.depth,
         );
+
+        if (declarator.init != null) {
+          declarator.init!.accept(this);
+          _emitPutVar(varName, declarator.init!.line, declarator.init!.column);
+        }
       }
     } else {
       if (node.left is IdentifierExpression) {
@@ -4270,8 +4275,12 @@ class BytecodeCompiler implements ASTVisitor<void> {
       _compileWithInferredFunctionName(name, init, () {
         init.accept(this);
       });
-      _bc.emitU16(Op.putLoc, slot);
-      _ctx.adjustStack(-1);
+      if (kind == 'var') {
+        _emitPutVar(name, init.line, init.column);
+      } else {
+        _bc.emitU16(Op.putLoc, slot);
+        _ctx.adjustStack(-1);
+      }
     } else if (kind != 'var') {
       // Lexical bindings leave TDZ when execution reaches their declaration.
       _bc.emit(Op.pushUndefined);
