@@ -2724,6 +2724,24 @@ class RuntimeBootstrap {
         expectedArgs: 1,
       ),
     );
+
+    _define(
+      globals,
+      '__validateClassPrototypeParent__',
+      JSNativeFunction(
+        functionName: '__validateClassPrototypeParent__',
+        nativeImpl: (args) {
+          final value = args.isNotEmpty ? args[0] : JSUndefined.instance;
+          if (value.isNull || value is JSObject || value is JSFunction) {
+            return value;
+          }
+          throw JSTypeError(
+            'Class extends value does not have valid prototype property ${value.toString()}',
+          );
+        },
+        expectedArgs: 1,
+      ),
+    );
   }
 
   static void _installGlobalThis(Map<String, JSValue> globals) {

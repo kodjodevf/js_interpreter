@@ -53,12 +53,16 @@ class _LabelTarget {
   /// Number of active finally blocks at the jump target.
   final int finallyDepth;
 
+  /// Whether breaking from this target must close the iterator on the stack.
+  final bool closesIteratorOnBreak;
+
   _LabelTarget({
     this.label,
     required this.stackDepth,
     required this.finallyDepth,
     this.isBreakTarget = false,
     this.isLoopTarget = false,
+    this.closesIteratorOnBreak = false,
   });
 }
 
@@ -3467,6 +3471,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
       finallyDepth: _finallyBlockStack.length,
       isBreakTarget: true,
       isLoopTarget: true,
+      closesIteratorOnBreak: true,
     );
     _ctx.labelStack.add(target);
 
@@ -3505,6 +3510,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
       finallyDepth: _finallyBlockStack.length,
       isBreakTarget: true,
       isLoopTarget: true,
+      closesIteratorOnBreak: true,
     );
     _ctx.labelStack.add(target);
 
@@ -3700,6 +3706,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
       finallyDepth: _finallyBlockStack.length,
       isBreakTarget: true,
       isLoopTarget: true,
+      closesIteratorOnBreak: true,
     );
     _ctx.labelStack.add(target);
 
@@ -3896,7 +3903,11 @@ class BytecodeCompiler implements ASTVisitor<void> {
     // Drop extra items on the stack (e.g. for-of iterators) to match the
     // target's stack depth.  The break jumps past the loop's own cleanup so
     // we need to clean up here.
-    final extra = _ctx._currentStackDepth - target.stackDepth;
+    var extra = _ctx._currentStackDepth - target.stackDepth;
+    if (target.closesIteratorOnBreak && extra > 0) {
+      _bc.emit(Op.iteratorClose);
+      extra--;
+    }
     for (var i = 0; i < extra; i++) {
       _bc.emit(Op.drop);
     }
@@ -4566,6 +4577,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
         _ctx.adjustStack(1);
         final protoAtom = _ctx.addConstant('prototype');
         _bc.emitU32(Op.getField, protoAtom);
+        _emitDestructuringValidator('__validateClassPrototypeParent__', line);
         // Stack: [ctor, ctor, proto, proto, superProto]
         // Set proto.__proto__ = superProto
         final protoAtom2 = _ctx.addConstant('__proto__');

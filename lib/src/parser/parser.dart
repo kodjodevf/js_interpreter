@@ -960,7 +960,8 @@ class JSParser {
 
       final body = _statement(
         allowDeclaration: false,
-        allowFunctionDeclaration: allowDeclaration && !_isInStrictMode(),
+        allowFunctionDeclaration:
+            allowFunctionDeclaration && !_isInStrictMode(),
       );
 
       return LabeledStatement(

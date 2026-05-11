@@ -604,20 +604,23 @@ class JSObject extends JSValue {
 
   // Reference to parent prototype (prototype chain)
   JSObject? _prototype;
+  JSFunction? _callablePrototype;
 
   // Default constructor with Object.prototype as prototype
   JSObject({JSObject? prototype}) {
     if (prototype != null) {
       _prototype = prototype;
+      _callablePrototype = null;
     } else {
       // This case should only be used for Object.create(null)
       // By default, use Object.prototype
       _prototype = objectPrototype; // Use getter instead of static field
+      _callablePrototype = null;
     }
   }
 
   // Special constructor for Object.create(null)
-  JSObject.withoutPrototype() : _prototype = null;
+  JSObject.withoutPrototype() : _prototype = null, _callablePrototype = null;
 
   /// Get an internal slot value
   dynamic getInternalSlot(String name) {
@@ -1764,12 +1767,18 @@ class JSObject extends JSValue {
 
   /// Verifie si cet objet est dans la chaine de prototypes of the object donne
   bool _isPrototypeOf(JSObject obj) {
-    JSObject? current = obj.getPrototype();
+    JSValue? current = obj.getPrototypeValue();
     while (current != null) {
       if (identical(current, this)) {
         return true;
       }
-      current = current.getPrototype();
+      if (current is JSObject) {
+        current = current.getPrototypeValue();
+      } else if (current is JSFunction) {
+        current = current._getOwnFunctionPrototypeLink(current);
+      } else {
+        break;
+      }
     }
     return false;
   }
@@ -1779,9 +1788,36 @@ class JSObject extends JSValue {
     return _prototype;
   }
 
+  JSValue? getPrototypeValue() {
+    return _prototype ?? _callablePrototype;
+  }
+
   /// Definit le prototype de cet objet
   void setPrototype(JSObject? prototype) {
     _prototype = prototype;
+    _callablePrototype = null;
+  }
+
+  void setPrototypeValue(JSValue? prototype) {
+    if (prototype == null || prototype.isNull || prototype.isUndefined) {
+      _prototype = null;
+      _callablePrototype = null;
+      return;
+    }
+
+    if (prototype is JSObject) {
+      _prototype = prototype;
+      _callablePrototype = null;
+      return;
+    }
+
+    if (prototype is JSFunction) {
+      _prototype = null;
+      _callablePrototype = prototype;
+      return;
+    }
+
+    throw JSTypeError('Object prototype may only be an object or null');
   }
 
   /// Verifie si a property existe dans Object.prototype

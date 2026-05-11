@@ -6,6 +6,7 @@ import 'js_value.dart';
 import 'js_runtime.dart';
 import 'environment.dart';
 import 'native_functions.dart';
+import '../parser/parser.dart';
 
 /// Callback to execute a JavaScript function with 'this' support
 typedef FunctionExecutor =
@@ -736,6 +737,18 @@ class FunctionGlobal {
 
     // The last argument is the body, the others are parameters
     final body = args.last.toString();
+    final parameterSource = args
+        .sublist(0, args.length - 1)
+        .map((arg) => arg.toString())
+        .join(',');
+
+    try {
+      JSParser.parseString(
+        'function anonymous($parameterSource\n) {\n$body\n}',
+      );
+    } on ParseError catch (error) {
+      throw JSSyntaxError(error.message);
+    }
 
     // Parse parameters - they can be separate arguments or comma-separated in a single arg
     final rawParameters = args.sublist(0, args.length - 1);

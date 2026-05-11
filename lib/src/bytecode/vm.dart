@@ -2996,7 +2996,7 @@ class BytecodeVM implements JSRuntime {
           ),
           closeStep: () {
             final returnFn = iterator.getProperty('return');
-            if (returnFn.isUndefined || returnFn.isNull) {
+            if (returnFn.isUndefined) {
               return;
             }
             if (!returnFn.isFunction) {
@@ -3023,14 +3023,18 @@ class BytecodeVM implements JSRuntime {
       final asyncIterFn = iterable.getProperty(
         JSSymbol.asyncIterator.propertyKey,
       );
-      if (asyncIterFn is JSFunction) {
+      if (!asyncIterFn.isUndefined && !asyncIterFn.isNull) {
+        if (asyncIterFn is! JSFunction) {
+          throw JSTypeError('Symbol.asyncIterator is not a function');
+        }
         final asyncIterator = _unwrapIteratorStep(
           _callFunction(asyncIterFn, iterable, []),
           allowAsync: true,
         );
-        if (asyncIterator is JSObject) {
-          return asyncIterator;
+        if (asyncIterator is! JSObject) {
+          throw JSTypeError('iterator is not an object');
         }
+        return asyncIterator;
       }
     }
 
@@ -5216,7 +5220,13 @@ class BytecodeVM implements JSRuntime {
 
       if (obj is JSObject) {
         if (name == '__proto__') {
-          obj.setPrototype(value is JSObject ? value : null);
+          obj.setPrototypeValue(
+            value.isNull
+                ? null
+                : value is JSObject || value is JSFunction
+                ? value
+                : null,
+          );
           return;
         }
         obj.setProperty(name, value);
@@ -5282,11 +5292,11 @@ class BytecodeVM implements JSRuntime {
     if (ctor is! JSObject && ctor is! JSFunction) return false;
     // Check prototype chain against ctor.prototype
     final proto = _getProperty(ctor, 'prototype');
-    if (proto is! JSObject) return false;
+    if (proto is! JSObject && proto is! JSFunction) return false;
 
     JSValue? current;
     if (obj is JSObject) {
-      current = obj.getPrototype();
+      current = obj.getPrototypeValue();
     } else if (obj is JSFunction) {
       current = _getFunctionPrototypeChainValue(obj);
     } else {
@@ -5296,7 +5306,7 @@ class BytecodeVM implements JSRuntime {
     while (current != null) {
       if (identical(current, proto)) return true;
       if (current is JSObject) {
-        current = current.getPrototype();
+        current = current.getPrototypeValue();
       } else if (current is JSFunction) {
         current = _getFunctionPrototypeChainValue(current);
       } else {
