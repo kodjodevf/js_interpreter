@@ -377,6 +377,105 @@ class GlobalFunctions {
     );
   }
 
+  /// Creates Annex B unescape() function
+  static JSNativeFunction createUnescape() {
+    bool isHexDigit(String char) {
+      final code = char.codeUnitAt(0);
+      return (code >= 0x30 && code <= 0x39) ||
+          (code >= 0x41 && code <= 0x46) ||
+          (code >= 0x61 && code <= 0x66);
+    }
+
+    return JSNativeFunction(
+      functionName: 'unescape',
+      expectedArgs: 1,
+      nativeImpl: (args) {
+        final input = args.isEmpty
+            ? 'undefined'
+            : JSConversion.jsToString(args[0]);
+        final buffer = StringBuffer();
+
+        var index = 0;
+        while (index < input.length) {
+          final char = input[index];
+          if (char == '%' &&
+              index + 5 < input.length &&
+              input[index + 1] == 'u' &&
+              isHexDigit(input[index + 2]) &&
+              isHexDigit(input[index + 3]) &&
+              isHexDigit(input[index + 4]) &&
+              isHexDigit(input[index + 5])) {
+            final codeUnit = int.parse(
+              input.substring(index + 2, index + 6),
+              radix: 16,
+            );
+            buffer.writeCharCode(codeUnit);
+            index += 6;
+            continue;
+          }
+
+          if (char == '%' &&
+              index + 2 < input.length &&
+              isHexDigit(input[index + 1]) &&
+              isHexDigit(input[index + 2])) {
+            final codeUnit = int.parse(
+              input.substring(index + 1, index + 3),
+              radix: 16,
+            );
+            buffer.writeCharCode(codeUnit);
+            index += 3;
+            continue;
+          }
+
+          buffer.write(char);
+          index += 1;
+        }
+
+        return JSValueFactory.string(buffer.toString());
+      },
+    );
+  }
+
+  /// Creates Annex B escape() function
+  static JSNativeFunction createEscape() {
+    const unescapedChars =
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@*_+-./';
+
+    return JSNativeFunction(
+      functionName: 'escape',
+      expectedArgs: 1,
+      nativeImpl: (args) {
+        final input = args.isEmpty
+            ? 'undefined'
+            : JSConversion.jsToString(args[0]);
+        final buffer = StringBuffer();
+
+        for (var index = 0; index < input.length; index++) {
+          final codeUnit = input.codeUnitAt(index);
+          final char = String.fromCharCode(codeUnit);
+          if (unescapedChars.contains(char)) {
+            buffer.write(char);
+            continue;
+          }
+
+          if (codeUnit < 256) {
+            final hex = codeUnit
+                .toRadixString(16)
+                .toUpperCase()
+                .padLeft(2, '0');
+            buffer.write('%$hex');
+            continue;
+          }
+
+          final hex = codeUnit.toRadixString(16).toUpperCase().padLeft(4, '0');
+          buffer.write('%u$hex');
+        }
+
+        return JSValueFactory.string(buffer.toString());
+      },
+    );
+  }
+
   /// Creates sendMessage() function - returns the result
   JSNativeFunction createSendMessage() {
     return JSNativeFunction(

@@ -1106,6 +1106,10 @@ class JSObject extends JSValue {
     // does not consult inherited setters or inherited writability.
     if (existingDescriptor != null) {
       _properties[name] = value;
+      if (existingDescriptor.isData) {
+        existingDescriptor.value = value;
+        existingDescriptor.hasValueProperty = true;
+      }
       return;
     }
 

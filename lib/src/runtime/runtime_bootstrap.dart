@@ -16,6 +16,7 @@ import 'math_object.dart';
 import 'missing_builtins.dart';
 import 'native_functions.dart';
 import 'object_prototype.dart';
+import 'string_prototype.dart';
 import 'temporal.dart';
 import 'date_object.dart';
 import 'text_codec.dart';
@@ -374,6 +375,97 @@ class RuntimeBootstrap {
     final stringPrototype = JSObject();
     stringConstructor.setProperty('prototype', stringPrototype);
     stringPrototype.defineConstructorProperty(stringConstructor);
+
+    String coerceHtmlStringThis(JSValue? value, String methodName) {
+      final thisValue = value ?? JSUndefined.instance;
+      if (thisValue.isNull || thisValue.isUndefined) {
+        throw JSTypeError(
+          'String.prototype.$methodName called on null or undefined',
+        );
+      }
+      return JSConversion.jsToString(thisValue);
+    }
+
+    String createHtml(
+      JSValue? thisValue,
+      String methodName,
+      String tag,
+      String attribute,
+      JSValue? attributeValue,
+    ) {
+      final source = coerceHtmlStringThis(thisValue, methodName);
+      if (attribute.isEmpty) {
+        return '<$tag>$source</$tag>';
+      }
+
+      final escapedAttributeValue = JSConversion.jsToString(
+        attributeValue ?? JSUndefined.instance,
+      ).replaceAll('"', '&quot;');
+      return '<$tag $attribute="$escapedAttributeValue">$source</$tag>';
+    }
+
+    void defineHtmlMethod(
+      String name,
+      String tag, {
+      String attribute = '',
+      int expectedArgs = 0,
+    }) {
+      stringPrototype.defineProperty(
+        name,
+        PropertyDescriptor(
+          value: JSNativeFunction(
+            functionName: name,
+            expectedArgs: expectedArgs,
+            nativeImpl: (args) {
+              final thisValue = args.isNotEmpty
+                  ? args[0]
+                  : JSUndefined.instance;
+              final attributeValue = args.length > 1
+                  ? args[1]
+                  : JSUndefined.instance;
+              return JSValueFactory.string(
+                createHtml(thisValue, name, tag, attribute, attributeValue),
+              );
+            },
+          ),
+          writable: true,
+          enumerable: false,
+          configurable: true,
+        ),
+      );
+    }
+
+    JSNativeFunction defineStringMethod(
+      String name,
+      int expectedArgs,
+      JSValue Function(List<JSValue> args, String str) implementation,
+    ) {
+      final function = JSNativeFunction(
+        functionName: name,
+        expectedArgs: expectedArgs,
+        nativeImpl: (args) {
+          final source = coerceHtmlStringThis(
+            args.isNotEmpty ? args[0] : JSUndefined.instance,
+            name,
+          );
+          final callArgs = args.length > 1
+              ? args.sublist(1)
+              : const <JSValue>[];
+          return implementation(callArgs, source);
+        },
+      );
+      stringPrototype.defineProperty(
+        name,
+        PropertyDescriptor(
+          value: function,
+          writable: true,
+          enumerable: false,
+          configurable: true,
+        ),
+      );
+      return function;
+    }
+
     stringPrototype.setProperty(
       'toString',
       JSNativeFunction(
@@ -447,6 +539,48 @@ class RuntimeBootstrap {
           );
           return iterator;
         },
+      ),
+    );
+    defineHtmlMethod('anchor', 'a', attribute: 'name', expectedArgs: 1);
+    defineHtmlMethod('big', 'big');
+    defineHtmlMethod('blink', 'blink');
+    defineHtmlMethod('bold', 'b');
+    defineHtmlMethod('fixed', 'tt');
+    defineHtmlMethod('fontcolor', 'font', attribute: 'color', expectedArgs: 1);
+    defineHtmlMethod('fontsize', 'font', attribute: 'size', expectedArgs: 1);
+    defineHtmlMethod('italics', 'i');
+    defineHtmlMethod('link', 'a', attribute: 'href', expectedArgs: 1);
+    defineHtmlMethod('small', 'small');
+    defineHtmlMethod('strike', 'strike');
+    defineHtmlMethod('sub', 'sub');
+    defineHtmlMethod('sup', 'sup');
+    defineStringMethod('substr', 2, StringPrototype.substr);
+    final trimStartFunction = defineStringMethod(
+      'trimStart',
+      0,
+      StringPrototype.trimStart,
+    );
+    final trimEndFunction = defineStringMethod(
+      'trimEnd',
+      0,
+      StringPrototype.trimEnd,
+    );
+    stringPrototype.defineProperty(
+      'trimLeft',
+      PropertyDescriptor(
+        value: trimStartFunction,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    stringPrototype.defineProperty(
+      'trimRight',
+      PropertyDescriptor(
+        value: trimEndFunction,
+        writable: true,
+        enumerable: false,
+        configurable: true,
       ),
     );
     stringPrototype.setInternalSlot('__internalClass__', 'String');
@@ -786,23 +920,35 @@ class RuntimeBootstrap {
 
     regexpPrototype = JSObject();
     late final JSNativeFunction compileFunction;
+    final compileRealm = JSRuntime.current;
     JSException compileTypeError(String message) {
-      final runtime = compileFunction.definingRuntime ?? JSRuntime.current;
-      JSObject? prototype;
-      if (runtime != null) {
-        try {
-          final constructor = runtime.getGlobal('TypeError');
-          if (constructor is JSFunction && constructor is JSObject) {
-            final proto = constructor.getProperty('prototype');
-            if (proto is JSObject) {
-              prototype = proto;
-            }
-          }
-        } catch (_) {}
+      final runtime =
+          compileRealm ?? compileFunction.definingRuntime ?? JSRuntime.current;
+      final previousRuntime = JSRuntime.current;
+      if (runtime != null && !identical(previousRuntime, runtime)) {
+        JSRuntime.setCurrent(runtime);
       }
-      return JSException(
-        JSErrorObjectFactory.fromDartError(JSTypeError(message), prototype),
-      );
+      try {
+        JSObject? prototype;
+        if (runtime != null) {
+          try {
+            final constructor = runtime.getGlobal('TypeError');
+            if (constructor is JSFunction && constructor is JSObject) {
+              final proto = constructor.getProperty('prototype');
+              if (proto is JSObject) {
+                prototype = proto;
+              }
+            }
+          } catch (_) {}
+        }
+        return JSException(
+          JSErrorObjectFactory.fromDartError(JSTypeError(message), prototype),
+        );
+      } finally {
+        if (!identical(JSRuntime.current, previousRuntime)) {
+          JSRuntime.setCurrent(previousRuntime);
+        }
+      }
     }
 
     compileFunction = JSNativeFunction(
@@ -1066,7 +1212,9 @@ class RuntimeBootstrap {
     final symbolConstructor = JSNativeFunction(
       functionName: 'Symbol',
       nativeImpl: (args) {
-        final description = args.isNotEmpty ? args[0].toString() : null;
+        final description = args.isNotEmpty && !args[0].isUndefined
+            ? JSConversion.jsToString(args[0])
+            : null;
         return JSSymbol(description);
       },
     );
@@ -1107,6 +1255,7 @@ class RuntimeBootstrap {
       'species': JSSymbol.species,
       'toPrimitive': JSSymbol.symbolToPrimitive,
       'match': JSSymbol.match,
+      'matchAll': JSSymbol.matchAll,
       'replace': JSSymbol.replace,
       'search': JSSymbol.search,
       'split': JSSymbol.split,
@@ -1154,6 +1303,32 @@ class RuntimeBootstrap {
             }
           }
           throw JSTypeError('Symbol.prototype.valueOf called on non-Symbol');
+        },
+      ),
+    );
+    symbolPrototype.defineGetter(
+      'description',
+      JSNativeFunction(
+        functionName: 'get description',
+        nativeImpl: (args) {
+          if (args.isNotEmpty) {
+            if (args[0] is JSSymbol) {
+              final description = (args[0] as JSSymbol).description;
+              return description != null
+                  ? JSValueFactory.string(description)
+                  : JSValueFactory.undefined();
+            }
+            if (args[0] is JSSymbolObject) {
+              final description =
+                  (args[0] as JSSymbolObject).primitiveValue.description;
+              return description != null
+                  ? JSValueFactory.string(description)
+                  : JSValueFactory.undefined();
+            }
+          }
+          throw JSTypeError(
+            'Symbol.prototype.description called on non-Symbol',
+          );
         },
       ),
     );
@@ -2882,6 +3057,8 @@ class RuntimeBootstrap {
     _define(globals, 'parseFloat', GlobalFunctions.createParseFloat());
     _define(globals, 'isNaN', GlobalFunctions.createIsNaN());
     _define(globals, 'isFinite', GlobalFunctions.createIsFinite());
+    _define(globals, 'escape', GlobalFunctions.createEscape());
+    _define(globals, 'unescape', GlobalFunctions.createUnescape());
     _define(globals, 'encodeURI', GlobalFunctions.createEncodeURI());
     _define(globals, 'decodeURI', GlobalFunctions.createDecodeURI());
     _define(

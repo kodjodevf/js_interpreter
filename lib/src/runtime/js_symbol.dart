@@ -34,6 +34,7 @@ class JSSymbol extends JSValue {
   static late final JSSymbol species;
   static late final JSSymbol symbolToPrimitive; // Renamed to avoid conflict
   static late final JSSymbol match;
+  static late final JSSymbol matchAll;
   static late final JSSymbol replace;
   static late final JSSymbol search;
   static late final JSSymbol split;
@@ -72,6 +73,7 @@ class JSSymbol extends JSValue {
     species = JSSymbol._('Symbol.species', false, null);
     symbolToPrimitive = JSSymbol._('Symbol.toPrimitive', false, null);
     match = JSSymbol._('Symbol.match', false, null);
+    matchAll = JSSymbol._('Symbol.matchAll', false, null);
     replace = JSSymbol._('Symbol.replace', false, null);
     search = JSSymbol._('Symbol.search', false, null);
     split = JSSymbol._('Symbol.split', false, null);
@@ -201,6 +203,7 @@ class JSSymbolConstructor extends JSFunction
     setProperty('species', JSSymbol.species);
     setProperty('toPrimitive', JSSymbol.symbolToPrimitive);
     setProperty('match', JSSymbol.match);
+    setProperty('matchAll', JSSymbol.matchAll);
     setProperty('replace', JSSymbol.replace);
     setProperty('search', JSSymbol.search);
     setProperty('split', JSSymbol.split);

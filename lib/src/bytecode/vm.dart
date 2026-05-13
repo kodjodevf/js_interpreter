@@ -978,6 +978,7 @@ class BytecodeVM implements JSRuntime {
         isDirectEvalFrame: true,
         directEvalHostFrame: hostFrame,
       );
+      _initializeDirectEvalLocals(frame, hostFrame);
 
       JSValue result;
       try {
@@ -993,7 +994,11 @@ class BytecodeVM implements JSRuntime {
       return result;
     }
 
-    return execute(bytecode);
+    return execute(
+      bytecode,
+      isIndirectGlobalEval: true,
+      callerFrame: _currentFrame,
+    );
   }
 
   void validateGlobalScriptDeclarations(Program program) {
@@ -1097,8 +1102,7 @@ class BytecodeVM implements JSRuntime {
     collectNames(program.body, nested: false);
 
     for (final name in lexicalNames) {
-      if (_hasExistingGlobalVarLikeBinding(name) ||
-          _hasRestrictedGlobalProperty(name) ||
+      if (_hasRestrictedGlobalProperty(name) ||
           _hasExistingGlobalLexicalBinding(name)) {
         throw JSSyntaxError("Identifier '$name' has already been declared");
       }
@@ -1271,10 +1275,22 @@ class BytecodeVM implements JSRuntime {
   void executeStaticBlock(dynamic body, JSValue classObj) {}
 
   /// Execute a top-level FunctionBytecode (script)
-  JSValue execute(FunctionBytecode script) {
+  JSValue execute(
+    FunctionBytecode script, {
+    bool isIndirectGlobalEval = false,
+    StackFrame? callerFrame,
+  }) {
     final previousRuntime = JSRuntime.current;
     JSRuntime.setCurrent(this);
-    final frame = StackFrame(func: script, thisValue: _getGlobalThis());
+    final frame = StackFrame(
+      func: script,
+      thisValue: _getGlobalThis(),
+      callerFrame: callerFrame,
+      isIndirectGlobalEvalFrame: isIndirectGlobalEval,
+    );
+    if (isIndirectGlobalEval) {
+      _initializeIndirectEvalGlobalLocals(frame);
+    }
 
     JSValue result;
     try {
@@ -1344,7 +1360,7 @@ class BytecodeVM implements JSRuntime {
   }
 
   void _syncTopLevelLocalToGlobal(StackFrame frame, int index, JSValue value) {
-    if (frame.callerFrame != null) {
+    if (frame.callerFrame != null && !frame.isIndirectGlobalEvalFrame) {
       return;
     }
     if (index < 0 || index >= frame.func.vars.length) {
@@ -1354,6 +1370,15 @@ class BytecodeVM implements JSRuntime {
     final varDef = frame.func.vars[index];
     if (varDef.scope != VarScope.funcScope) {
       return;
+    }
+
+    if (frame.isIndirectGlobalEvalFrame) {
+      _assignVarLikeOrdinaryBindingInFrameWithLimit(
+        frame.callerFrame!,
+        varDef.name,
+        value,
+        frame.callerFrame!.func.vars.length,
+      );
     }
 
     final globalThis = globals['globalThis'];
@@ -2295,6 +2320,11 @@ class BytecodeVM implements JSRuntime {
       }
     }
 
+    final activeTopLevelValue = _lookupActiveTopLevelVarBinding(name);
+    if (activeTopLevelValue != null) {
+      return activeTopLevelValue;
+    }
+
     final cachedValue = globals[name];
     if (_isPersistentLexicalGlobal(cachedValue)) {
       return (cachedValue as _VarRefWrapper).ref.value;
@@ -2375,6 +2405,10 @@ class BytecodeVM implements JSRuntime {
       return;
     }
 
+    if (_assignActiveTopLevelVarBinding(name, value)) {
+      return;
+    }
+
     if (_currentFrame?.func.isStrict == true && !_hasGlobalBinding(name)) {
       throw _ThrowSignal(_makeError('ReferenceError', '$name is not defined'));
     }
@@ -2401,6 +2435,11 @@ class BytecodeVM implements JSRuntime {
       if (ordinaryValue != null) {
         return ordinaryValue;
       }
+    }
+
+    final activeTopLevelValue = _lookupActiveTopLevelVarBinding(name);
+    if (activeTopLevelValue != null) {
+      return activeTopLevelValue;
     }
 
     final cachedValue = globals[name];
@@ -2451,6 +2490,10 @@ class BytecodeVM implements JSRuntime {
       }
     }
 
+    if (_lookupActiveTopLevelVarBinding(name) != null) {
+      return true;
+    }
+
     if (_isPersistentLexicalGlobal(globals[name])) {
       return true;
     }
@@ -2471,18 +2514,26 @@ class BytecodeVM implements JSRuntime {
     return _isPersistentLexicalGlobal(globals[name]);
   }
 
-  bool _hasExistingGlobalVarLikeBinding(String name) {
+  JSValue? _lookupExistingIndirectEvalGlobalValue(String name) {
+    final cachedValue = globals[name];
+    if (_isPersistentLexicalGlobal(cachedValue)) {
+      return null;
+    }
+
     final globalThis = globals['globalThis'];
-    if (globalThis is! JSObject) {
-      return false;
+    if (globalThis is JSObject && globalThis.hasProperty(name)) {
+      return globalThis.getProperty(name);
     }
 
-    final descriptor = globalThis.getOwnPropertyDescriptor(name);
-    if (descriptor == null || descriptor.isAccessor) {
-      return false;
+    if (cachedValue is _VarRefWrapper) {
+      return cachedValue.ref.value;
     }
 
-    return descriptor.enumerable;
+    if (cachedValue != null || globals.containsKey(name)) {
+      return cachedValue ?? JSUndefined.instance;
+    }
+
+    return null;
   }
 
   bool _hasRestrictedGlobalProperty(String name) {
@@ -2535,6 +2586,10 @@ class BytecodeVM implements JSRuntime {
       )) {
         return;
       }
+    }
+
+    if (_assignActiveTopLevelVarBinding(name, value)) {
+      return;
     }
 
     final existing = globals[name];
@@ -2670,37 +2725,6 @@ class BytecodeVM implements JSRuntime {
     return bindings;
   }
 
-  Map<String, VarRef> _snapshotEvalBindings(Map<String, VarRef> bindings) {
-    final snapshot = <String, VarRef>{};
-    bindings.forEach((name, ref) {
-      JSValue currentValue;
-      try {
-        currentValue = ref.value;
-      } on JSReferenceError {
-        currentValue = JSTemporalDeadZone.instance;
-      }
-
-      if (ref is LocalBindingVarRef) {
-        snapshot[name] = LocalBindingVarRef(
-          name,
-          isConst: ref.isConst,
-          isLexical: ref.isLexical,
-          value: currentValue,
-        );
-      } else if (ref is LexicalVarRef) {
-        snapshot[name] = LocalBindingVarRef(
-          name,
-          isConst: false,
-          isLexical: true,
-          value: currentValue,
-        );
-      } else {
-        snapshot[name] = VarRef(currentValue);
-      }
-    });
-    return snapshot;
-  }
-
   VarRef _ensureLocalBindingRef(StackFrame frame, int index) {
     final local = frame.locals[index];
     if (local is _VarRefWrapper) {
@@ -2756,6 +2780,22 @@ class BytecodeVM implements JSRuntime {
     return null;
   }
 
+  JSValue? _lookupVarLikeOrdinaryBindingInFrameWithLimit(
+    StackFrame frame,
+    String name,
+    int localLimit,
+  ) {
+    final cappedLocalLimit = localLimit.clamp(0, frame.func.vars.length);
+    for (var i = cappedLocalLimit - 1; i >= 0; i--) {
+      final variable = frame.func.vars[i];
+      if (variable.name != name || variable.isLexical || variable.isConst) {
+        continue;
+      }
+      return _readLocal(frame, i);
+    }
+    return null;
+  }
+
   bool _assignOrdinaryBindingInFrame(
     StackFrame frame,
     String name,
@@ -2789,6 +2829,24 @@ class BytecodeVM implements JSRuntime {
         frame.args[i] = value;
         return true;
       }
+    }
+    return false;
+  }
+
+  bool _assignVarLikeOrdinaryBindingInFrameWithLimit(
+    StackFrame frame,
+    String name,
+    JSValue value,
+    int localLimit,
+  ) {
+    final cappedLocalLimit = localLimit.clamp(0, frame.func.vars.length);
+    for (var i = cappedLocalLimit - 1; i >= 0; i--) {
+      final variable = frame.func.vars[i];
+      if (variable.name != name || variable.isLexical || variable.isConst) {
+        continue;
+      }
+      _writeLocal(frame, i, value);
+      return true;
     }
     return false;
   }
@@ -3003,6 +3061,44 @@ class BytecodeVM implements JSRuntime {
     return frame.func.parameterVarCount;
   }
 
+  StackFrame? _findActiveTopLevelScriptFrame(StackFrame? frame) {
+    StackFrame? current = frame;
+    while (current != null) {
+      if (current.callerFrame == null) {
+        return current;
+      }
+      current = current.callerFrame;
+    }
+    return null;
+  }
+
+  JSValue? _lookupActiveTopLevelVarBinding(String name) {
+    final topLevelFrame = _findActiveTopLevelScriptFrame(_currentFrame);
+    if (topLevelFrame == null || identical(topLevelFrame, _currentFrame)) {
+      return null;
+    }
+
+    return _lookupVarLikeOrdinaryBindingInFrameWithLimit(
+      topLevelFrame,
+      name,
+      topLevelFrame.func.vars.length,
+    );
+  }
+
+  bool _assignActiveTopLevelVarBinding(String name, JSValue value) {
+    final topLevelFrame = _findActiveTopLevelScriptFrame(_currentFrame);
+    if (topLevelFrame == null || identical(topLevelFrame, _currentFrame)) {
+      return false;
+    }
+
+    return _assignVarLikeOrdinaryBindingInFrameWithLimit(
+      topLevelFrame,
+      name,
+      value,
+      topLevelFrame.func.vars.length,
+    );
+  }
+
   bool _hasDirectGlobalBinding(String name) {
     if (_isPersistentLexicalGlobal(globals[name])) {
       return true;
@@ -3065,6 +3161,47 @@ class BytecodeVM implements JSRuntime {
     }
   }
 
+  void _initializeIndirectEvalGlobalLocals(StackFrame frame) {
+    for (var i = 0; i < frame.func.vars.length; i++) {
+      final variable = frame.func.vars[i];
+      if (variable.scope != VarScope.funcScope ||
+          variable.isLexical ||
+          variable.isConst) {
+        continue;
+      }
+
+      final existingValue = _lookupExistingIndirectEvalGlobalValue(
+        variable.name,
+      );
+      if (existingValue != null) {
+        frame.locals[i] = existingValue;
+      }
+    }
+  }
+
+  void _ensureDirectEvalGlobalVarBinding(String name) {
+    final globalThis = globals['globalThis'];
+    if (globalThis is JSObject) {
+      if (globalThis.getOwnPropertyDescriptor(name) == null) {
+        globalThis.defineProperty(
+          name,
+          PropertyDescriptor(
+            value: JSUndefined.instance,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          ),
+        );
+      }
+      _syncGlobalCacheFromObject(name, globalThis);
+      return;
+    }
+
+    if (!globals.containsKey(name)) {
+      globals[name] = JSUndefined.instance;
+    }
+  }
+
   VarRef _ensureDirectEvalHostBinding(StackFrame host, String name) {
     final existing = host.evalBindings[name];
     if (existing != null) {
@@ -3084,6 +3221,51 @@ class BytecodeVM implements JSRuntime {
     return binding;
   }
 
+  JSValue? _lookupDirectEvalInitializationValue(StackFrame host, String name) {
+    final localLimit = host.callerFrame == null
+        ? host.func.vars.length
+        : _directEvalHostLocalLimit(host);
+
+    final ordinaryValue = _lookupOrdinaryBindingInFrameWithLimit(
+      host,
+      name,
+      localLimit,
+    );
+    if (ordinaryValue != null) {
+      return ordinaryValue;
+    }
+
+    final closureValue = _lookupClosureBindingInFrame(host, name);
+    if (closureValue != null) {
+      return closureValue;
+    }
+
+    if (host.callerFrame == null) {
+      return _lookupDirectGlobalBinding(name);
+    }
+
+    return null;
+  }
+
+  void _initializeDirectEvalLocals(StackFrame frame, StackFrame host) {
+    for (var i = 0; i < frame.func.vars.length; i++) {
+      final variable = frame.func.vars[i];
+      if (variable.scope != VarScope.funcScope ||
+          variable.isLexical ||
+          variable.isConst) {
+        continue;
+      }
+
+      final existingValue = _lookupDirectEvalInitializationValue(
+        host,
+        variable.name,
+      );
+      if (existingValue != null) {
+        frame.locals[i] = existingValue;
+      }
+    }
+  }
+
   void _persistDirectEvalLocals(StackFrame frame) {
     if (frame.func.isStrict) {
       return;
@@ -3101,6 +3283,21 @@ class BytecodeVM implements JSRuntime {
       }
 
       final value = _readLocal(frame, i);
+      if (host.callerFrame == null) {
+        final updatedHostVarBinding =
+            _assignVarLikeOrdinaryBindingInFrameWithLimit(
+              host,
+              variable.name,
+              value,
+              host.func.vars.length,
+            );
+        _writeDirectGlobalBinding(variable.name, value);
+        if (updatedHostVarBinding) {
+          continue;
+        }
+        continue;
+      }
+
       if (_assignOrdinaryBindingInFrameWithLimit(
         host,
         variable.name,
@@ -3554,14 +3751,17 @@ class BytecodeVM implements JSRuntime {
               if (_currentFrame?.isDirectEvalFrame == true &&
                   !_currentFrame!.func.isStrict) {
                 final host = _currentFrame!.directEvalHostFrame;
-                if (host != null &&
-                    _lookupOrdinaryBindingInFrameWithLimit(
-                          host,
-                          name,
-                          host.func.parameterVarCount,
-                        ) ==
-                        null) {
-                  _ensureDirectEvalHostBinding(host, name);
+                if (host != null) {
+                  if (host.callerFrame == null) {
+                    _ensureDirectEvalGlobalVarBinding(name);
+                  } else if (_lookupOrdinaryBindingInFrameWithLimit(
+                        host,
+                        name,
+                        host.func.parameterVarCount,
+                      ) ==
+                      null) {
+                    _ensureDirectEvalHostBinding(host, name);
+                  }
                 }
               } else {
                 final globalThis = globals['globalThis'];
@@ -3573,7 +3773,8 @@ class BytecodeVM implements JSRuntime {
                         value: JSUndefined.instance,
                         writable: true,
                         enumerable: true,
-                        configurable: false,
+                        configurable:
+                            _currentFrame?.isIndirectGlobalEvalFrame == true,
                       ),
                     );
                   }
@@ -4180,10 +4381,8 @@ class BytecodeVM implements JSRuntime {
                   lexicalThis: frame.thisValue,
                   lexicalNewTarget: frame.newTarget,
                   capturedEvalBindings: frame.isDirectEvalFrame
-                      ? _snapshotEvalBindings(
-                          _collectVisibleDirectEvalBindings(
-                            frame.directEvalHostFrame!,
-                          ),
+                      ? _collectVisibleDirectEvalBindings(
+                          frame.directEvalHostFrame!,
                         )
                       : _collectVisibleEvalBindings(frame),
                   capturedWithObjects: List<JSObject>.of(frame.withObjects),
@@ -5303,9 +5502,7 @@ class BytecodeVM implements JSRuntime {
     // Auto-boxing for strings
     if (obj is JSString || obj.isString) {
       final str = obj is JSString ? obj.value : obj.toString();
-      final result = StringPrototype.getStringProperty(str, name);
-      if (!result.isUndefined) return result;
-      // Fall through to String.prototype for inherited properties
+      // Prefer the actual String.prototype property when present.
       final stringCtor = globals['String'];
       if (stringCtor is JSNativeFunction) {
         final proto = stringCtor.getProperty('prototype');
@@ -5314,6 +5511,8 @@ class BytecodeVM implements JSRuntime {
           if (!val.isUndefined) return val;
         }
       }
+      final result = StringPrototype.getStringProperty(str, name);
+      if (!result.isUndefined) return result;
       return result;
     }
     // Auto-boxing for numbers
@@ -5353,9 +5552,10 @@ class BytecodeVM implements JSRuntime {
     // Auto-boxing for symbols
     if (obj is JSSymbol) {
       if (name == 'description') {
-        return obj.description != null
-            ? JSString(obj.description!)
-            : JSUndefined.instance;
+        final description = obj.description;
+        return description != null
+            ? JSValueFactory.string(description)
+            : JSValueFactory.undefined();
       }
       if (name == 'toString') {
         return JSNativeFunction(

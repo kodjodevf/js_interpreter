@@ -499,6 +499,9 @@ class StackFrame {
   /// The host frame whose environment is visible to this direct eval.
   final StackFrame? directEvalHostFrame;
 
+  /// Whether this frame executes an indirect eval in the global environment.
+  final bool isIndirectGlobalEvalFrame;
+
   StackFrame({
     required this.func,
     required this.thisValue,
@@ -510,6 +513,7 @@ class StackFrame {
     List<JSObject>? withObjects,
     this.isDirectEvalFrame = false,
     this.directEvalHostFrame,
+    this.isIndirectGlobalEvalFrame = false,
   }) : stack = List<JSValue>.filled(func.stackSize, JSUndefined.instance),
        args = List<JSValue>.filled(func.argCount, JSUndefined.instance),
        locals = List<JSValue>.generate(

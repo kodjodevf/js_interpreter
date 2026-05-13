@@ -370,6 +370,24 @@ class JSNativeFunction extends JSFunction {
       'lastIndexOf',
       'includes',
       'at',
+      'anchor',
+      'big',
+      'blink',
+      'bold',
+      'fixed',
+      'fontcolor',
+      'fontsize',
+      'italics',
+      'link',
+      'small',
+      'strike',
+      'sub',
+      'sup',
+      'substr',
+      'trimStart',
+      'trimEnd',
+      'trimLeft',
+      'trimRight',
       'reverse',
       'fill',
       'copyWithin',
@@ -386,6 +404,40 @@ class JSNativeFunction extends JSFunction {
 }
 
 class JSConversion {
+  static JSValue? _callToPrimitiveString(JSValue value) {
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      return null;
+    }
+
+    final method = switch (value) {
+      JSObject object => object.getProperty(
+        JSSymbol.symbolToPrimitive.propertyKey,
+      ),
+      JSFunction function => function.getProperty(
+        JSSymbol.symbolToPrimitive.propertyKey,
+      ),
+      _ => JSValueFactory.undefined(),
+    };
+
+    if (method.isUndefined || method.isNull) {
+      return null;
+    }
+    if (method is! JSFunction && method is! JSNativeFunction) {
+      throw JSTypeError('Cannot convert object to primitive value');
+    }
+
+    final result = method is JSNativeFunction
+        ? method.call([JSValueFactory.string('string')])
+        : runtime.callFunction(method, [
+            JSValueFactory.string('string'),
+          ], value);
+    if (result.isObject || result.isFunction) {
+      throw JSTypeError('Cannot convert object to primitive value');
+    }
+    return result;
+  }
+
   /// Convert JSValue to string
   static String jsToString(JSValue value) {
     switch (value.type) {
@@ -404,7 +456,15 @@ class JSConversion {
         return num.toString();
       case JSValueType.string:
         return (value as JSString).value;
+      case JSValueType.symbol:
+        throw JSTypeError('Cannot convert a Symbol value to a string');
+      case JSValueType.bigint:
+        return (value as JSBigInt).value.toString();
       case JSValueType.object:
+        final primitive = _callToPrimitiveString(value);
+        if (primitive != null) {
+          return jsToString(primitive);
+        }
         // Handle wrapper objects: Boolean, Number, String
         if (value is JSBooleanObject) {
           return value.primitiveValue ? 'true' : 'false';
@@ -487,6 +547,10 @@ class JSConversion {
         }
         return '[object Object]';
       case JSValueType.function:
+        final primitive = _callToPrimitiveString(value);
+        if (primitive != null) {
+          return jsToString(primitive);
+        }
         // Functions are objects and can have custom toString/valueOf
         final func = value as JSFunction;
         // Check if this function has custom toString/valueOf (from user assignment)
@@ -529,8 +593,6 @@ class JSConversion {
         }
         // Fall back to default function toString
         return func.toString();
-      default:
-        return value.toString();
     }
   }
 

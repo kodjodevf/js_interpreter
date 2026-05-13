@@ -1,7 +1,10 @@
 library;
 
+import 'dart:math' as math;
+
 import 'js_value.dart';
 import 'js_regexp.dart';
+import 'js_runtime.dart';
 import 'js_symbol.dart';
 import 'native_functions.dart';
 import 'iterator_protocol.dart';
@@ -18,6 +21,32 @@ class StringPrototype {
   /// Sets the function executor (called by evaluator)
   static void setFunctionExecutor(FunctionExecutor executor) {
     _functionExecutor = executor;
+  }
+
+  static JSValue? _callSymbolMethod(
+    JSValue target,
+    String symbolKey,
+    List<JSValue> args,
+  ) {
+    if (target.isNull || target.isUndefined) {
+      return null;
+    }
+
+    final method = switch (target) {
+      JSObject object => object.getProperty(symbolKey),
+      JSFunction function => function.getProperty(symbolKey),
+      _ => target.toObject().getProperty(symbolKey),
+    };
+    if (method.isUndefined) {
+      return null;
+    }
+
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('No runtime available for String symbol method call');
+    }
+
+    return runtime.callFunction(method, args, target);
   }
 
   /// String.prototype.length (property)
@@ -222,6 +251,15 @@ class StringPrototype {
     }
 
     final separator = args[0];
+    final splitMethod =
+        _callSymbolMethod(separator, JSSymbol.split.propertyKey, [
+          JSValueFactory.string(str),
+          args.length > 1 ? args[1] : JSValueFactory.undefined(),
+        ]);
+    if (splitMethod != null) {
+      return splitMethod;
+    }
+
     var limit = -1; // -1 means no limit
     if (args.length > 1 && !args[1].isUndefined) {
       final limitNum = args[1].toNumber();
@@ -256,28 +294,29 @@ class StringPrototype {
 
   /// String.prototype.substr(start, length?)
   static JSValue substr(List<JSValue> args, String str) {
-    if (args.isEmpty) {
-      return JSValueFactory.string(str);
-    }
-
-    final start = args[0].toNumber().floor();
-    final length = args.length > 1 ? args[1].toNumber().floor() : null;
-
-    // Handle negative start (count from end)
-    var actualStart = start;
-    if (actualStart < 0) {
-      actualStart = str.length + actualStart;
-    }
-    actualStart = actualStart.clamp(0, str.length);
-
-    if (length == null) {
-      // Return from start to end
-      return JSValueFactory.string(str.substring(actualStart));
+    final size = str.length;
+    var intStart = _toIntegerOrZero(args.isEmpty ? null : args[0]);
+    if (intStart < 0) {
+      intStart = (size + intStart).clamp(0, size);
     } else {
-      // Return specified length
-      final end = (actualStart + length).clamp(0, str.length);
-      return JSValueFactory.string(str.substring(actualStart, end.toInt()));
+      intStart = intStart.clamp(0, size);
     }
+
+    int resultLength;
+    if (args.length < 2 || args[1].isUndefined) {
+      resultLength = size - intStart;
+    } else {
+      final intLength = _toIntegerOrZero(args[1]);
+      resultLength = math.min(math.max(intLength, 0), size - intStart);
+    }
+
+    if (resultLength <= 0) {
+      return JSValueFactory.string('');
+    }
+
+    return JSValueFactory.string(
+      str.substring(intStart, intStart + resultLength),
+    );
   }
 
   /// String.prototype.substring(start, end?)
@@ -442,12 +481,23 @@ class StringPrototype {
 
   /// String.prototype.replace(searchValue, replaceValue)
   static JSValue replace(List<JSValue> args, String str) {
-    if (args.length < 2) {
+    if (args.isEmpty) {
       return JSValueFactory.string(str);
     }
 
     final searchValue = args[0];
-    final replaceValueArg = args[1];
+    final replaceValueArg = args.length > 1
+        ? args[1]
+        : JSValueFactory.undefined();
+
+    final replaceMethod = _callSymbolMethod(
+      searchValue,
+      JSSymbol.replace.propertyKey,
+      [JSValueFactory.string(str), replaceValueArg],
+    );
+    if (replaceMethod != null) {
+      return replaceMethod;
+    }
 
     // Check if replaceValue is a function
     final isFunction =
@@ -737,14 +787,29 @@ class StringPrototype {
   /// ES2021: Replace all occurrences of a substring or regex pattern
   /// Supports replacement functions as callbacks
   static JSValue replaceAll(List<JSValue> args, String str) {
+    if (args.isEmpty) {
+      throw JSTypeError(
+        'String.prototype.replaceAll requires at least 1 argument',
+      );
+    }
+
+    final searchValue = args[0];
+    final replacer = args.length > 1 ? args[1] : JSValueFactory.undefined();
+
+    final replaceMethod = _callSymbolMethod(
+      searchValue,
+      JSSymbol.replace.propertyKey,
+      [JSValueFactory.string(str), replacer],
+    );
+    if (replaceMethod != null) {
+      return replaceMethod;
+    }
+
     if (args.length < 2) {
       throw JSTypeError(
         'String.prototype.replaceAll requires at least 2 arguments',
       );
     }
-
-    final searchValue = args[0];
-    final replacer = args[1];
 
     // Support for regex
     if (searchValue is JSRegExp) {
@@ -853,6 +918,13 @@ class StringPrototype {
     }
 
     final pattern = args[0];
+    final matchMethod = _callSymbolMethod(pattern, JSSymbol.match.propertyKey, [
+      JSValueFactory.string(str),
+    ]);
+    if (matchMethod != null) {
+      return matchMethod;
+    }
+
     JSRegExp regex;
 
     // Convert to regex if not already
@@ -886,6 +958,15 @@ class StringPrototype {
   /// Returns an iterator of all matches (with capture groups)
   static JSValue matchAll(List<JSValue> args, String str) {
     final pattern = args.isEmpty ? JSValueFactory.undefined() : args[0];
+    final matchAllMethod = _callSymbolMethod(
+      pattern,
+      JSSymbol.matchAll.propertyKey,
+      [JSValueFactory.string(str)],
+    );
+    if (matchAllMethod != null) {
+      return matchAllMethod;
+    }
+
     JSRegExp jsRegex;
 
     // Convert to regex if not already
@@ -918,6 +999,15 @@ class StringPrototype {
     }
 
     final pattern = args[0];
+    final searchMethod = _callSymbolMethod(
+      pattern,
+      JSSymbol.search.propertyKey,
+      [JSValueFactory.string(str)],
+    );
+    if (searchMethod != null) {
+      return searchMethod;
+    }
+
     JSRegExp regex;
 
     // Convert to regex if not already

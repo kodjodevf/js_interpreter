@@ -127,6 +127,20 @@ class JSRegExp extends JSObject {
         dotAll: dotAll,
       );
     } on FormatException catch (error) {
+      final annexBSource = _rewriteAnnexBExtendedPatternCharacters(source);
+      if (annexBSource != source) {
+        try {
+          return RegExp(
+            annexBSource,
+            multiLine: multiLine,
+            caseSensitive: caseSensitive,
+            unicode: unicode,
+            dotAll: dotAll,
+          );
+        } on FormatException {
+          // Fall through to the original JS-facing error handling.
+        }
+      }
       if (_hasOnlyCrossAlternativeDuplicateNamedGroups(source, error.message)) {
         return RegExp(r'(?:)');
       }
@@ -134,8 +148,85 @@ class JSRegExp extends JSObject {
     }
   }
 
+  static String _rewriteAnnexBExtendedPatternCharacters(String source) {
+    final buffer = StringBuffer();
+    var inCharClass = false;
+    var escaped = false;
+
+    bool isQuantifierStart(int index) {
+      var cursor = index + 1;
+      var sawDigit = false;
+      while (cursor < source.length) {
+        final char = source[cursor];
+        final isDigit =
+            char.codeUnitAt(0) >= 0x30 && char.codeUnitAt(0) <= 0x39;
+        if (isDigit) {
+          sawDigit = true;
+          cursor++;
+          continue;
+        }
+        break;
+      }
+      if (!sawDigit) {
+        return false;
+      }
+      if (cursor < source.length && source[cursor] == ',') {
+        cursor++;
+        while (cursor < source.length) {
+          final char = source[cursor];
+          final isDigit =
+              char.codeUnitAt(0) >= 0x30 && char.codeUnitAt(0) <= 0x39;
+          if (!isDigit) {
+            break;
+          }
+          cursor++;
+        }
+      }
+      return cursor < source.length && source[cursor] == '}';
+    }
+
+    for (var index = 0; index < source.length; index++) {
+      final char = source[index];
+      if (escaped) {
+        buffer.write(char);
+        escaped = false;
+        continue;
+      }
+      if (char == r'\') {
+        buffer.write(char);
+        escaped = true;
+        continue;
+      }
+      if (char == '[') {
+        inCharClass = true;
+        buffer.write(char);
+        continue;
+      }
+      if (char == ']') {
+        if (!inCharClass) {
+          buffer.write(r'\]');
+          continue;
+        }
+        inCharClass = false;
+        buffer.write(char);
+        continue;
+      }
+      if (!inCharClass && char == '{' && !isQuantifierStart(index)) {
+        buffer.write(r'\{');
+        continue;
+      }
+      if (!inCharClass && char == '}') {
+        buffer.write(r'\}');
+        continue;
+      }
+      buffer.write(char);
+    }
+
+    return buffer.toString();
+  }
+
   static void _validatePatternSyntax(String source, String flags) {
-    if (source == '?' || source == '{') {
+    if (source == '?' || (source == '{' && flags.contains('u'))) {
       throw JSSyntaxError('Invalid regular expression: invalid quantifier');
     }
 

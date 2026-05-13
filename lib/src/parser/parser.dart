@@ -2433,10 +2433,15 @@ class JSParser {
     // ES6: It is a Syntax Error if the LexicallyDeclaredNames of CaseBlock
     // contains any duplicate entries
     final declaredNames = <String, int>{}; // name -> case index
+    final functionDeclaredNames = <String>{};
     for (int caseIdx = 0; caseIdx < cases.length; caseIdx++) {
       final switchCase = cases[caseIdx];
       for (final statement in switchCase.consequent) {
         final names = <String>[];
+        final isFunctionDeclaration =
+            !_isInStrictMode() &&
+            (statement is FunctionDeclaration ||
+                statement is AsyncFunctionDeclaration);
 
         if (statement is FunctionDeclaration) {
           names.add(statement.id.name);
@@ -2455,12 +2460,19 @@ class JSParser {
 
         for (final declName in names) {
           if (declaredNames.containsKey(declName)) {
+            if (isFunctionDeclaration &&
+                functionDeclaredNames.contains(declName)) {
+              continue;
+            }
             throw ParseError(
               'Identifier \'$declName\' has already been declared',
               _peek(),
             );
           }
           declaredNames[declName] = caseIdx;
+          if (isFunctionDeclaration) {
+            functionDeclaredNames.add(declName);
+          }
         }
       }
     }
@@ -2534,11 +2546,18 @@ class JSParser {
     int column,
   ) {
     final lexicalNames = <String>{};
+    final lexicalFunctionNames = <String>{};
     final varNames = <String>{};
     for (final stmt in statements) {
       final lexNames = _getLexicalNamesFromStatement(stmt);
+      final isFunctionDeclaration =
+          !_isInStrictMode() &&
+          (stmt is FunctionDeclaration || stmt is AsyncFunctionDeclaration);
       for (final name in lexNames) {
         if (!lexicalNames.add(name)) {
+          if (isFunctionDeclaration && lexicalFunctionNames.contains(name)) {
+            continue;
+          }
           throw ParseError(
             "Identifier '$name' has already been declared",
             Token(
@@ -2550,6 +2569,9 @@ class JSParser {
               end: 0,
             ),
           );
+        }
+        if (isFunctionDeclaration) {
+          lexicalFunctionNames.add(name);
         }
       }
       final vNames = _getVarNamesFromStatement(stmt);

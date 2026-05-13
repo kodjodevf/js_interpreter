@@ -3398,12 +3398,18 @@ class BytecodeCompiler implements ASTVisitor<void> {
   @override
   void visitBlockStatement(BlockStatement node) {
     _ctx.pushScope();
-    _predeclareClassNames(node.body);
-    for (final stmt in node.body) {
-      stmt.accept(this);
+    _hoistedFunctionDeclStack.add(<Statement>{});
+    try {
+      _predeclareClassNames(node.body);
+      _hoistBlockFunctionDeclarations(node.body);
+      for (final stmt in node.body) {
+        stmt.accept(this);
+      }
+      _emitScopeDisposals();
+    } finally {
+      _hoistedFunctionDeclStack.removeLast();
+      _ctx.popScope();
     }
-    _emitScopeDisposals();
-    _ctx.popScope();
   }
 
   /// Emit disposal calls for `using`/`await using` declarations in the current scope.
@@ -4371,7 +4377,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
     final name = node.id.name;
     final annexBBlockFunction = !_ctx.isStrict && !_ctx.scope.isFunctionScope;
     final outerSlot = annexBBlockFunction
-        ? _ctx.lookupVarLikeLocal(name, scope: VarScope.funcScope)
+        ? _getAnnexBOuterSyncSlot(name)
         : null;
     final slot = annexBBlockFunction
         ? _ctx.declareLocal(
@@ -4401,7 +4407,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
     if (annexBBlockFunction) {
       _bc.emitU16(Op.putLoc, slot);
       _ctx.adjustStack(-1);
-      if (outerSlot != null) {
+      if (outerSlot != null && outerSlot >= 0) {
         _bc.emitU16(Op.getLoc, slot);
         _ctx.adjustStack(1);
         _bc.emitU16(Op.putLoc, outerSlot);
@@ -5381,6 +5387,14 @@ class BytecodeCompiler implements ASTVisitor<void> {
     }
 
     final declaredNames = <String>{};
+    final functionBlockedNames = <String>{..._ctx.argNames};
+    final argumentsBinding = _ctx.lookupVarLikeLocal(
+      'arguments',
+      scope: VarScope.funcScope,
+    );
+    if (argumentsBinding != null) {
+      functionBlockedNames.add('arguments');
+    }
 
     void declareAnnexBOuterName(String name) {
       if (!declaredNames.add(name)) {
@@ -5599,7 +5613,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
       }
     }
 
-    walk(statements, nested: false, blockedNames: const <String>{});
+    walk(statements, nested: false, blockedNames: functionBlockedNames);
   }
 
   void _collectVarNames(Statement stmt) {
@@ -5697,6 +5711,136 @@ class BytecodeCompiler implements ASTVisitor<void> {
     } else if (pattern is AssignmentPattern) {
       _collectVarNamesFromPattern(pattern.left);
     }
+  }
+
+  int? _getAnnexBOuterSyncSlot(String name) {
+    if (_ctx.isStrict || _ctx.scope.isFunctionScope) {
+      return null;
+    }
+
+    if (_ctx.argNames.contains(name)) {
+      return null;
+    }
+
+    final argumentsBinding = _ctx.lookupVarLikeLocal(
+      'arguments',
+      scope: VarScope.funcScope,
+    );
+    if (name == 'arguments' && argumentsBinding != null) {
+      return null;
+    }
+
+    var scope = _ctx.scope.parent;
+    while (scope != null && !scope.isFunctionScope) {
+      final slot = scope.vars[name];
+      if (slot != null) {
+        if (slot >= 0 && _ctx.vars[slot].isLexical) {
+          return null;
+        }
+      }
+      scope = scope.parent;
+    }
+
+    final outerSlot = _ctx.lookupVarLikeLocal(name, scope: VarScope.funcScope);
+    if (outerSlot == null || outerSlot < 0) {
+      return null;
+    }
+    return outerSlot;
+  }
+
+  void _hoistBlockFunctionDeclarations(List<Statement> statements) {
+    if (_hoistedFunctionDeclStack.isEmpty) {
+      return;
+    }
+
+    final hoistedNodes = _hoistedFunctionDeclStack.last;
+    for (final stmt in statements) {
+      final effectiveStmt = stmt is ExportDeclarationStatement
+          ? stmt.declaration
+          : stmt;
+
+      if (effectiveStmt is AsyncFunctionDeclaration) {
+        _emitHoistedBlockAsyncFunctionDeclaration(effectiveStmt, hoistedNodes);
+      } else if (effectiveStmt is FunctionDeclaration) {
+        _emitHoistedBlockFunctionDeclaration(effectiveStmt, hoistedNodes);
+      }
+    }
+  }
+
+  void _emitHoistedBlockFunctionDeclaration(
+    FunctionDeclaration node,
+    Set<Statement> hoistedNodes,
+  ) {
+    final name = node.id.name;
+    final outerSlot = _getAnnexBOuterSyncSlot(name);
+    final slot = _ctx.declareLocal(
+      name,
+      scope: VarScope.blockScope,
+      isLexical: true,
+      scopeLevel: _ctx.scope.depth,
+    );
+    final funcBytecode = _compileFunction(
+      name: name,
+      kind: node.isGenerator ? FunctionKind.generator : FunctionKind.normal,
+      params: node.params,
+      body: node.body,
+      createSelfBinding: false,
+      sourceLine: node.line,
+      sourceColumn: node.column,
+      sourceText: node.toString(),
+    );
+
+    final idx = _ctx.addConstant(funcBytecode);
+    _bc.emitU16(Op.fclosure, idx);
+    _ctx.adjustStack(1);
+    _bc.emitU16(Op.putLoc, slot);
+    _ctx.adjustStack(-1);
+    if (outerSlot != null) {
+      _bc.emitU16(Op.getLoc, slot);
+      _ctx.adjustStack(1);
+      _bc.emitU16(Op.putLoc, outerSlot);
+      _ctx.adjustStack(-1);
+    }
+    hoistedNodes.add(node);
+  }
+
+  void _emitHoistedBlockAsyncFunctionDeclaration(
+    AsyncFunctionDeclaration node,
+    Set<Statement> hoistedNodes,
+  ) {
+    final name = node.id.name;
+    final outerSlot = _getAnnexBOuterSyncSlot(name);
+    final slot = _ctx.declareLocal(
+      name,
+      scope: VarScope.blockScope,
+      isLexical: true,
+      scopeLevel: _ctx.scope.depth,
+    );
+    final funcBytecode = _compileFunction(
+      name: name,
+      kind: node.isGenerator
+          ? FunctionKind.asyncGenerator
+          : FunctionKind.asyncFunction,
+      params: node.params,
+      body: node.body,
+      createSelfBinding: false,
+      sourceLine: node.line,
+      sourceColumn: node.column,
+      sourceText: node.toString(),
+    );
+
+    final idx = _ctx.addConstant(funcBytecode);
+    _bc.emitU16(Op.fclosure, idx);
+    _ctx.adjustStack(1);
+    _bc.emitU16(Op.putLoc, slot);
+    _ctx.adjustStack(-1);
+    if (outerSlot != null) {
+      _bc.emitU16(Op.getLoc, slot);
+      _ctx.adjustStack(1);
+      _bc.emitU16(Op.putLoc, outerSlot);
+      _ctx.adjustStack(-1);
+    }
+    hoistedNodes.add(node);
   }
 
   void _hoistFunctionDeclarations(List<Statement> statements) {
