@@ -796,6 +796,12 @@ class StringPrototype {
     final searchValue = args[0];
     final replacer = args.length > 1 ? args[1] : JSValueFactory.undefined();
 
+    if (searchValue is JSRegExp && !searchValue.global) {
+      throw JSTypeError(
+        'String.prototype.replaceAll called with a non-global RegExp argument',
+      );
+    }
+
     final replaceMethod = _callSymbolMethod(
       searchValue,
       JSSymbol.replace.propertyKey,

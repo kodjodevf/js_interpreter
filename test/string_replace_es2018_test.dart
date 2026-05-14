@@ -349,7 +349,7 @@ void main() {
       const code = r'''
         const regex = /(\d+)/;
         const result = '123'.replace(regex, function(match, p1, offset, string, groups) {
-          return 'hasGroups=' + (typeof groups === 'object');
+          return 'hasGroups=' + (typeof groups === 'undefined');
         });
         result;
       ''';
@@ -364,7 +364,7 @@ void main() {
         result;
       ''';
       final result = interpreter.eval(code);
-      expect(result.toString(), equals(''));
+      expect(result.toString(), equals(r'$<nonexistent>'));
     });
 
     test('should handle replacement function returning non-string', () {

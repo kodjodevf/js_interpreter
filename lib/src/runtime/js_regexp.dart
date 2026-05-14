@@ -2,6 +2,9 @@
 /// Support for /pattern/flags, RegExp(), and associated methods
 library;
 
+import 'dart:math' as math;
+
+import 'js_runtime.dart';
 import 'js_value.dart';
 import 'native_functions.dart';
 
@@ -92,9 +95,52 @@ class JSRegExp extends JSObject {
 
   /// Parse captured group names from the pattern (ES2018)
   static List<String> _parseGroupNames(String source) {
-    final groupNamePattern = RegExp(r'\(\?<(\w+)>');
-    final matches = groupNamePattern.allMatches(source);
-    return matches.map((m) => m.group(1)!).toList();
+    final names = <String>[];
+    var inCharClass = false;
+
+    for (var index = 0; index < source.length; index++) {
+      final char = source[index];
+
+      if (char == r'\') {
+        index++;
+        continue;
+      }
+
+      if (inCharClass) {
+        if (char == ']') {
+          inCharClass = false;
+        }
+        continue;
+      }
+
+      if (char == '[') {
+        inCharClass = true;
+        continue;
+      }
+
+      if (char != '(' || index + 3 >= source.length) {
+        continue;
+      }
+
+      if (source[index + 1] != '?' || source[index + 2] != '<') {
+        continue;
+      }
+
+      final discriminator = source[index + 3];
+      if (discriminator == '=' || discriminator == '!') {
+        continue;
+      }
+
+      final end = source.indexOf('>', index + 3);
+      if (end == -1) {
+        continue;
+      }
+
+      names.add(source.substring(index + 3, end));
+      index = end;
+    }
+
+    return names;
   }
 
   /// Create a Dart RegExp from JavaScript pattern and flags
@@ -329,6 +375,11 @@ class JSRegExp extends JSObject {
 
   @override
   JSValue getProperty(String name) {
+    final ownDescriptor = super.getOwnPropertyDescriptor(name);
+    if (ownDescriptor != null) {
+      return super.getProperty(name);
+    }
+
     switch (name) {
       case 'source':
         return JSValueFactory.string(source);
@@ -349,10 +400,6 @@ class JSRegExp extends JSObject {
       case 'hasIndices': // ES2022
         return JSValueFactory.boolean(hasIndices);
       case 'lastIndex':
-        final descriptor = super.getOwnPropertyDescriptor(name);
-        if (descriptor != null) {
-          return super.getProperty(name);
-        }
         return JSValueFactory.number(lastIndex.toDouble());
       default:
         return super.getProperty(name);
@@ -392,21 +439,39 @@ class JSRegExp extends JSObject {
     return lastIndex.clamp(0, input.length);
   }
 
+  RegExpMatch? _firstMatchFrom(String input, int start) {
+    if (start < 0 || start > input.length) {
+      return null;
+    }
+    final iterator = _dartRegExp.allMatches(input, start).iterator;
+    return iterator.moveNext() ? iterator.current : null;
+  }
+
+  bool get _usesIndexedMatching => global || sticky;
+
   /// test() - tests if the regex matches a string
   bool test(String input) {
-    if (global) {
+    if (_usesIndexedMatching) {
+      if (lastIndex < 0 || lastIndex > input.length) {
+        _setPropertyStrict(this, 'lastIndex', JSValueFactory.number(0));
+        return false;
+      }
       if (_isInsideSurrogatePair(input, lastIndex) &&
           _isEffectivelyEmptyPattern()) {
-        lastIndex = 0;
+        _setPropertyStrict(this, 'lastIndex', JSValueFactory.number(0));
         return false;
       }
       final start = _effectiveSearchStart(input);
-      final match = _dartRegExp.firstMatch(input.substring(start));
-      if (match != null) {
-        lastIndex = start + match.end;
+      final match = _firstMatchFrom(input, start);
+      if (match != null && (!sticky || match.start == start)) {
+        _setPropertyStrict(
+          this,
+          'lastIndex',
+          JSValueFactory.number(match.end.toDouble()),
+        );
         return true;
       } else {
-        lastIndex = 0;
+        _setPropertyStrict(this, 'lastIndex', JSValueFactory.number(0));
         return false;
       }
     } else {
@@ -418,22 +483,28 @@ class JSRegExp extends JSObject {
   JSValue exec(String input) {
     RegExpMatch? match;
 
-    if (global) {
+    if (_usesIndexedMatching) {
+      if (lastIndex < 0 || lastIndex > input.length) {
+        _setPropertyStrict(this, 'lastIndex', JSValueFactory.number(0));
+        return JSValueFactory.nullValue();
+      }
       if (_isInsideSurrogatePair(input, lastIndex) &&
           _isEffectivelyEmptyPattern()) {
-        lastIndex = 0;
+        _setPropertyStrict(this, 'lastIndex', JSValueFactory.number(0));
         return JSValueFactory.nullValue();
       }
       final start = _effectiveSearchStart(input);
-      match = _dartRegExp.firstMatch(input.substring(start));
-      if (match != null) {
-        // Adjust indices for the complete string
-        final adjustedMatch = _AdjustedMatch(match, start);
-        lastIndex = start + match.end;
-        _updateLegacyStaticResults(adjustedMatch, input);
-        return _createMatchArray(adjustedMatch, input, match);
+      match = _firstMatchFrom(input, start);
+      if (match != null && (!sticky || match.start == start)) {
+        _setPropertyStrict(
+          this,
+          'lastIndex',
+          JSValueFactory.number(match.end.toDouble()),
+        );
+        _updateLegacyStaticResults(match, input);
+        return _createMatchArray(match, input, match);
       } else {
-        lastIndex = 0;
+        _setPropertyStrict(this, 'lastIndex', JSValueFactory.number(0));
         return JSValueFactory.nullValue();
       }
     } else {
@@ -502,16 +573,20 @@ class JSRegExp extends JSObject {
       );
     }
 
-    // ES2018: Create the groups object with named capture groups
-    final groupsObject = JSObject();
-    for (final name in _groupNames) {
-      final value = regExpMatch.namedGroup(name);
-      groupsObject.setProperty(
-        name,
-        value != null
-            ? JSValueFactory.string(value)
-            : JSValueFactory.undefined(),
-      );
+    // ES2018: groups is undefined when there are no named captures.
+    JSValue groupsObject = JSValueFactory.undefined();
+    if (_groupNames.isNotEmpty) {
+      final groups = JSObject();
+      for (final name in _groupNames) {
+        final value = regExpMatch.namedGroup(name);
+        groups.setProperty(
+          name,
+          value != null
+              ? JSValueFactory.string(value)
+              : JSValueFactory.undefined(),
+        );
+      }
+      groupsObject = groups;
     }
 
     // ES2022: Create the indices object if the 'd' flag is present
@@ -591,6 +666,358 @@ class JSRegExp extends JSObject {
     return result;
   }
 
+  JSValue symbolReplace(JSValue stringValue, JSValue replaceValue) {
+    return symbolReplaceOn(this, stringValue, replaceValue);
+  }
+
+  static JSValue symbolReplaceOn(
+    JSValue receiverValue,
+    JSValue stringValue,
+    JSValue replaceValue,
+  ) {
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError(
+        'RegExp.prototype[Symbol.replace] requires an active runtime',
+      );
+    }
+
+    if (receiverValue is! JSObject && receiverValue is! JSFunction) {
+      throw JSTypeError('RegExp.prototype[Symbol.replace] requires an object');
+    }
+
+    final receiver = receiverValue as dynamic;
+
+    final string = JSConversion.jsToString(stringValue);
+    final functionalReplace =
+        replaceValue is JSFunction || replaceValue is JSNativeFunction;
+    final replacementString = functionalReplace
+        ? null
+        : JSConversion.jsToString(replaceValue);
+
+    final flags = _resolveReplaceFlags(receiver, receiverValue);
+    final isGlobal = flags.contains('g');
+    final isUnicode = flags.contains('u') || flags.contains('v');
+
+    if (isGlobal) {
+      _setPropertyStrict(receiver, 'lastIndex', JSValueFactory.number(0));
+    }
+
+    final results = <dynamic>[];
+    while (true) {
+      final execMethod = receiver.getProperty('exec');
+      final result = switch (execMethod) {
+        JSFunction() || JSNativeFunction() => runtime.callFunction(execMethod, [
+          JSValueFactory.string(string),
+        ], receiverValue),
+        _ when execMethod.isUndefined && receiverValue is JSRegExp =>
+          receiverValue.exec(string),
+        _ when execMethod.isUndefined => throw JSTypeError(
+          'RegExp exec method is not callable',
+        ),
+        _ => throw JSTypeError('RegExp exec method is not callable'),
+      };
+
+      if (result.isNull) {
+        break;
+      }
+      if (result is! JSObject && result is! JSFunction) {
+        throw JSTypeError('RegExp exec method must return an object or null');
+      }
+      final matchResult = result as dynamic;
+      results.add(matchResult);
+
+      if (!isGlobal) {
+        break;
+      }
+
+      final matched = JSConversion.jsToString(matchResult.getProperty('0'));
+      if (matched.isNotEmpty) {
+        continue;
+      }
+
+      final lastIndexValue = receiver.getProperty('lastIndex');
+      final nextIndex = _advanceStringIndex(
+        string,
+        _toLength(lastIndexValue),
+        isUnicode,
+      );
+      _setPropertyStrict(
+        receiver,
+        'lastIndex',
+        JSValueFactory.number(nextIndex.toDouble()),
+      );
+    }
+
+    if (results.isEmpty) {
+      return JSValueFactory.string(string);
+    }
+
+    final accumulated = StringBuffer();
+    var nextSourcePosition = 0;
+
+    for (final result in results) {
+      final matched = JSConversion.jsToString(result.getProperty('0'));
+      final position = math.min(
+        math.max(_toInteger(result.getProperty('index')), 0),
+        string.length,
+      );
+      final capturesLength = math.max(
+        _toLength(result.getProperty('length')) - 1,
+        0,
+      );
+      final captures = <JSValue>[];
+      for (var i = 1; i <= capturesLength; i++) {
+        final capture = result.getProperty(i.toString());
+        captures.add(
+          capture.isUndefined
+              ? capture
+              : JSValueFactory.string(JSConversion.jsToString(capture)),
+        );
+      }
+
+      final rawNamedCaptures = result.getProperty('groups');
+      final namedCaptures = !functionalReplace && !rawNamedCaptures.isUndefined
+          ? rawNamedCaptures.toObject()
+          : rawNamedCaptures;
+      final replacement = functionalReplace
+          ? _callReplaceFunction(
+              runtime,
+              replaceValue,
+              matched,
+              captures,
+              position,
+              string,
+              namedCaptures,
+            )
+          : _getSubstitution(
+              matched,
+              string,
+              position,
+              captures,
+              namedCaptures,
+              replacementString!,
+            );
+
+      if (position >= nextSourcePosition) {
+        accumulated.write(string.substring(nextSourcePosition, position));
+        accumulated.write(replacement);
+        nextSourcePosition = math.min(position + matched.length, string.length);
+      }
+    }
+
+    accumulated.write(string.substring(nextSourcePosition));
+    return JSValueFactory.string(accumulated.toString());
+  }
+
+  static void _setPropertyStrict(dynamic target, String name, JSValue value) {
+    final descriptor = target.getOwnPropertyDescriptor(name);
+    if (descriptor != null) {
+      if (descriptor.isData && !descriptor.writable) {
+        throw JSTypeError('Cannot assign to read only property \'$name\'');
+      }
+      if (descriptor.isAccessor && descriptor.setter == null) {
+        throw JSTypeError('Cannot set property \'$name\' without a setter');
+      }
+    }
+    target.setProperty(name, value);
+  }
+
+  static String _resolveReplaceFlags(dynamic receiver, JSValue receiverValue) {
+    if (receiverValue is JSRegExp) {
+      final ownFlagsDescriptor = receiver.getOwnPropertyDescriptor('flags');
+      if (ownFlagsDescriptor == null || ownFlagsDescriptor.isData) {
+        return _composeObservableFlags(receiver);
+      }
+    }
+    return JSConversion.jsToString(receiver.getProperty('flags'));
+  }
+
+  static String _composeObservableFlags(dynamic receiver) {
+    final buffer = StringBuffer();
+    if (receiver.getProperty('hasIndices').toBoolean()) {
+      buffer.write('d');
+    }
+    if (receiver.getProperty('global').toBoolean()) {
+      buffer.write('g');
+    }
+    if (receiver.getProperty('ignoreCase').toBoolean()) {
+      buffer.write('i');
+    }
+    if (receiver.getProperty('multiline').toBoolean()) {
+      buffer.write('m');
+    }
+    if (receiver.getProperty('dotAll').toBoolean()) {
+      buffer.write('s');
+    }
+    if (receiver.getProperty('unicode').toBoolean()) {
+      buffer.write('u');
+    }
+    if (receiver.getProperty('unicodeSets').toBoolean()) {
+      buffer.write('v');
+    }
+    if (receiver.getProperty('sticky').toBoolean()) {
+      buffer.write('y');
+    }
+    return buffer.toString();
+  }
+
+  static int _toLength(JSValue value) {
+    const maxSafeInteger = 0x1FFFFFFFFFFFFF;
+    final number = JSConversion.jsToNumber(value);
+    if (number.isNaN || number <= 0) {
+      return 0;
+    }
+    if (number.isInfinite) {
+      return maxSafeInteger;
+    }
+    return math.min(number.floor(), maxSafeInteger);
+  }
+
+  static int _toInteger(JSValue value) {
+    const maxSafeInteger = 0x1FFFFFFFFFFFFF;
+    final number = JSConversion.jsToNumber(value);
+    if (number.isNaN || number == 0) {
+      return 0;
+    }
+    if (number.isInfinite) {
+      return number.isNegative ? -maxSafeInteger : maxSafeInteger;
+    }
+    return number < 0 ? number.ceil() : number.floor();
+  }
+
+  static int _advanceStringIndex(String string, int index, bool unicode) {
+    if (!unicode || index + 1 >= string.length) {
+      return index + 1;
+    }
+    final first = string.codeUnitAt(index);
+    if (first < 0xD800 || first > 0xDBFF) {
+      return index + 1;
+    }
+    final second = string.codeUnitAt(index + 1);
+    if (second < 0xDC00 || second > 0xDFFF) {
+      return index + 1;
+    }
+    return index + 2;
+  }
+
+  static String _callReplaceFunction(
+    JSRuntime runtime,
+    JSValue replaceValue,
+    String matched,
+    List<JSValue> captures,
+    int position,
+    String string,
+    JSValue namedCaptures,
+  ) {
+    final args = <JSValue>[JSValueFactory.string(matched), ...captures]
+      ..add(JSValueFactory.number(position.toDouble()))
+      ..add(JSValueFactory.string(string));
+    if (!namedCaptures.isUndefined) {
+      args.add(namedCaptures);
+    }
+    final result = runtime.callFunction(
+      replaceValue,
+      args,
+      JSValueFactory.undefined(),
+    );
+    return JSConversion.jsToString(result);
+  }
+
+  static String _getSubstitution(
+    String matched,
+    String string,
+    int position,
+    List<JSValue> captures,
+    JSValue namedCaptures,
+    String replacement,
+  ) {
+    final buffer = StringBuffer();
+    var index = 0;
+
+    while (index < replacement.length) {
+      final char = replacement[index];
+      if (char != r'$' || index + 1 >= replacement.length) {
+        buffer.write(char);
+        index++;
+        continue;
+      }
+
+      final next = replacement[index + 1];
+      if (next == r'$') {
+        buffer.write(r'$');
+        index += 2;
+        continue;
+      }
+      if (next == '&') {
+        buffer.write(matched);
+        index += 2;
+        continue;
+      }
+      if (next == '`') {
+        buffer.write(string.substring(0, position));
+        index += 2;
+        continue;
+      }
+      if (next == "'") {
+        buffer.write(string.substring(position + matched.length));
+        index += 2;
+        continue;
+      }
+      if (next == '<') {
+        final end = replacement.indexOf('>', index + 2);
+        if (end == -1 ||
+            namedCaptures.isUndefined ||
+            namedCaptures is! JSObject) {
+          buffer.write(r'$<');
+          index += 2;
+          continue;
+        }
+        final groupName = replacement.substring(index + 2, end);
+        final capture = namedCaptures.getProperty(groupName);
+        if (!capture.isUndefined) {
+          buffer.write(JSConversion.jsToString(capture));
+        }
+        index = end + 1;
+        continue;
+      }
+      if (_isDecimalDigit(next)) {
+        var captureIndex = int.parse(next);
+        var advance = 2;
+        if (index + 2 < replacement.length &&
+            _isDecimalDigit(replacement[index + 2])) {
+          final doubleDigit = int.tryParse(
+            replacement.substring(index + 1, index + 3),
+          );
+          if (doubleDigit != null && doubleDigit <= captures.length) {
+            captureIndex = doubleDigit;
+            advance = 3;
+          }
+        }
+        if (captureIndex > 0 && captureIndex <= captures.length) {
+          final capture = captures[captureIndex - 1];
+          if (!capture.isUndefined) {
+            buffer.write(JSConversion.jsToString(capture));
+          }
+        } else {
+          buffer.write(replacement.substring(index, index + advance));
+        }
+        index += advance;
+        continue;
+      }
+
+      buffer.write(char);
+      index++;
+    }
+
+    return buffer.toString();
+  }
+
+  static bool _isDecimalDigit(String char) {
+    final code = char.codeUnitAt(0);
+    return code >= 0x30 && code <= 0x39;
+  }
+
   @override
   String toString() => '/$_source/$_flags';
 }
@@ -599,7 +1026,7 @@ class JSRegExp extends JSObject {
 class _MatchArray extends JSArray {
   final int _index;
   final String _input;
-  final JSObject _groups; // ES2018: Named capture groups
+  final JSValue _groups; // ES2018: Named capture groups
   final JSObject? _indices; // ES2022: Match indices
 
   _MatchArray(
@@ -633,39 +1060,6 @@ class _MatchArray extends JSArray {
     }
     return super.hasProperty(name);
   }
-}
-
-/// Helper class to adjust match indices for global regex
-class _AdjustedMatch implements Match {
-  final Match _original;
-  final int _offset;
-
-  _AdjustedMatch(this._original, this._offset);
-
-  @override
-  int get start => _original.start + _offset;
-
-  @override
-  int get end => _original.end + _offset;
-
-  @override
-  String? group(int group) => _original.group(group);
-
-  @override
-  int get groupCount => _original.groupCount;
-
-  @override
-  String? operator [](int group) => _original[group];
-
-  @override
-  List<String?> groups(List<int> groupIndices) =>
-      _original.groups(groupIndices);
-
-  @override
-  String get input => _original.input;
-
-  @override
-  Pattern get pattern => _original.pattern;
 }
 
 /// Factory to create JavaScript RegExp

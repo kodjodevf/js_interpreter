@@ -1866,7 +1866,8 @@ class JSObject extends JSValue {
       removed = true;
     }
 
-    return removed;
+    // ES [[Delete]] returns true when the property is absent.
+    return removed || getOwnPropertyDescriptor(name) == null;
   }
 
   /// Obtient all cles de propertes

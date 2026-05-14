@@ -924,7 +924,7 @@ void main() {
           typeof match.groups;
         ''';
         final result = interpreter.eval(code);
-        expect(result.toString(), equals('object'));
+        expect(result.toString(), equals('undefined'));
       });
 
       test('should have undefined for non-matching named group', () {

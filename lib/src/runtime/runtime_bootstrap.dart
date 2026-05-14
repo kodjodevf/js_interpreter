@@ -1017,6 +1017,28 @@ class RuntimeBootstrap {
         return thisValue;
       },
     );
+    final symbolReplaceFunction = JSNativeFunction(
+      functionName: '[Symbol.replace]',
+      expectedArgs: 2,
+      nativeImpl: (args) {
+        final thisValue = args.isNotEmpty
+            ? args[0]
+            : JSValueFactory.undefined();
+        if (thisValue is! JSObject && thisValue is! JSFunction) {
+          throw compileTypeError(
+            'RegExp.prototype[Symbol.replace] requires an object receiver',
+          );
+        }
+
+        final stringValue = args.length > 1
+            ? args[1]
+            : JSValueFactory.undefined();
+        final replaceValue = args.length > 2
+            ? args[2]
+            : JSValueFactory.undefined();
+        return JSRegExp.symbolReplaceOn(thisValue, stringValue, replaceValue);
+      },
+    );
     final symbolSplitFunction = JSNativeFunction(
       functionName: 'Symbol.split',
       expectedArgs: 2,
@@ -1062,6 +1084,19 @@ class RuntimeBootstrap {
       'compile',
       PropertyDescriptor(
         value: compileFunction,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.registerSymbolKey(
+      JSSymbol.replace.propertyKey,
+      JSSymbol.replace,
+    );
+    regexpPrototype.defineProperty(
+      JSSymbol.replace.propertyKey,
+      PropertyDescriptor(
+        value: symbolReplaceFunction,
         writable: true,
         enumerable: false,
         configurable: true,

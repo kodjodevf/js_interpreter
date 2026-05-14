@@ -392,6 +392,8 @@ class JSNativeFunction extends JSFunction {
       'fill',
       'copyWithin',
       'Symbol.iterator',
+      '[Symbol.replace]',
+      'Symbol.replace',
       'Symbol.split',
     };
 
@@ -656,6 +658,11 @@ class JSConversion {
         if (value is JSObject) {
           final runtime = JSRuntime.current;
           if (runtime != null) {
+            final primitiveResult = _callToPrimitiveWithHint(value, 'number');
+            if (primitiveResult != null) {
+              return jsToNumber(primitiveResult);
+            }
+
             // 1. Try valueOf() first (hint: number)
             final valueOfMethod = value.getProperty('valueOf');
             if (valueOfMethod is JSFunction ||
@@ -699,6 +706,38 @@ class JSConversion {
       default:
         return double.nan;
     }
+  }
+
+  static JSValue? _callToPrimitiveWithHint(JSValue value, String hint) {
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      return null;
+    }
+
+    final method = switch (value) {
+      JSObject object => object.getProperty(
+        JSSymbol.symbolToPrimitive.propertyKey,
+      ),
+      JSFunction function => function.getProperty(
+        JSSymbol.symbolToPrimitive.propertyKey,
+      ),
+      _ => JSValueFactory.undefined(),
+    };
+
+    if (method.isUndefined || method.isNull) {
+      return null;
+    }
+    if (method is! JSFunction && method is! JSNativeFunction) {
+      throw JSTypeError('Cannot convert object to primitive value');
+    }
+
+    final result = method is JSNativeFunction
+        ? method.call([JSValueFactory.string(hint)])
+        : runtime.callFunction(method, [JSValueFactory.string(hint)], value);
+    if (result.isObject || result.isFunction) {
+      throw JSTypeError('Cannot convert object to primitive value');
+    }
+    return result;
   }
 
   /// Convertit une JSValue en boolean
