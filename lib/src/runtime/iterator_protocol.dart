@@ -1,5 +1,6 @@
 import 'js_value.dart';
 import 'js_symbol.dart';
+import 'js_regexp.dart';
 import 'native_functions.dart';
 
 /// Interface for JavaScript iterators
@@ -406,10 +407,11 @@ extension JSSetIterableExtension on JSSet {
 class JSRegExpMatchIterator extends JSIterator {
   final String string;
   final RegExp regex;
+  final JSRegExp? jsRegExp;
   final Iterator<RegExpMatch> _matchIterator;
   bool _exhausted = false;
 
-  JSRegExpMatchIterator(this.string, this.regex)
+  JSRegExpMatchIterator(this.string, this.regex, [this.jsRegExp])
     : _matchIterator = regex.allMatches(string).iterator,
       super() {
     // Expose the next method as a JavaScript property
@@ -461,17 +463,12 @@ class JSRegExpMatchIterator extends JSIterator {
     resultArray.setProperty('input', JSValueFactory.string(string));
 
     // groups: object containing named groups (ES2018)
-    final groupsObj = JSValueFactory.object({});
-    // Retrieve named groups if they exist
-    final pattern = regex.pattern;
-    final namedGroupPattern = RegExp(r'\(\?<([^>]+)>');
-    final namedMatches = namedGroupPattern.allMatches(pattern);
-
-    for (final nameMatch in namedMatches) {
-      final groupName = nameMatch.group(1);
-      if (groupName != null) {
+    final groupsObj = JSObject.withoutPrototype();
+    if (jsRegExp != null) {
+      for (var i = 0; i < jsRegExp!.groupNames.length; i++) {
+        final groupName = jsRegExp!.groupNames[i];
         try {
-          final value = match.namedGroup(groupName);
+          final value = match.namedGroup(jsRegExp!.dartGroupNames[i]);
           groupsObj.setProperty(
             groupName,
             value != null
@@ -479,7 +476,6 @@ class JSRegExpMatchIterator extends JSIterator {
                 : JSValueFactory.undefined(),
           );
         } catch (e) {
-          // Named group doesn't exist in this match
           groupsObj.setProperty(groupName, JSValueFactory.undefined());
         }
       }

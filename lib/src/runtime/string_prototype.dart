@@ -995,7 +995,7 @@ class StringPrototype {
     }
 
     // Return an iterator of matches
-    return JSRegExpMatchIterator(str, jsRegex.dartRegExp);
+    return JSRegExpMatchIterator(str, jsRegex.dartRegExp, jsRegex);
   }
 
   /// String.prototype.search(regexp)

@@ -10,10 +10,16 @@ import 'native_functions.dart';
 
 /// JavaScript RegExp object - represents a regular expression
 class JSRegExp extends JSObject {
-  RegExp _dartRegExp;
+  static final RegExp _validGroupNamePattern = RegExp(
+    r'^[$_\p{ID_Start}][$_\p{ID_Continue}\u200C\u200D]*$',
+    unicode: true,
+  );
+
+  late RegExp _dartRegExp;
   String _source;
   String _flags;
-  List<String> _groupNames; // ES2018: Named capture groups
+  late List<String> _groupNames; // ES2018: Named capture groups
+  late List<String> _dartGroupNames;
 
   static JSObject? _regExpPrototype;
   static String _legacyInput = '';
@@ -27,10 +33,16 @@ class JSRegExp extends JSObject {
     _regExpPrototype = prototype;
   }
 
-  JSRegExp(this._source, this._flags)
-    : _dartRegExp = _createDartRegExp(_source, _flags),
-      _groupNames = _parseGroupNames(_source) {
+  JSRegExp(this._source, this._flags) {
     _flags = JSRegExpFactory.parseFlags(_flags);
+    final namedGroupCompilation = _prepareNamedGroupCompilation(_source);
+    _groupNames = namedGroupCompilation.publicNames;
+    _dartGroupNames = namedGroupCompilation.compiledNames;
+    _dartRegExp = _createDartRegExp(
+      namedGroupCompilation.compiledSource,
+      _flags,
+      originalSource: _source,
+    );
     if (_regExpPrototype != null) {
       setPrototype(_regExpPrototype!);
     }
@@ -72,13 +84,49 @@ class JSRegExp extends JSObject {
   }
 
   void reinitialize(String source, String flags) {
-    final nextRegExp = _createDartRegExp(source, flags);
-    final nextGroupNames = _parseGroupNames(source);
+    final namedGroupCompilation = _prepareNamedGroupCompilation(source);
+    final nextRegExp = _createDartRegExp(
+      namedGroupCompilation.compiledSource,
+      flags,
+      originalSource: source,
+    );
 
     _source = source;
     _flags = flags;
     _dartRegExp = nextRegExp;
-    _groupNames = nextGroupNames;
+    _groupNames = namedGroupCompilation.publicNames;
+    _dartGroupNames = namedGroupCompilation.compiledNames;
+  }
+
+  static _NamedGroupCompilation _prepareNamedGroupCompilation(String source) {
+    final publicNames = _parseGroupNames(source);
+    for (final name in publicNames) {
+      if (!_validGroupNamePattern.hasMatch(name)) {
+        throw JSSyntaxError('Invalid capture group name $source');
+      }
+    }
+
+    final seen = <String>{};
+    for (final name in publicNames) {
+      if (!seen.add(name)) {
+        return _NamedGroupCompilation(source, publicNames, publicNames);
+      }
+    }
+
+    if (publicNames.isEmpty) {
+      return _NamedGroupCompilation(source, publicNames, publicNames);
+    }
+
+    final compiledNames = List<String>.generate(
+      publicNames.length,
+      (index) => '__jsi_g${index + 1}',
+    );
+    final compiledSource = _rewriteNamedGroupIdentifiers(
+      source,
+      publicNames,
+      compiledNames,
+    );
+    return _NamedGroupCompilation(compiledSource, publicNames, compiledNames);
   }
 
   /// Parse captured group names from the pattern (ES2018)
@@ -124,16 +172,145 @@ class JSRegExp extends JSObject {
         continue;
       }
 
-      names.add(source.substring(index + 3, end));
+      names.add(_decodeGroupName(source.substring(index + 3, end)));
       index = end;
     }
 
     return names;
   }
 
+  static String _decodeGroupName(String rawName) {
+    final buffer = StringBuffer();
+
+    for (var index = 0; index < rawName.length; index++) {
+      final char = rawName[index];
+      if (char != r'\' || index + 1 >= rawName.length) {
+        buffer.write(char);
+        continue;
+      }
+
+      if (rawName[index + 1] != 'u') {
+        buffer.write(char);
+        continue;
+      }
+
+      if (index + 2 < rawName.length && rawName[index + 2] == '{') {
+        final endBrace = rawName.indexOf('}', index + 3);
+        if (endBrace != -1) {
+          final hex = rawName.substring(index + 3, endBrace);
+          final codePoint = int.tryParse(hex, radix: 16);
+          if (codePoint != null) {
+            buffer.write(String.fromCharCode(codePoint));
+            index = endBrace;
+            continue;
+          }
+        }
+      }
+
+      if (index + 5 < rawName.length) {
+        final hex = rawName.substring(index + 2, index + 6);
+        final codeUnit = int.tryParse(hex, radix: 16);
+        if (codeUnit != null) {
+          buffer.write(String.fromCharCode(codeUnit));
+          index += 5;
+          continue;
+        }
+      }
+
+      buffer.write(char);
+    }
+
+    return buffer.toString();
+  }
+
+  static String _rewriteNamedGroupIdentifiers(
+    String source,
+    List<String> publicNames,
+    List<String> compiledNames,
+  ) {
+    final nameMap = <String, String>{
+      for (var i = 0; i < publicNames.length; i++)
+        publicNames[i]: compiledNames[i],
+    };
+    final buffer = StringBuffer();
+    var inCharClass = false;
+    var namedGroupIndex = 0;
+
+    for (var index = 0; index < source.length; index++) {
+      final char = source[index];
+
+      if (char == r'\') {
+        if (index + 2 < source.length &&
+            source[index + 1] == 'k' &&
+            source[index + 2] == '<') {
+          final end = source.indexOf('>', index + 3);
+          if (end != -1) {
+            final publicName = _decodeGroupName(
+              source.substring(index + 3, end),
+            );
+            final compiledName = nameMap[publicName];
+            if (compiledName != null) {
+              buffer.write(r'\k<');
+              buffer.write(compiledName);
+              buffer.write('>');
+              index = end;
+              continue;
+            }
+          }
+        }
+
+        buffer.write(char);
+        if (index + 1 < source.length) {
+          index++;
+          buffer.write(source[index]);
+        }
+        continue;
+      }
+
+      if (char == '[') {
+        inCharClass = true;
+        buffer.write(char);
+        continue;
+      }
+
+      if (char == ']' && inCharClass) {
+        inCharClass = false;
+        buffer.write(char);
+        continue;
+      }
+
+      if (!inCharClass &&
+          char == '(' &&
+          index + 3 < source.length &&
+          source[index + 1] == '?' &&
+          source[index + 2] == '<' &&
+          source[index + 3] != '=' &&
+          source[index + 3] != '!') {
+        final end = source.indexOf('>', index + 3);
+        if (end != -1 && namedGroupIndex < compiledNames.length) {
+          buffer.write('(?<');
+          buffer.write(compiledNames[namedGroupIndex]);
+          buffer.write('>');
+          namedGroupIndex++;
+          index = end;
+          continue;
+        }
+      }
+
+      buffer.write(char);
+    }
+
+    return buffer.toString();
+  }
+
   /// Create a Dart RegExp from JavaScript pattern and flags
-  static RegExp _createDartRegExp(String source, String flags) {
-    _validatePatternSyntax(source, flags);
+  static RegExp _createDartRegExp(
+    String source,
+    String flags, {
+    String? originalSource,
+  }) {
+    final jsSource = originalSource ?? source;
+    _validatePatternSyntax(jsSource, flags);
 
     bool multiLine = flags.contains('m');
     bool caseSensitive = !flags.contains('i');
@@ -175,7 +352,10 @@ class JSRegExp extends JSObject {
           // Fall through to the original JS-facing error handling.
         }
       }
-      if (_hasOnlyCrossAlternativeDuplicateNamedGroups(source, error.message)) {
+      if (_hasOnlyCrossAlternativeDuplicateNamedGroups(
+        jsSource,
+        error.message,
+      )) {
         return RegExp(r'(?:)');
       }
       rethrow;
@@ -274,13 +454,6 @@ class JSRegExp extends JSObject {
         );
       }
     }
-
-    if (flags.contains('u')) {
-      final backReference = RegExp(r'(^|[^\\])(\\\\)*\\[1-9]');
-      if (backReference.hasMatch(source)) {
-        throw JSSyntaxError('Invalid regular expression: invalid escape');
-      }
-    }
   }
 
   static bool _hasOnlyCrossAlternativeDuplicateNamedGroups(
@@ -359,6 +532,8 @@ class JSRegExp extends JSObject {
   bool get unicodeSets => _flags.contains('v'); // ES2024: Unicode sets
   bool get dotAll => _flags.contains('s');
   bool get hasIndices => _flags.contains('d'); // ES2022: Match indices
+  List<String> get groupNames => List<String>.unmodifiable(_groupNames);
+  List<String> get dartGroupNames => List<String>.unmodifiable(_dartGroupNames);
 
   /// Access to the underlying Dart RegExp for String methods
   RegExp get dartRegExp => _dartRegExp;
@@ -595,9 +770,10 @@ class JSRegExp extends JSObject {
     // ES2018: groups is undefined when there are no named captures.
     JSValue groupsObject = JSValueFactory.undefined();
     if (_groupNames.isNotEmpty) {
-      final groups = JSObject();
-      for (final name in _groupNames) {
-        final value = regExpMatch.namedGroup(name);
+      final groups = JSObject.withoutPrototype();
+      for (var i = 0; i < _groupNames.length; i++) {
+        final name = _groupNames[i];
+        final value = regExpMatch.namedGroup(_dartGroupNames[i]);
         groups.setProperty(
           name,
           value != null
@@ -613,7 +789,7 @@ class JSRegExp extends JSObject {
     JSObject? indicesGroupsObject;
     if (hasIndices) {
       indicesObject = JSObject();
-      indicesGroupsObject = JSObject();
+      indicesGroupsObject = JSObject.withoutPrototype();
 
       // Add indices for the complete match
       final fullMatchIndices = JSArray([
@@ -649,8 +825,9 @@ class JSRegExp extends JSObject {
       }
 
       // Add indices for the named capture groups
-      for (final name in _groupNames) {
-        final value = regExpMatch.namedGroup(name);
+      for (var i = 0; i < _groupNames.length; i++) {
+        final name = _groupNames[i];
+        final value = regExpMatch.namedGroup(_dartGroupNames[i]);
         if (value != null) {
           // Find position in the full match
           final fullMatch = match.group(0) ?? '';
@@ -706,7 +883,7 @@ class JSRegExp extends JSObject {
 
     JSValue groupsObject = JSValueFactory.undefined();
     if (_groupNames.isNotEmpty) {
-      final groups = JSObject();
+      final groups = JSObject.withoutPrototype();
       final seen = <String>{};
       for (final name in _groupNames) {
         if (!seen.add(name)) {
@@ -756,7 +933,7 @@ class JSRegExp extends JSObject {
         );
       }
 
-      final indicesGroups = JSObject();
+      final indicesGroups = JSObject.withoutPrototype();
       final seen = <String>{};
       for (final name in _groupNames) {
         if (!seen.add(name)) {
@@ -1355,6 +1532,18 @@ class JSRegExp extends JSObject {
   String toString() => '/$_source/$_flags';
 }
 
+class _NamedGroupCompilation {
+  final String compiledSource;
+  final List<String> publicNames;
+  final List<String> compiledNames;
+
+  _NamedGroupCompilation(
+    this.compiledSource,
+    this.publicNames,
+    this.compiledNames,
+  );
+}
+
 /// Specialized array for RegExp match results
 class _MatchArray extends JSArray {
   final int _index;
@@ -1373,10 +1562,52 @@ class _MatchArray extends JSArray {
     if (arrayPrototype != null) {
       setPrototype(arrayPrototype);
     }
+
+    defineProperty(
+      'index',
+      PropertyDescriptor(
+        value: JSValueFactory.number(_index.toDouble()),
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      ),
+    );
+    defineProperty(
+      'input',
+      PropertyDescriptor(
+        value: JSValueFactory.string(_input),
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      ),
+    );
+    defineProperty(
+      'groups',
+      PropertyDescriptor(
+        value: _groups,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      ),
+    );
+    defineProperty(
+      'indices',
+      PropertyDescriptor(
+        value: _indices ?? JSValueFactory.undefined(),
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      ),
+    );
   }
 
   @override
   JSValue getProperty(String name) {
+    final ownDescriptor = super.getOwnPropertyDescriptor(name);
+    if (ownDescriptor != null) {
+      return super.getProperty(name);
+    }
+
     switch (name) {
       case 'index':
         return JSValueFactory.number(_index.toDouble());
@@ -1393,6 +1624,9 @@ class _MatchArray extends JSArray {
 
   @override
   bool hasProperty(String name) {
+    if (super.getOwnPropertyDescriptor(name) != null) {
+      return true;
+    }
     if (name == 'index' || name == 'input' || name == 'groups') {
       return true;
     }

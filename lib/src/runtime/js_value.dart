@@ -1279,11 +1279,6 @@ class JSObject extends JSValue {
       );
     }
 
-    // Special support for __proto__
-    if (name == '__proto__') {
-      return _prototype ?? JSValueFactory.nullValue();
-    }
-
     // 1. Check accessors (getters/setters) first
     if (_accessorProperties.containsKey(name)) {
       final descriptor = _accessorProperties[name]!;
@@ -1330,6 +1325,11 @@ class JSObject extends JSValue {
     // 2. Check normal properties
     if (_properties.containsKey(name)) {
       return _properties[name]!;
+    }
+
+    // Special support for __proto__ only when it is not shadowed by an own property.
+    if (name == '__proto__') {
+      return _prototype ?? JSValueFactory.nullValue();
     }
 
     // 3. Search in the prototype chain
