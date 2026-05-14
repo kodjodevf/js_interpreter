@@ -391,6 +391,7 @@ class JSNativeFunction extends JSFunction {
       'reverse',
       'fill',
       'copyWithin',
+      '[Symbol.match]',
       'Symbol.iterator',
       '[Symbol.replace]',
       'Symbol.replace',

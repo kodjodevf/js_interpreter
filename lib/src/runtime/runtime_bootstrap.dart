@@ -920,6 +920,7 @@ class RuntimeBootstrap {
 
     regexpPrototype = JSObject();
     late final JSNativeFunction compileFunction;
+    late final JSNativeFunction execFunction;
     final compileRealm = JSRuntime.current;
     JSException compileTypeError(String message) {
       final runtime =
@@ -1017,6 +1018,25 @@ class RuntimeBootstrap {
         return thisValue;
       },
     );
+    execFunction = JSNativeFunction(
+      functionName: 'exec',
+      expectedArgs: 1,
+      nativeImpl: (args) {
+        final thisValue = args.isNotEmpty
+            ? args[0]
+            : JSValueFactory.undefined();
+        if (thisValue is! JSRegExp) {
+          throw compileTypeError(
+            'RegExp.prototype.exec requires a RegExp receiver',
+          );
+        }
+
+        final stringValue = args.length > 1
+            ? args[1]
+            : JSValueFactory.undefined();
+        return thisValue.exec(JSConversion.jsToString(stringValue));
+      },
+    );
     final symbolReplaceFunction = JSNativeFunction(
       functionName: '[Symbol.replace]',
       expectedArgs: 2,
@@ -1037,6 +1057,25 @@ class RuntimeBootstrap {
             ? args[2]
             : JSValueFactory.undefined();
         return JSRegExp.symbolReplaceOn(thisValue, stringValue, replaceValue);
+      },
+    );
+    final symbolMatchFunction = JSNativeFunction(
+      functionName: '[Symbol.match]',
+      expectedArgs: 1,
+      nativeImpl: (args) {
+        final thisValue = args.isNotEmpty
+            ? args[0]
+            : JSValueFactory.undefined();
+        if (thisValue is! JSObject && thisValue is! JSFunction) {
+          throw compileTypeError(
+            'RegExp.prototype[Symbol.match] requires an object receiver',
+          );
+        }
+
+        final stringValue = args.length > 1
+            ? args[1]
+            : JSValueFactory.undefined();
+        return JSRegExp.symbolMatchOn(thisValue, stringValue);
       },
     );
     final symbolSplitFunction = JSNativeFunction(
@@ -1081,9 +1120,31 @@ class RuntimeBootstrap {
       },
     );
     regexpPrototype.defineProperty(
+      'exec',
+      PropertyDescriptor(
+        value: execFunction,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.defineProperty(
       'compile',
       PropertyDescriptor(
         value: compileFunction,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.registerSymbolKey(
+      JSSymbol.match.propertyKey,
+      JSSymbol.match,
+    );
+    regexpPrototype.defineProperty(
+      JSSymbol.match.propertyKey,
+      PropertyDescriptor(
+        value: symbolMatchFunction,
         writable: true,
         enumerable: false,
         configurable: true,

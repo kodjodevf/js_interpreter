@@ -410,7 +410,9 @@ class JSRegExp extends JSObject {
   void setProperty(String name, JSValue value) {
     if (name == 'lastIndex') {
       super.setProperty(name, value);
-      lastIndex = value.toNumber().floor();
+      if (value is JSNumber) {
+        lastIndex = value.value.floor();
+      }
     } else {
       super.setProperty(name, value);
     }
@@ -451,7 +453,9 @@ class JSRegExp extends JSObject {
 
   /// test() - tests if the regex matches a string
   bool test(String input) {
+    final observedLastIndex = _toLength(super.getProperty('lastIndex'));
     if (_usesIndexedMatching) {
+      lastIndex = observedLastIndex;
       if (lastIndex < 0 || lastIndex > input.length) {
         _setPropertyStrict(this, 'lastIndex', JSValueFactory.number(0));
         return false;
@@ -475,6 +479,7 @@ class JSRegExp extends JSObject {
         return false;
       }
     } else {
+      lastIndex = 0;
       return _dartRegExp.hasMatch(input);
     }
   }
@@ -482,8 +487,10 @@ class JSRegExp extends JSObject {
   /// exec() - executes the regex and returns match details
   JSValue exec(String input) {
     RegExpMatch? match;
+    final observedLastIndex = _toLength(super.getProperty('lastIndex'));
 
     if (_usesIndexedMatching) {
+      lastIndex = observedLastIndex;
       if (lastIndex < 0 || lastIndex > input.length) {
         _setPropertyStrict(this, 'lastIndex', JSValueFactory.number(0));
         return JSValueFactory.nullValue();
@@ -508,6 +515,7 @@ class JSRegExp extends JSObject {
         return JSValueFactory.nullValue();
       }
     } else {
+      lastIndex = 0;
       match = _dartRegExp.firstMatch(input);
       if (match != null) {
         _updateLegacyStaticResults(match, input);
@@ -670,6 +678,65 @@ class JSRegExp extends JSObject {
     return symbolReplaceOn(this, stringValue, replaceValue);
   }
 
+  JSValue symbolMatch(JSValue stringValue) {
+    return symbolMatchOn(this, stringValue);
+  }
+
+  static JSValue symbolMatchOn(JSValue receiverValue, JSValue stringValue) {
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError(
+        'RegExp.prototype[Symbol.match] requires an active runtime',
+      );
+    }
+
+    if (receiverValue is! JSObject && receiverValue is! JSFunction) {
+      throw JSTypeError('RegExp.prototype[Symbol.match] requires an object');
+    }
+
+    final receiver = receiverValue as dynamic;
+    final string = JSConversion.jsToString(stringValue);
+    final flags = _resolveObservableFlags(receiver, receiverValue);
+    final isGlobal = flags.contains('g');
+    final isUnicode = flags.contains('u') || flags.contains('v');
+
+    if (!isGlobal) {
+      return _regExpExec(runtime, receiverValue, receiver, string);
+    }
+
+    _setPropertyStrict(receiver, 'lastIndex', JSValueFactory.number(0));
+
+    final matches = <JSValue>[];
+    while (true) {
+      final result = _regExpExec(runtime, receiverValue, receiver, string);
+      if (result.isNull) {
+        return matches.isEmpty
+            ? JSValueFactory.nullValue()
+            : JSValueFactory.array(matches);
+      }
+
+      final matchResult = result as dynamic;
+      final matched = JSConversion.jsToString(matchResult.getProperty('0'));
+      matches.add(JSValueFactory.string(matched));
+
+      if (matched.isNotEmpty) {
+        continue;
+      }
+
+      final lastIndexValue = receiver.getProperty('lastIndex');
+      final nextIndex = _advanceStringIndex(
+        string,
+        _toLength(lastIndexValue),
+        isUnicode,
+      );
+      _setPropertyStrict(
+        receiver,
+        'lastIndex',
+        JSValueFactory.number(nextIndex.toDouble()),
+      );
+    }
+  }
+
   static JSValue symbolReplaceOn(
     JSValue receiverValue,
     JSValue stringValue,
@@ -695,7 +762,7 @@ class JSRegExp extends JSObject {
         ? null
         : JSConversion.jsToString(replaceValue);
 
-    final flags = _resolveReplaceFlags(receiver, receiverValue);
+    final flags = _resolveObservableFlags(receiver, receiverValue);
     final isGlobal = flags.contains('g');
     final isUnicode = flags.contains('u') || flags.contains('v');
 
@@ -705,24 +772,10 @@ class JSRegExp extends JSObject {
 
     final results = <dynamic>[];
     while (true) {
-      final execMethod = receiver.getProperty('exec');
-      final result = switch (execMethod) {
-        JSFunction() || JSNativeFunction() => runtime.callFunction(execMethod, [
-          JSValueFactory.string(string),
-        ], receiverValue),
-        _ when execMethod.isUndefined && receiverValue is JSRegExp =>
-          receiverValue.exec(string),
-        _ when execMethod.isUndefined => throw JSTypeError(
-          'RegExp exec method is not callable',
-        ),
-        _ => throw JSTypeError('RegExp exec method is not callable'),
-      };
+      final result = _regExpExec(runtime, receiverValue, receiver, string);
 
       if (result.isNull) {
         break;
-      }
-      if (result is! JSObject && result is! JSFunction) {
-        throw JSTypeError('RegExp exec method must return an object or null');
       }
       final matchResult = result as dynamic;
       results.add(matchResult);
@@ -823,7 +876,35 @@ class JSRegExp extends JSObject {
     target.setProperty(name, value);
   }
 
-  static String _resolveReplaceFlags(dynamic receiver, JSValue receiverValue) {
+  static JSValue _regExpExec(
+    JSRuntime runtime,
+    JSValue receiverValue,
+    dynamic receiver,
+    String string,
+  ) {
+    final execMethod = receiver.getProperty('exec');
+    final result = switch (execMethod) {
+      JSFunction() || JSNativeFunction() => runtime.callFunction(execMethod, [
+        JSValueFactory.string(string),
+      ], receiverValue),
+      _ when execMethod.isUndefined && receiverValue is JSRegExp =>
+        receiverValue.exec(string),
+      _ when execMethod.isUndefined => throw JSTypeError(
+        'RegExp exec method is not callable',
+      ),
+      _ => throw JSTypeError('RegExp exec method is not callable'),
+    };
+
+    if (!result.isNull && result is! JSObject && result is! JSFunction) {
+      throw JSTypeError('RegExp exec method must return an object or null');
+    }
+    return result;
+  }
+
+  static String _resolveObservableFlags(
+    dynamic receiver,
+    JSValue receiverValue,
+  ) {
     if (receiverValue is JSRegExp) {
       final ownFlagsDescriptor = receiver.getOwnPropertyDescriptor('flags');
       if (ownFlagsDescriptor == null || ownFlagsDescriptor.isData) {
@@ -1035,7 +1116,12 @@ class _MatchArray extends JSArray {
     this._input,
     this._groups, [
     this._indices,
-  ]);
+  ]) {
+    final arrayPrototype = JSArray.arrayPrototype;
+    if (arrayPrototype != null) {
+      setPrototype(arrayPrototype);
+    }
+  }
 
   @override
   JSValue getProperty(String name) {
