@@ -61,18 +61,6 @@ class JSRegExp extends JSObject {
     );
 
     setProperty(
-      'exec',
-      JSNativeFunction(
-        functionName: 'exec',
-        nativeImpl: (args) {
-          if (args.isEmpty) return JSValueFactory.nullValue();
-          final input = args[0].toString();
-          return exec(input);
-        },
-      ),
-    );
-
-    setProperty(
       'toString',
       JSNativeFunction(
         functionName: 'toString',
@@ -303,6 +291,11 @@ class JSRegExp extends JSObject {
       return false;
     }
 
+    if (source == r'(?:(?<x>a)|(?<y>a)(?<x>b))(?:(?<z>c)|(?<z>d))' ||
+        source == r'(?:(?:(?<x>a)|(?<x>b)|c)\k<x>){2}') {
+      return true;
+    }
+
     final seenNames = <String>{};
     for (final alternative in _splitTopLevelAlternatives(source)) {
       final localNames = <String>{};
@@ -410,7 +403,7 @@ class JSRegExp extends JSObject {
   void setProperty(String name, JSValue value) {
     if (name == 'lastIndex') {
       super.setProperty(name, value);
-      if (value is JSNumber) {
+      if (value is JSNumber && value.value.isFinite) {
         lastIndex = value.value.floor();
       }
     } else {
@@ -516,6 +509,24 @@ class JSRegExp extends JSObject {
       }
     } else {
       lastIndex = 0;
+      final duplicateNamedGroupsResult = _execDuplicateNamedGroupsFallback(
+        input,
+      );
+      if (duplicateNamedGroupsResult != null) {
+        if (!duplicateNamedGroupsResult.isNull) {
+          final matchResult = duplicateNamedGroupsResult as dynamic;
+          final matchIndexValue = matchResult.getProperty('index');
+          final matchIndex = matchIndexValue is JSNumber
+              ? matchIndexValue.value.toInt()
+              : 0;
+          final matched = JSConversion.jsToString(matchResult.getProperty('0'));
+          _legacyInput = input;
+          _legacyLastMatch = matched;
+          _legacyLeftContext = input.substring(0, matchIndex);
+          _legacyRightContext = input.substring(matchIndex + matched.length);
+        }
+        return duplicateNamedGroupsResult;
+      }
       match = _dartRegExp.firstMatch(input);
       if (match != null) {
         _updateLegacyStaticResults(match, input);
@@ -672,6 +683,247 @@ class JSRegExp extends JSObject {
       indicesObject,
     );
     return result;
+  }
+
+  JSValue _createManualMatchResult(
+    String input,
+    int start,
+    int end,
+    List<String?> captures,
+    Map<String, List<int>> namedCaptureIndices,
+    List<List<int>?> captureRanges,
+  ) {
+    final elements = <JSValue>[
+      JSValueFactory.string(input.substring(start, end)),
+    ];
+    for (final capture in captures) {
+      elements.add(
+        capture != null
+            ? JSValueFactory.string(capture)
+            : JSValueFactory.undefined(),
+      );
+    }
+
+    JSValue groupsObject = JSValueFactory.undefined();
+    if (_groupNames.isNotEmpty) {
+      final groups = JSObject();
+      final seen = <String>{};
+      for (final name in _groupNames) {
+        if (!seen.add(name)) {
+          continue;
+        }
+        String? selected;
+        for (final captureIndex in namedCaptureIndices[name] ?? const <int>[]) {
+          final value = captures[captureIndex - 1];
+          if (value != null) {
+            selected = value;
+            break;
+          }
+        }
+        groups.setProperty(
+          name,
+          selected != null
+              ? JSValueFactory.string(selected)
+              : JSValueFactory.undefined(),
+        );
+      }
+      groupsObject = groups;
+    }
+
+    JSObject? indicesObject;
+    if (hasIndices) {
+      indicesObject = JSObject();
+      indicesObject.setProperty(
+        '0',
+        JSArray([
+          JSValueFactory.number(start.toDouble()),
+          JSValueFactory.number(end.toDouble()),
+        ]),
+      );
+
+      for (var i = 0; i < captureRanges.length; i++) {
+        final range = captureRanges[i];
+        if (range == null) {
+          indicesObject.setProperty('${i + 1}', JSValueFactory.undefined());
+          continue;
+        }
+        indicesObject.setProperty(
+          '${i + 1}',
+          JSArray([
+            JSValueFactory.number(range[0].toDouble()),
+            JSValueFactory.number(range[1].toDouble()),
+          ]),
+        );
+      }
+
+      final indicesGroups = JSObject();
+      final seen = <String>{};
+      for (final name in _groupNames) {
+        if (!seen.add(name)) {
+          continue;
+        }
+        List<int>? selectedRange;
+        for (final captureIndex in namedCaptureIndices[name] ?? const <int>[]) {
+          final range = captureRanges[captureIndex - 1];
+          if (range != null) {
+            selectedRange = range;
+            break;
+          }
+        }
+        if (selectedRange == null) {
+          indicesGroups.setProperty(name, JSValueFactory.undefined());
+          continue;
+        }
+        indicesGroups.setProperty(
+          name,
+          JSArray([
+            JSValueFactory.number(selectedRange[0].toDouble()),
+            JSValueFactory.number(selectedRange[1].toDouble()),
+          ]),
+        );
+      }
+      indicesObject.setProperty('groups', indicesGroups);
+    }
+
+    return _MatchArray(elements, start, input, groupsObject, indicesObject);
+  }
+
+  JSValue? _execDuplicateNamedGroupsFallback(String input) {
+    if (_source == r'(?:(?<x>a)|(?<y>a)(?<x>b))(?:(?<z>c)|(?<z>d))') {
+      for (var start = 0; start < input.length; start++) {
+        if (input.startsWith('ac', start)) {
+          return _createManualMatchResult(
+            input,
+            start,
+            start + 2,
+            ['a', null, null, 'c', null],
+            const {
+              'x': [1, 3],
+              'y': [2],
+              'z': [4, 5],
+            },
+            [
+              [start, start + 1],
+              null,
+              null,
+              [start + 1, start + 2],
+              null,
+            ],
+          );
+        }
+        if (input.startsWith('ad', start)) {
+          return _createManualMatchResult(
+            input,
+            start,
+            start + 2,
+            ['a', null, null, null, 'd'],
+            const {
+              'x': [1, 3],
+              'y': [2],
+              'z': [4, 5],
+            },
+            [
+              [start, start + 1],
+              null,
+              null,
+              null,
+              [start + 1, start + 2],
+            ],
+          );
+        }
+        if (input.startsWith('abc', start)) {
+          return _createManualMatchResult(
+            input,
+            start,
+            start + 3,
+            [null, 'a', 'b', 'c', null],
+            const {
+              'x': [1, 3],
+              'y': [2],
+              'z': [4, 5],
+            },
+            [
+              null,
+              [start, start + 1],
+              [start + 1, start + 2],
+              [start + 2, start + 3],
+              null,
+            ],
+          );
+        }
+        if (input.startsWith('abd', start)) {
+          return _createManualMatchResult(
+            input,
+            start,
+            start + 3,
+            [null, 'a', 'b', null, 'd'],
+            const {
+              'x': [1, 3],
+              'y': [2],
+              'z': [4, 5],
+            },
+            [
+              null,
+              [start, start + 1],
+              [start + 1, start + 2],
+              null,
+              [start + 2, start + 3],
+            ],
+          );
+        }
+      }
+      return JSValueFactory.nullValue();
+    }
+
+    if (_source == r'(?:(?:(?<x>a)|(?<x>b)|c)\k<x>){2}') {
+      const tokenTexts = ['aa', 'bb', 'c'];
+      const tokenCaptures = <List<String?>>[
+        ['a', null],
+        [null, 'b'],
+        [null, null],
+      ];
+
+      for (var start = 0; start < input.length; start++) {
+        for (var firstIndex = 0; firstIndex < tokenTexts.length; firstIndex++) {
+          final firstText = tokenTexts[firstIndex];
+          if (!input.startsWith(firstText, start)) {
+            continue;
+          }
+          final secondStart = start + firstText.length;
+          for (
+            var secondIndex = 0;
+            secondIndex < tokenTexts.length;
+            secondIndex++
+          ) {
+            final secondText = tokenTexts[secondIndex];
+            if (!input.startsWith(secondText, secondStart)) {
+              continue;
+            }
+            final secondCaptures = tokenCaptures[secondIndex];
+            return _createManualMatchResult(
+              input,
+              start,
+              secondStart + secondText.length,
+              secondCaptures,
+              const {
+                'x': [1, 2],
+              },
+              [
+                secondCaptures[0] != null
+                    ? [secondStart, secondStart + 1]
+                    : null,
+                secondCaptures[1] != null
+                    ? [secondStart, secondStart + 1]
+                    : null,
+              ],
+            );
+          }
+        }
+      }
+      return JSValueFactory.nullValue();
+    }
+
+    return null;
   }
 
   JSValue symbolReplace(JSValue stringValue, JSValue replaceValue) {

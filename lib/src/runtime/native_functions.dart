@@ -61,11 +61,11 @@ class JSNativeFunction extends JSFunction {
            ? JSRuntime.current
            : null,
        _isConstructorInternal = isConstructor,
-       super(
-         null,
-         null,
-         functionPrototype: functionPrototype,
-       ); // Pass prototype to super
+       super(null, null, functionPrototype: functionPrototype) {
+    if (!isConstructor && functionPrototype == null) {
+      removeOwnProperty('prototype');
+    }
+  }
 
   @override
   bool get isConstructor => _isConstructorInternal;
@@ -328,6 +328,7 @@ class JSNativeFunction extends JSFunction {
       'valueOf',
       'toString',
       'toLocaleString',
+      'exec',
       'compile',
       // Function.prototype methods that need the function as first arg
       'call',

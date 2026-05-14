@@ -1037,6 +1037,7 @@ class RuntimeBootstrap {
         return thisValue.exec(JSConversion.jsToString(stringValue));
       },
     );
+    execFunction.deleteProperty('prototype');
     final symbolReplaceFunction = JSNativeFunction(
       functionName: '[Symbol.replace]',
       expectedArgs: 2,
