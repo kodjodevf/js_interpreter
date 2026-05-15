@@ -1739,9 +1739,12 @@ class JSRegExp extends JSObject {
     String string,
     JSValue namedCaptures,
   ) {
-    final args = <JSValue>[JSValueFactory.string(matched), ...captures]
-      ..add(JSValueFactory.number(position.toDouble()))
-      ..add(JSValueFactory.string(string));
+    final args = <JSValue>[
+      JSValueFactory.string(matched),
+      ...captures,
+      JSValueFactory.number(position.toDouble()),
+      JSValueFactory.string(string),
+    ];
     if (!namedCaptures.isUndefined) {
       args.add(namedCaptures);
     }
