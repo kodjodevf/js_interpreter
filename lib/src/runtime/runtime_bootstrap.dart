@@ -1113,11 +1113,65 @@ class RuntimeBootstrap {
           }
         }
 
-        var parts = input.split(splitter.dartRegExp);
-        if (parts.length > limit) {
-          parts = parts.take(limit).toList();
+        if (limit == 0) {
+          return JSValueFactory.array(const []);
         }
-        return JSValueFactory.array(parts.map(JSValueFactory.string).toList());
+
+        final parts = <JSValue>[];
+        var nextSourcePosition = 0;
+
+        while (nextSourcePosition <= input.length && parts.length < limit) {
+          final iterator = splitter.dartRegExp
+              .allMatches(input, nextSourcePosition)
+              .iterator;
+          if (!iterator.moveNext()) {
+            break;
+          }
+
+          final matchResult = iterator.current;
+          final position = matchResult.start;
+          final matched = matchResult.group(0) ?? '';
+          final endPosition = position + matched.length;
+
+          if (endPosition < nextSourcePosition) {
+            continue;
+          }
+
+          parts.add(
+            JSValueFactory.string(
+              input.substring(nextSourcePosition, position),
+            ),
+          );
+          if (parts.length >= limit) {
+            break;
+          }
+
+          final captureCount = matchResult.groupCount;
+          for (var i = 1; i <= captureCount && parts.length < limit; i++) {
+            final capture = matchResult.group(i);
+            parts.add(
+              capture != null
+                  ? JSValueFactory.string(capture)
+                  : JSValueFactory.undefined(),
+            );
+          }
+
+          nextSourcePosition = endPosition;
+          if (matched.isEmpty) {
+            nextSourcePosition = nextSourcePosition < input.length
+                ? nextSourcePosition + 1
+                : input.length + 1;
+            if (nextSourcePosition > input.length) {
+              break;
+            }
+          }
+        }
+
+        if (parts.length < limit) {
+          parts.add(JSValueFactory.string(input.substring(nextSourcePosition)));
+        }
+
+        return JSValueFactory.array(parts.take(limit).toList());
       },
     );
     regexpPrototype.defineProperty(

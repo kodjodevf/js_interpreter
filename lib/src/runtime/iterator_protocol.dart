@@ -465,19 +465,14 @@ class JSRegExpMatchIterator extends JSIterator {
     // groups: object containing named groups (ES2018)
     final groupsObj = JSObject.withoutPrototype();
     if (jsRegExp != null) {
-      for (var i = 0; i < jsRegExp!.groupNames.length; i++) {
-        final groupName = jsRegExp!.groupNames[i];
-        try {
-          final value = match.namedGroup(jsRegExp!.dartGroupNames[i]);
-          groupsObj.setProperty(
-            groupName,
-            value != null
-                ? JSValueFactory.string(value)
-                : JSValueFactory.undefined(),
-          );
-        } catch (e) {
-          groupsObj.setProperty(groupName, JSValueFactory.undefined());
-        }
+      for (final groupName in jsRegExp!.groupNames) {
+        final value = jsRegExp!.namedCaptureValue(match, groupName);
+        groupsObj.setProperty(
+          groupName,
+          value != null
+              ? JSValueFactory.string(value)
+              : JSValueFactory.undefined(),
+        );
       }
     }
 

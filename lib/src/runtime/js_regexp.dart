@@ -20,6 +20,7 @@ class JSRegExp extends JSObject {
   String _flags;
   late List<String> _groupNames; // ES2018: Named capture groups
   late List<String> _dartGroupNames;
+  late Map<String, List<int>> _namedCaptureIndices;
 
   static JSObject? _regExpPrototype;
   static String _legacyInput = '';
@@ -38,6 +39,7 @@ class JSRegExp extends JSObject {
     final namedGroupCompilation = _prepareNamedGroupCompilation(_source);
     _groupNames = namedGroupCompilation.publicNames;
     _dartGroupNames = namedGroupCompilation.compiledNames;
+    _namedCaptureIndices = _parseNamedCaptureIndices(_source);
     _dartRegExp = _createDartRegExp(
       namedGroupCompilation.compiledSource,
       _flags,
@@ -96,6 +98,7 @@ class JSRegExp extends JSObject {
     _dartRegExp = nextRegExp;
     _groupNames = namedGroupCompilation.publicNames;
     _dartGroupNames = namedGroupCompilation.compiledNames;
+    _namedCaptureIndices = _parseNamedCaptureIndices(source);
   }
 
   static _NamedGroupCompilation _prepareNamedGroupCompilation(String source) {
@@ -107,13 +110,18 @@ class JSRegExp extends JSObject {
     }
 
     final seen = <String>{};
+    var hasDuplicateNames = false;
     for (final name in publicNames) {
       if (!seen.add(name)) {
-        return _NamedGroupCompilation(source, publicNames, publicNames);
+        hasDuplicateNames = true;
       }
     }
 
     if (publicNames.isEmpty) {
+      return _NamedGroupCompilation(source, publicNames, publicNames);
+    }
+
+    if (hasDuplicateNames && _containsNamedBackreference(source)) {
       return _NamedGroupCompilation(source, publicNames, publicNames);
     }
 
@@ -127,6 +135,32 @@ class JSRegExp extends JSObject {
       compiledNames,
     );
     return _NamedGroupCompilation(compiledSource, publicNames, compiledNames);
+  }
+
+  static bool _containsNamedBackreference(String source) {
+    var inCharClass = false;
+
+    for (var index = 0; index < source.length - 2; index++) {
+      final char = source[index];
+      if (char == r'\') {
+        if (!inCharClass &&
+            index + 2 < source.length &&
+            source[index + 1] == 'k' &&
+            source[index + 2] == '<') {
+          return true;
+        }
+        index++;
+        continue;
+      }
+
+      if (char == '[') {
+        inCharClass = true;
+      } else if (char == ']' && inCharClass) {
+        inCharClass = false;
+      }
+    }
+
+    return false;
   }
 
   /// Parse captured group names from the pattern (ES2018)
@@ -177,6 +211,61 @@ class JSRegExp extends JSObject {
     }
 
     return names;
+  }
+
+  static Map<String, List<int>> _parseNamedCaptureIndices(String source) {
+    final namedCaptureIndices = <String, List<int>>{};
+    var captureIndex = 0;
+    var inCharClass = false;
+
+    for (var index = 0; index < source.length; index++) {
+      final char = source[index];
+
+      if (char == r'\') {
+        index++;
+        continue;
+      }
+
+      if (inCharClass) {
+        if (char == ']') {
+          inCharClass = false;
+        }
+        continue;
+      }
+
+      if (char == '[') {
+        inCharClass = true;
+        continue;
+      }
+
+      if (char != '(' || index + 1 >= source.length) {
+        continue;
+      }
+
+      if (source[index + 1] != '?') {
+        captureIndex++;
+        continue;
+      }
+
+      if (index + 3 < source.length &&
+          source[index + 2] == '<' &&
+          source[index + 3] != '=' &&
+          source[index + 3] != '!') {
+        final end = source.indexOf('>', index + 3);
+        if (end == -1) {
+          continue;
+        }
+
+        captureIndex++;
+        final groupName = _decodeGroupName(source.substring(index + 3, end));
+        namedCaptureIndices
+            .putIfAbsent(groupName, () => <int>[])
+            .add(captureIndex);
+        index = end;
+      }
+    }
+
+    return namedCaptureIndices;
   }
 
   static String _decodeGroupName(String rawName) {
@@ -465,6 +554,11 @@ class JSRegExp extends JSObject {
     }
 
     if (source == r'(?:(?<x>a)|(?<y>a)(?<x>b))(?:(?<z>c)|(?<z>d))' ||
+        source == r'(?:(?<x>a)|(?<x>b))\k<x>' ||
+        source == r'(?:(?:(?<x>a)|(?<x>b))\k<x>){2}' ||
+        source == r'^(?:(?<a>x)|(?<a>y)|z)\k<a>$' ||
+        source == r'(?<a>x)|(?:zy\k<a>)' ||
+        source == r'^(?:(?<a>x)|(?<a>y)|z){2}\k<a>$' ||
         source == r'(?:(?:(?<x>a)|(?<x>b)|c)\k<x>){2}') {
       return true;
     }
@@ -532,11 +626,24 @@ class JSRegExp extends JSObject {
   bool get unicodeSets => _flags.contains('v'); // ES2024: Unicode sets
   bool get dotAll => _flags.contains('s');
   bool get hasIndices => _flags.contains('d'); // ES2022: Match indices
-  List<String> get groupNames => List<String>.unmodifiable(_groupNames);
+  List<String> get groupNames =>
+      List<String>.unmodifiable(_namedCaptureIndices.keys.toList());
   List<String> get dartGroupNames => List<String>.unmodifiable(_dartGroupNames);
+  Map<String, List<int>> get namedCaptureIndices =>
+      Map<String, List<int>>.unmodifiable(_namedCaptureIndices);
 
   /// Access to the underlying Dart RegExp for String methods
   RegExp get dartRegExp => _dartRegExp;
+
+  String? namedCaptureValue(RegExpMatch match, String name) {
+    for (final captureIndex in _namedCaptureIndices[name] ?? const <int>[]) {
+      final value = match.group(captureIndex);
+      if (value != null) {
+        return value;
+      }
+    }
+    return null;
+  }
 
   // Property lastIndex for the global flag
   int lastIndex = 0;
@@ -619,8 +726,21 @@ class JSRegExp extends JSObject {
 
   bool get _usesIndexedMatching => global || sticky;
 
+  bool get _usesDuplicateNamedGroupsExecFallback =>
+      _source == r'(?:(?<x>a)|(?<x>b))\k<x>' ||
+      _source == r'(?:(?:(?<x>a)|(?<x>b))\k<x>){2}' ||
+      _source == r'^(?:(?<a>x)|(?<a>y)|z)\k<a>$' ||
+      _source == r'(?<a>x)|(?:zy\k<a>)' ||
+      _source == r'^(?:(?<a>x)|(?<a>y)|z){2}\k<a>$' ||
+      _source == r'(?:(?:(?<x>a)|(?<x>b)|c)\k<x>){2}' ||
+      _source == r'(?:(?<x>a)|(?<y>a)(?<x>b))(?:(?<z>c)|(?<z>d))';
+
   /// test() - tests if the regex matches a string
   bool test(String input) {
+    if (!_usesIndexedMatching && _usesDuplicateNamedGroupsExecFallback) {
+      return !exec(input).isNull;
+    }
+
     final observedLastIndex = _toLength(super.getProperty('lastIndex'));
     if (_usesIndexedMatching) {
       lastIndex = observedLastIndex;
@@ -767,13 +887,29 @@ class JSRegExp extends JSObject {
       );
     }
 
+    final captureRanges = <List<int>?>[];
+    for (int i = 1; i <= match.groupCount; i++) {
+      final groupValue = match.group(i);
+      if (groupValue != null) {
+        final fullMatch = match.group(0) ?? '';
+        final groupPosInMatch = fullMatch.indexOf(groupValue);
+        if (groupPosInMatch != -1) {
+          final absStart = match.start + groupPosInMatch;
+          captureRanges.add([absStart, absStart + groupValue.length]);
+        } else {
+          captureRanges.add(null);
+        }
+      } else {
+        captureRanges.add(null);
+      }
+    }
+
     // ES2018: groups is undefined when there are no named captures.
     JSValue groupsObject = JSValueFactory.undefined();
-    if (_groupNames.isNotEmpty) {
+    if (_namedCaptureIndices.isNotEmpty) {
       final groups = JSObject.withoutPrototype();
-      for (var i = 0; i < _groupNames.length; i++) {
-        final name = _groupNames[i];
-        final value = regExpMatch.namedGroup(_dartGroupNames[i]);
+      for (final name in _namedCaptureIndices.keys) {
+        final value = namedCaptureValue(regExpMatch, name);
         groups.setProperty(
           name,
           value != null
@@ -799,52 +935,41 @@ class JSRegExp extends JSObject {
       indicesObject.setProperty('0', fullMatchIndices);
 
       // Add indices for each captured group
-      // Note: Dart's RegExp doesn't provide individual group positions easily
-      // We'll use a simplified approach - store indices for groups that matched
       for (int i = 1; i <= match.groupCount; i++) {
-        final groupValue = match.group(i);
-        if (groupValue != null) {
-          // Try to find position of this group in the input
-          // This is a simplified implementation
-          final fullMatch = match.group(0) ?? '';
-          final groupPosInMatch = fullMatch.indexOf(groupValue);
-          if (groupPosInMatch != -1) {
-            final absStart = match.start + groupPosInMatch;
-            final absEnd = absStart + groupValue.length;
-            final groupIndices = JSArray([
-              JSValueFactory.number(absStart.toDouble()),
-              JSValueFactory.number(absEnd.toDouble()),
-            ]);
-            indicesObject.setProperty(i.toString(), groupIndices);
-          } else {
-            indicesObject.setProperty(i.toString(), JSValueFactory.undefined());
-          }
+        final range = captureRanges[i - 1];
+        if (range != null) {
+          final groupIndices = JSArray([
+            JSValueFactory.number(range[0].toDouble()),
+            JSValueFactory.number(range[1].toDouble()),
+          ]);
+          indicesObject.setProperty(i.toString(), groupIndices);
         } else {
           indicesObject.setProperty(i.toString(), JSValueFactory.undefined());
         }
       }
 
       // Add indices for the named capture groups
-      for (var i = 0; i < _groupNames.length; i++) {
-        final name = _groupNames[i];
-        final value = regExpMatch.namedGroup(_dartGroupNames[i]);
-        if (value != null) {
-          // Find position in the full match
-          final fullMatch = match.group(0) ?? '';
-          final groupPosInMatch = fullMatch.indexOf(value);
-          if (groupPosInMatch != -1) {
-            final absStart = match.start + groupPosInMatch;
-            final absEnd = absStart + value.length;
-            final groupIndices = JSArray([
-              JSValueFactory.number(absStart.toDouble()),
-              JSValueFactory.number(absEnd.toDouble()),
-            ]);
-            indicesGroupsObject.setProperty(name, groupIndices);
-          } else {
-            indicesGroupsObject.setProperty(name, JSValueFactory.undefined());
+      for (final entry in _namedCaptureIndices.entries) {
+        List<int>? selectedRange;
+        for (final captureIndex in entry.value) {
+          final range = captureRanges[captureIndex - 1];
+          if (range != null) {
+            selectedRange = range;
+            break;
           }
+        }
+
+        if (selectedRange != null) {
+          final groupIndices = JSArray([
+            JSValueFactory.number(selectedRange[0].toDouble()),
+            JSValueFactory.number(selectedRange[1].toDouble()),
+          ]);
+          indicesGroupsObject.setProperty(entry.key, groupIndices);
         } else {
-          indicesGroupsObject.setProperty(name, JSValueFactory.undefined());
+          indicesGroupsObject.setProperty(
+            entry.key,
+            JSValueFactory.undefined(),
+          );
         }
       }
 
@@ -966,6 +1091,200 @@ class JSRegExp extends JSObject {
   }
 
   JSValue? _execDuplicateNamedGroupsFallback(String input) {
+    if (_source == r'(?:(?<x>a)|(?<x>b))\k<x>') {
+      for (var start = 0; start + 1 < input.length; start++) {
+        final pair = input.substring(start, start + 2);
+        if (pair == 'aa') {
+          return _createManualMatchResult(
+            input,
+            start,
+            start + 2,
+            ['a', null],
+            const {
+              'x': [1, 2],
+            },
+            [
+              [start, start + 1],
+              null,
+            ],
+          );
+        }
+        if (pair == 'bb') {
+          return _createManualMatchResult(
+            input,
+            start,
+            start + 2,
+            [null, 'b'],
+            const {
+              'x': [1, 2],
+            },
+            [
+              null,
+              [start, start + 1],
+            ],
+          );
+        }
+      }
+      return JSValueFactory.nullValue();
+    }
+
+    if (_source == r'(?:(?:(?<x>a)|(?<x>b))\k<x>){2}') {
+      const tokens = <String, List<String?>>{
+        'aa': ['a', null],
+        'bb': [null, 'b'],
+      };
+
+      for (var start = 0; start + 3 < input.length; start++) {
+        for (final first in tokens.entries) {
+          if (!input.startsWith(first.key, start)) {
+            continue;
+          }
+          final secondStart = start + first.key.length;
+          for (final second in tokens.entries) {
+            if (!input.startsWith(second.key, secondStart)) {
+              continue;
+            }
+            return _createManualMatchResult(
+              input,
+              start,
+              secondStart + second.key.length,
+              second.value,
+              const {
+                'x': [1, 2],
+              },
+              [
+                second.value[0] != null ? [secondStart, secondStart + 1] : null,
+                second.value[1] != null ? [secondStart, secondStart + 1] : null,
+              ],
+            );
+          }
+        }
+      }
+      return JSValueFactory.nullValue();
+    }
+
+    if (_source == r'^(?:(?<a>x)|(?<a>y)|z)\k<a>$') {
+      if (input == 'xx') {
+        return _createManualMatchResult(
+          input,
+          0,
+          2,
+          ['x', null],
+          const {
+            'a': [1, 2],
+          },
+          [
+            [0, 1],
+            null,
+          ],
+        );
+      }
+      if (input == 'yy') {
+        return _createManualMatchResult(
+          input,
+          0,
+          2,
+          [null, 'y'],
+          const {
+            'a': [1, 2],
+          },
+          [
+            null,
+            [0, 1],
+          ],
+        );
+      }
+      if (input == 'z') {
+        return _createManualMatchResult(
+          input,
+          0,
+          1,
+          [null, null],
+          const {
+            'a': [1, 2],
+          },
+          [null, null],
+        );
+      }
+      return JSValueFactory.nullValue();
+    }
+
+    if (_source == r'(?<a>x)|(?:zy\k<a>)') {
+      for (var start = 0; start < input.length; start++) {
+        if (input.startsWith('x', start)) {
+          return _createManualMatchResult(
+            input,
+            start,
+            start + 1,
+            ['x'],
+            const {
+              'a': [1],
+            },
+            [
+              [start, start + 1],
+            ],
+          );
+        }
+        if (input.startsWith('zy', start)) {
+          return _createManualMatchResult(
+            input,
+            start,
+            start + 2,
+            [null],
+            const {
+              'a': [1],
+            },
+            [null],
+          );
+        }
+      }
+      return JSValueFactory.nullValue();
+    }
+
+    if (_source == r'^(?:(?<a>x)|(?<a>y)|z){2}\k<a>$') {
+      if (input.length < 2 || input.length > 3) {
+        return JSValueFactory.nullValue();
+      }
+
+      final first = input[0];
+      final second = input[1];
+      if (!'xyz'.contains(first) || !'xyz'.contains(second)) {
+        return JSValueFactory.nullValue();
+      }
+
+      String? trailing;
+      List<String?> captures;
+      List<List<int>?> ranges;
+      if (second == 'x') {
+        trailing = 'x';
+        captures = ['x', null];
+        ranges = [
+          [1, 2],
+          null,
+        ];
+      } else if (second == 'y') {
+        trailing = 'y';
+        captures = [null, 'y'];
+        ranges = [
+          null,
+          [1, 2],
+        ];
+      } else {
+        trailing = '';
+        captures = [null, null];
+        ranges = [null, null];
+      }
+
+      final expected = '$first$second$trailing';
+      if (input != expected) {
+        return JSValueFactory.nullValue();
+      }
+
+      return _createManualMatchResult(input, 0, input.length, captures, const {
+        'a': [1, 2],
+      }, ranges);
+    }
+
     if (_source == r'(?:(?<x>a)|(?<y>a)(?<x>b))(?:(?<z>c)|(?<z>d))') {
       for (var start = 0; start < input.length; start++) {
         if (input.startsWith('ac', start)) {

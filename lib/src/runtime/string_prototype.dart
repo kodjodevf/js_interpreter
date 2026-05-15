@@ -631,11 +631,9 @@ class StringPrototype {
       callArgs.add(JSValueFactory.string(str));
 
       // 5. ES2018: Named capture groups object
-      final groupsObject = JSObject();
-      // Parse group names from regex pattern
-      final groupNames = _parseGroupNamesFromPattern(jsRegex.source);
-      for (final name in groupNames) {
-        final value = match.namedGroup(name);
+      final groupsObject = JSObject.withoutPrototype();
+      for (final name in jsRegex.groupNames) {
+        final value = jsRegex.namedCaptureValue(match, name);
         groupsObject.setProperty(
           name,
           value != null
@@ -667,13 +665,6 @@ class StringPrototype {
     buffer.write(str.substring(lastIndex));
 
     return JSValueFactory.string(buffer.toString());
-  }
-
-  /// Parse named group names from regex pattern
-  static List<String> _parseGroupNamesFromPattern(String pattern) {
-    final groupNamePattern = RegExp(r'\(\?<(\w+)>');
-    final matches = groupNamePattern.allMatches(pattern);
-    return matches.map((m) => m.group(1)!).toList();
   }
 
   /// Process replacement string for special patterns
