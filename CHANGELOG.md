@@ -1,3 +1,8 @@
+## 0.0.5
+- complete RegExp named groups support, including duplicate named groups, Unicode group names, and matchAll integration
+- improve RegExp built-in conformance for exec, Symbol.match, Symbol.replace, and Symbol.split
+- align RegExp match results and groups objects more closely with ECMAScript semantics
+
 ## 0.0.4
 - add support for capturing destructuring references and validation for array/object destructuring
 - enhance destructuring assignment support and validation
