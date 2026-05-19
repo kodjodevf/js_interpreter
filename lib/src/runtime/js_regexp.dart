@@ -888,20 +888,27 @@ class JSRegExp extends JSObject {
     }
 
     final captureRanges = <List<int>?>[];
+    final fullMatch = match.group(0) ?? '';
+    var searchOffsetInMatch = 0;
     for (int i = 1; i <= match.groupCount; i++) {
       final groupValue = match.group(i);
-      if (groupValue != null) {
-        final fullMatch = match.group(0) ?? '';
-        final groupPosInMatch = fullMatch.indexOf(groupValue);
-        if (groupPosInMatch != -1) {
-          final absStart = match.start + groupPosInMatch;
-          captureRanges.add([absStart, absStart + groupValue.length]);
-        } else {
-          captureRanges.add(null);
-        }
-      } else {
+      if (groupValue == null) {
         captureRanges.add(null);
+        continue;
       }
+
+      var groupPosInMatch = fullMatch.indexOf(groupValue, searchOffsetInMatch);
+      if (groupPosInMatch == -1) {
+        groupPosInMatch = fullMatch.indexOf(groupValue);
+      }
+      if (groupPosInMatch == -1) {
+        captureRanges.add(null);
+        continue;
+      }
+
+      final absStart = match.start + groupPosInMatch;
+      captureRanges.add([absStart, absStart + groupValue.length]);
+      searchOffsetInMatch = groupPosInMatch + groupValue.length;
     }
 
     // ES2018: groups is undefined when there are no named captures.
@@ -922,10 +929,8 @@ class JSRegExp extends JSObject {
 
     // ES2022: Create the indices object if the 'd' flag is present
     JSObject? indicesObject;
-    JSObject? indicesGroupsObject;
     if (hasIndices) {
-      indicesObject = JSObject();
-      indicesGroupsObject = JSObject.withoutPrototype();
+      indicesObject = JSArray();
 
       // Add indices for the complete match
       final fullMatchIndices = JSArray([
@@ -949,32 +954,45 @@ class JSRegExp extends JSObject {
       }
 
       // Add indices for the named capture groups
-      for (final entry in _namedCaptureIndices.entries) {
-        List<int>? selectedRange;
-        for (final captureIndex in entry.value) {
-          final range = captureRanges[captureIndex - 1];
-          if (range != null) {
-            selectedRange = range;
-            break;
+      JSValue indicesGroupsValue = JSValueFactory.undefined();
+      if (_namedCaptureIndices.isNotEmpty) {
+        final indicesGroupsObject = JSObject.withoutPrototype();
+        for (final entry in _namedCaptureIndices.entries) {
+          List<int>? selectedRange;
+          for (final captureIndex in entry.value) {
+            final range = captureRanges[captureIndex - 1];
+            if (range != null) {
+              selectedRange = range;
+              break;
+            }
+          }
+
+          if (selectedRange != null) {
+            final groupIndices = JSArray([
+              JSValueFactory.number(selectedRange[0].toDouble()),
+              JSValueFactory.number(selectedRange[1].toDouble()),
+            ]);
+            indicesGroupsObject.setProperty(entry.key, groupIndices);
+          } else {
+            indicesGroupsObject.setProperty(
+              entry.key,
+              JSValueFactory.undefined(),
+            );
           }
         }
-
-        if (selectedRange != null) {
-          final groupIndices = JSArray([
-            JSValueFactory.number(selectedRange[0].toDouble()),
-            JSValueFactory.number(selectedRange[1].toDouble()),
-          ]);
-          indicesGroupsObject.setProperty(entry.key, groupIndices);
-        } else {
-          indicesGroupsObject.setProperty(
-            entry.key,
-            JSValueFactory.undefined(),
-          );
-        }
+        indicesGroupsValue = indicesGroupsObject;
       }
 
       // Add the groups object to indices
-      indicesObject.setProperty('groups', indicesGroupsObject);
+      indicesObject.defineProperty(
+        'groups',
+        PropertyDescriptor(
+          value: indicesGroupsValue,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        ),
+      );
     }
 
     final result = _MatchArray(
@@ -1034,7 +1052,7 @@ class JSRegExp extends JSObject {
 
     JSObject? indicesObject;
     if (hasIndices) {
-      indicesObject = JSObject();
+      indicesObject = JSArray();
       indicesObject.setProperty(
         '0',
         JSArray([
@@ -1058,33 +1076,46 @@ class JSRegExp extends JSObject {
         );
       }
 
-      final indicesGroups = JSObject.withoutPrototype();
-      final seen = <String>{};
-      for (final name in _groupNames) {
-        if (!seen.add(name)) {
-          continue;
-        }
-        List<int>? selectedRange;
-        for (final captureIndex in namedCaptureIndices[name] ?? const <int>[]) {
-          final range = captureRanges[captureIndex - 1];
-          if (range != null) {
-            selectedRange = range;
-            break;
+      JSValue indicesGroupsValue = JSValueFactory.undefined();
+      if (_groupNames.isNotEmpty) {
+        final indicesGroups = JSObject.withoutPrototype();
+        final seen = <String>{};
+        for (final name in _groupNames) {
+          if (!seen.add(name)) {
+            continue;
           }
+          List<int>? selectedRange;
+          for (final captureIndex
+              in namedCaptureIndices[name] ?? const <int>[]) {
+            final range = captureRanges[captureIndex - 1];
+            if (range != null) {
+              selectedRange = range;
+              break;
+            }
+          }
+          if (selectedRange == null) {
+            indicesGroups.setProperty(name, JSValueFactory.undefined());
+            continue;
+          }
+          indicesGroups.setProperty(
+            name,
+            JSArray([
+              JSValueFactory.number(selectedRange[0].toDouble()),
+              JSValueFactory.number(selectedRange[1].toDouble()),
+            ]),
+          );
         }
-        if (selectedRange == null) {
-          indicesGroups.setProperty(name, JSValueFactory.undefined());
-          continue;
-        }
-        indicesGroups.setProperty(
-          name,
-          JSArray([
-            JSValueFactory.number(selectedRange[0].toDouble()),
-            JSValueFactory.number(selectedRange[1].toDouble()),
-          ]),
-        );
+        indicesGroupsValue = indicesGroups;
       }
-      indicesObject.setProperty('groups', indicesGroups);
+      indicesObject.defineProperty(
+        'groups',
+        PropertyDescriptor(
+          value: indicesGroupsValue,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        ),
+      );
     }
 
     return _MatchArray(elements, start, input, groupsObject, indicesObject);
@@ -1912,15 +1943,17 @@ class _MatchArray extends JSArray {
         configurable: true,
       ),
     );
-    defineProperty(
-      'indices',
-      PropertyDescriptor(
-        value: _indices ?? JSValueFactory.undefined(),
-        writable: true,
-        enumerable: true,
-        configurable: true,
-      ),
-    );
+    if (_indices != null) {
+      defineProperty(
+        'indices',
+        PropertyDescriptor(
+          value: _indices,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        ),
+      );
+    }
   }
 
   @override

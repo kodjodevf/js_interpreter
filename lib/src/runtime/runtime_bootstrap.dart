@@ -23,6 +23,24 @@ import 'text_codec.dart';
 import 'typed_arrays.dart';
 
 class RuntimeBootstrap {
+  static const String _regExpEscapeSyntaxCharacters = r'^$\\.*+?()[]{}|/';
+  static const String _regExpEscapeOtherPunctuators = ',-=<>#&!%:;@~\'`"';
+  static const Set<int> _regExpEscapeWhitespaceCodePoints = {
+    0x0009,
+    0x000B,
+    0x000C,
+    0x0020,
+    0x00A0,
+    0x202F,
+    0xFEFF,
+  };
+  static const Set<int> _regExpEscapeLineTerminatorCodePoints = {
+    0x000A,
+    0x000D,
+    0x2028,
+    0x2029,
+  };
+
   static void populateGlobals(
     Map<String, JSValue> globals, {
     String? Function()? getInterpreterInstanceId,
@@ -94,6 +112,67 @@ class RuntimeBootstrap {
     } finally {
       JSRuntime.setCurrent(previousRuntime);
     }
+  }
+
+  static String _escapeRegExpPattern(String input) {
+    final escaped = StringBuffer();
+    for (final codePoint in input.runes) {
+      if (escaped.isEmpty && _isAsciiLetterOrDigit(codePoint)) {
+        escaped.write(_hexEscape(codePoint));
+        continue;
+      }
+      escaped.write(_encodeForRegExpEscape(codePoint));
+    }
+    return escaped.toString();
+  }
+
+  static String _encodeForRegExpEscape(int codePoint) {
+    switch (codePoint) {
+      case 0x0009:
+        return r'\t';
+      case 0x000A:
+        return r'\n';
+      case 0x000B:
+        return r'\v';
+      case 0x000C:
+        return r'\f';
+      case 0x000D:
+        return r'\r';
+    }
+
+    final char = String.fromCharCode(codePoint);
+    if (_regExpEscapeSyntaxCharacters.contains(char)) {
+      return '\\$char';
+    }
+
+    final isOtherPunctuator = _regExpEscapeOtherPunctuators.contains(char);
+    final isWhitespace =
+        _regExpEscapeWhitespaceCodePoints.contains(codePoint) ||
+        _regExpEscapeLineTerminatorCodePoints.contains(codePoint);
+    final isSurrogate = codePoint >= 0xD800 && codePoint <= 0xDFFF;
+
+    if (isOtherPunctuator || isWhitespace || isSurrogate) {
+      if (codePoint <= 0xFF) {
+        return _hexEscape(codePoint);
+      }
+      return _unicodeEscape(codePoint);
+    }
+
+    return char;
+  }
+
+  static bool _isAsciiLetterOrDigit(int codePoint) {
+    return (codePoint >= 0x30 && codePoint <= 0x39) ||
+        (codePoint >= 0x41 && codePoint <= 0x5A) ||
+        (codePoint >= 0x61 && codePoint <= 0x7A);
+  }
+
+  static String _hexEscape(int codePoint) {
+    return '\\x${codePoint.toRadixString(16).padLeft(2, '0')}';
+  }
+
+  static String _unicodeEscape(int codeUnit) {
+    return '\\u${codeUnit.toRadixString(16).padLeft(4, '0')}';
   }
 
   static void _define(
@@ -1227,6 +1306,42 @@ class RuntimeBootstrap {
       PropertyDescriptor(
         value: symbolSplitFunction,
         writable: true,
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpConstructor.defineProperty(
+      'escape',
+      PropertyDescriptor(
+        value: JSNativeFunction(
+          functionName: 'escape',
+          expectedArgs: 1,
+          nativeImpl: (args) {
+            final input = args.isNotEmpty
+                ? args[0]
+                : JSValueFactory.undefined();
+            if (!input.isString) {
+              throw JSTypeError('RegExp.escape requires a string');
+            }
+            return JSValueFactory.string(
+              _escapeRegExpPattern(input.toString()),
+            );
+          },
+        ),
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpConstructor.defineProperty(
+      JSSymbol.species.propertyKey,
+      PropertyDescriptor(
+        getter: JSNativeFunction(
+          functionName: 'get [Symbol.species]',
+          expectedArgs: 0,
+          nativeImpl: (args) =>
+              args.isNotEmpty ? args[0] : JSValueFactory.undefined(),
+        ),
         enumerable: false,
         configurable: true,
       ),

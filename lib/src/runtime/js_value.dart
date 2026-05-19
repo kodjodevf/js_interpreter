@@ -3680,7 +3680,7 @@ class JSArray extends JSObject {
     return _arrayPrototype;
   }
 
-  JSArray([List<JSValue>? elements]) {
+  JSArray([List<JSValue>? elements]) : super.withoutPrototype() {
     if (elements != null) {
       _elements.addAll(elements);
     }
@@ -4113,10 +4113,10 @@ class JSArray extends JSObject {
       // Check si c'est un indice numerique valide (chaine de caracteres representant un entier)
       final index = _parseArrayIndex(name);
       if (index != null && index >= 0) {
-        // First, check if there's an own property descriptor for this index
-        final ownDescriptor = getOwnPropertyDescriptor(name);
-        if (ownDescriptor != null) {
-          // There's an explicit descriptor - use super.setProperty to respect it
+        // Respect only explicitly defined index descriptors/accessors.
+        // Synthesized array-element descriptors should still write the element.
+        if (_accessorProperties.containsKey(name) ||
+            _propertyDescriptors.containsKey(name)) {
           super.setProperty(name, value);
           return;
         }
@@ -4166,6 +4166,18 @@ class JSArray extends JSObject {
         enumerable: false,
         configurable: false,
       );
+    }
+
+    final index = _parseArrayIndex(name);
+    if (index != null) {
+      if (!isHole(index) && index < length) {
+        return PropertyDescriptor(
+          value: get(index),
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        );
+      }
     }
 
     // For other properties, use parent implementation
