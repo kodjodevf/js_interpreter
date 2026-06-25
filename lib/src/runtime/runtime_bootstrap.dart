@@ -898,26 +898,163 @@ class RuntimeBootstrap {
 
   static JSNativeFunction _createRegExpConstructor() {
     late final JSObject regexpPrototype;
-    final regexpConstructor = JSNativeFunction(
+    late final JSNativeFunction regexpConstructor;
+
+    bool isRegExpLike(JSValue value) {
+      if (value is! JSObject && value is! JSFunction) {
+        return false;
+      }
+
+      final matchValue =
+          (value as dynamic).getProperty(JSSymbol.match.propertyKey) as JSValue;
+      if (!matchValue.isUndefined) {
+        return matchValue.toBoolean();
+      }
+
+      return value is JSRegExp;
+    }
+
+    JSValue speciesConstructor(JSValue object, JSValue defaultConstructor) {
+      if (object is! JSObject && object is! JSFunction) {
+        throw JSTypeError('RegExp receiver must be an object');
+      }
+
+      final constructor = (object as dynamic).getProperty('constructor');
+      if (constructor.isUndefined) {
+        return defaultConstructor;
+      }
+      if (constructor is! JSObject && constructor is! JSFunction) {
+        throw JSTypeError('RegExp constructor is not an object');
+      }
+
+      final species =
+          (constructor as dynamic).getProperty(JSSymbol.species.propertyKey)
+              as JSValue;
+      if (species.isUndefined || species.isNull) {
+        return defaultConstructor;
+      }
+
+      final isConstructor = switch (species) {
+        JSFunction function => function.isConstructor,
+        JSProxy _ => true,
+        _ => false,
+      };
+      if (!isConstructor) {
+        throw JSTypeError('Symbol.species must be a constructor');
+      }
+
+      return species;
+    }
+
+    JSValue constructValue(JSValue constructor, List<JSValue> args) {
+      return switch (constructor) {
+        JSFunction function when function.isConstructor => () {
+          final runtime = JSRuntime.current;
+          if (runtime == null) {
+            throw JSError('No runtime available for constructor execution');
+          }
+
+          final newObject = JSObject();
+          final prototype = function.getProperty('prototype');
+          if (prototype is JSObject) {
+            newObject.setPrototype(prototype);
+          }
+
+          if (function is JSNativeFunction) {
+            newObject.defineProperty(
+              '__reflectConstructInstance__',
+              PropertyDescriptor(
+                value: JSValueFactory.boolean(true),
+                writable: true,
+                enumerable: false,
+                configurable: true,
+              ),
+            );
+            final result = JSNativeFunction.withConstructorCall(
+              () => runtime.callFunction(function, args, newObject),
+            );
+            newObject.deleteProperty('__reflectConstructInstance__');
+            return result is JSObject ? result : newObject;
+          }
+
+          final result = runtime.callFunction(function, args, newObject);
+          return result is JSObject && !result.isNull ? result : newObject;
+        }(),
+        JSProxy proxy => proxy.construct(args),
+        _ => throw JSTypeError('RegExp constructor must be a constructor'),
+      };
+    }
+
+    regexpConstructor = JSNativeFunction(
       functionName: 'RegExp',
       nativeImpl: (args) {
         String pattern = '';
         String flags = '';
-        if (args.isNotEmpty) {
-          final firstArg = args[0];
-          if (firstArg is JSRegExp) {
-            pattern = firstArg.source;
-            flags = args.length > 1 ? args[1].toString() : firstArg.flags;
+        JSValue? derivedPrototype;
+        final actualArgs =
+            JSNativeFunction.isConstructorCallActive &&
+                args.isNotEmpty &&
+                args.first is JSObject
+            ? () {
+                final receiver = args.first as JSObject;
+                if (receiver.hasProperty('__reflectConstructInstance__')) {
+                  return args.sublist(1);
+                }
+                if (receiver.hasProperty('__nativeSuperConstructReceiver__')) {
+                  // Native super() calls pass the derived receiver first so the
+                  // constructor can create the final object for the subclass.
+                  derivedPrototype = receiver.getPrototypeValue();
+                  return args.sublist(1);
+                }
+
+                return args;
+              }()
+            : args;
+
+        if (actualArgs.isNotEmpty) {
+          final firstArg = actualArgs[0];
+          final flagsArg = actualArgs.length > 1
+              ? actualArgs[1]
+              : JSValueFactory.undefined();
+          final patternIsRegExp = isRegExpLike(firstArg);
+
+          if (!JSNativeFunction.isConstructorCallActive &&
+              patternIsRegExp &&
+              flagsArg.isUndefined) {
+            final patternConstructor =
+                (firstArg as dynamic).getProperty('constructor') as JSValue;
+            if (identical(patternConstructor, regexpConstructor)) {
+              return firstArg;
+            }
+          }
+
+          if (patternIsRegExp) {
+            final sourceValue =
+                (firstArg as dynamic).getProperty('source') as JSValue;
+            pattern = JSConversion.jsToString(sourceValue);
+            if (!flagsArg.isUndefined) {
+              flags = JSConversion.jsToString(flagsArg);
+            } else {
+              final flagsValue =
+                  (firstArg as dynamic).getProperty('flags') as JSValue;
+              flags = JSConversion.jsToString(flagsValue);
+            }
           } else {
-            pattern = firstArg.toString();
-            if (args.length > 1) {
-              flags = args[1].toString();
+            pattern = firstArg.isUndefined
+                ? ''
+                : JSConversion.jsToString(firstArg);
+            if (!flagsArg.isUndefined) {
+              flags = JSConversion.jsToString(flagsArg);
             }
           }
         }
         try {
           final regexp = JSRegExp(pattern, JSRegExpFactory.parseFlags(flags));
-          regexp.setPrototype(regexpPrototype);
+          if (derivedPrototype is JSObject) {
+            regexp.setPrototype(derivedPrototype as JSObject);
+          } else {
+            regexp.setPrototype(regexpPrototype);
+          }
           return regexp;
         } catch (e) {
           throw JSSyntaxError('Invalid regular expression: $e');
@@ -1031,6 +1168,306 @@ class RuntimeBootstrap {
       }
     }
 
+    final hasIndicesRealm = JSRuntime.current;
+    JSException hasIndicesTypeError(String message) {
+      final runtime = hasIndicesRealm ?? JSRuntime.current;
+      final previousRuntime = JSRuntime.current;
+      if (runtime != null && !identical(previousRuntime, runtime)) {
+        JSRuntime.setCurrent(runtime);
+      }
+      try {
+        JSObject? prototype;
+        if (runtime != null) {
+          try {
+            final constructor = runtime.getGlobal('TypeError');
+            if (constructor is JSFunction && constructor is JSObject) {
+              final proto = constructor.getProperty('prototype');
+              if (proto is JSObject) {
+                prototype = proto;
+              }
+            }
+          } catch (_) {}
+        }
+        return JSException(
+          JSErrorObjectFactory.fromDartError(JSTypeError(message), prototype),
+        );
+      } finally {
+        if (!identical(JSRuntime.current, previousRuntime)) {
+          JSRuntime.setCurrent(previousRuntime);
+        }
+      }
+    }
+
+    final stickyRealm = JSRuntime.current;
+    JSException stickyTypeError(String message) {
+      final runtime = stickyRealm ?? JSRuntime.current;
+      final previousRuntime = JSRuntime.current;
+      if (runtime != null && !identical(previousRuntime, runtime)) {
+        JSRuntime.setCurrent(runtime);
+      }
+      try {
+        JSObject? prototype;
+        if (runtime != null) {
+          try {
+            final constructor = runtime.getGlobal('TypeError');
+            if (constructor is JSFunction && constructor is JSObject) {
+              final proto = constructor.getProperty('prototype');
+              if (proto is JSObject) {
+                prototype = proto;
+              }
+            }
+          } catch (_) {}
+        }
+        return JSException(
+          JSErrorObjectFactory.fromDartError(JSTypeError(message), prototype),
+        );
+      } finally {
+        if (!identical(JSRuntime.current, previousRuntime)) {
+          JSRuntime.setCurrent(previousRuntime);
+        }
+      }
+    }
+
+    final unicodeRealm = JSRuntime.current;
+    JSException unicodeTypeError(String message) {
+      final runtime = unicodeRealm ?? JSRuntime.current;
+      final previousRuntime = JSRuntime.current;
+      if (runtime != null && !identical(previousRuntime, runtime)) {
+        JSRuntime.setCurrent(runtime);
+      }
+      try {
+        JSObject? prototype;
+        if (runtime != null) {
+          try {
+            final constructor = runtime.getGlobal('TypeError');
+            if (constructor is JSFunction && constructor is JSObject) {
+              final proto = constructor.getProperty('prototype');
+              if (proto is JSObject) {
+                prototype = proto;
+              }
+            }
+          } catch (_) {}
+        }
+        return JSException(
+          JSErrorObjectFactory.fromDartError(JSTypeError(message), prototype),
+        );
+      } finally {
+        if (!identical(JSRuntime.current, previousRuntime)) {
+          JSRuntime.setCurrent(previousRuntime);
+        }
+      }
+    }
+
+    final unicodeSetsRealm = JSRuntime.current;
+    JSException unicodeSetsTypeError(String message) {
+      final runtime = unicodeSetsRealm ?? JSRuntime.current;
+      final previousRuntime = JSRuntime.current;
+      if (runtime != null && !identical(previousRuntime, runtime)) {
+        JSRuntime.setCurrent(runtime);
+      }
+      try {
+        JSObject? prototype;
+        if (runtime != null) {
+          try {
+            final constructor = runtime.getGlobal('TypeError');
+            if (constructor is JSFunction && constructor is JSObject) {
+              final proto = constructor.getProperty('prototype');
+              if (proto is JSObject) {
+                prototype = proto;
+              }
+            }
+          } catch (_) {}
+        }
+        return JSException(
+          JSErrorObjectFactory.fromDartError(JSTypeError(message), prototype),
+        );
+      } finally {
+        if (!identical(JSRuntime.current, previousRuntime)) {
+          JSRuntime.setCurrent(previousRuntime);
+        }
+      }
+    }
+
+    final globalRealm = JSRuntime.current;
+    JSException globalTypeError(String message) {
+      final runtime = globalRealm ?? JSRuntime.current;
+      final previousRuntime = JSRuntime.current;
+      if (runtime != null && !identical(previousRuntime, runtime)) {
+        JSRuntime.setCurrent(runtime);
+      }
+      try {
+        JSObject? prototype;
+        if (runtime != null) {
+          try {
+            final constructor = runtime.getGlobal('TypeError');
+            if (constructor is JSFunction && constructor is JSObject) {
+              final proto = constructor.getProperty('prototype');
+              if (proto is JSObject) {
+                prototype = proto;
+              }
+            }
+          } catch (_) {}
+        }
+        return JSException(
+          JSErrorObjectFactory.fromDartError(JSTypeError(message), prototype),
+        );
+      } finally {
+        if (!identical(JSRuntime.current, previousRuntime)) {
+          JSRuntime.setCurrent(previousRuntime);
+        }
+      }
+    }
+
+    final ignoreCaseRealm = JSRuntime.current;
+    JSException ignoreCaseTypeError(String message) {
+      final runtime = ignoreCaseRealm ?? JSRuntime.current;
+      final previousRuntime = JSRuntime.current;
+      if (runtime != null && !identical(previousRuntime, runtime)) {
+        JSRuntime.setCurrent(runtime);
+      }
+      try {
+        JSObject? prototype;
+        if (runtime != null) {
+          try {
+            final constructor = runtime.getGlobal('TypeError');
+            if (constructor is JSFunction && constructor is JSObject) {
+              final proto = constructor.getProperty('prototype');
+              if (proto is JSObject) {
+                prototype = proto;
+              }
+            }
+          } catch (_) {}
+        }
+        return JSException(
+          JSErrorObjectFactory.fromDartError(JSTypeError(message), prototype),
+        );
+      } finally {
+        if (!identical(JSRuntime.current, previousRuntime)) {
+          JSRuntime.setCurrent(previousRuntime);
+        }
+      }
+    }
+
+    final flagsRealm = JSRuntime.current;
+    JSException flagsTypeError(String message) {
+      final runtime = flagsRealm ?? JSRuntime.current;
+      final previousRuntime = JSRuntime.current;
+      if (runtime != null && !identical(previousRuntime, runtime)) {
+        JSRuntime.setCurrent(runtime);
+      }
+      try {
+        JSObject? prototype;
+        if (runtime != null) {
+          try {
+            final constructor = runtime.getGlobal('TypeError');
+            if (constructor is JSFunction && constructor is JSObject) {
+              final proto = constructor.getProperty('prototype');
+              if (proto is JSObject) {
+                prototype = proto;
+              }
+            }
+          } catch (_) {}
+        }
+        return JSException(
+          JSErrorObjectFactory.fromDartError(JSTypeError(message), prototype),
+        );
+      } finally {
+        if (!identical(JSRuntime.current, previousRuntime)) {
+          JSRuntime.setCurrent(previousRuntime);
+        }
+      }
+    }
+
+    final dotAllRealm = JSRuntime.current;
+    JSException dotAllTypeError(String message) {
+      final runtime = dotAllRealm ?? JSRuntime.current;
+      final previousRuntime = JSRuntime.current;
+      if (runtime != null && !identical(previousRuntime, runtime)) {
+        JSRuntime.setCurrent(runtime);
+      }
+      try {
+        JSObject? prototype;
+        if (runtime != null) {
+          try {
+            final constructor = runtime.getGlobal('TypeError');
+            if (constructor is JSFunction && constructor is JSObject) {
+              final proto = constructor.getProperty('prototype');
+              if (proto is JSObject) {
+                prototype = proto;
+              }
+            }
+          } catch (_) {}
+        }
+        return JSException(
+          JSErrorObjectFactory.fromDartError(JSTypeError(message), prototype),
+        );
+      } finally {
+        if (!identical(JSRuntime.current, previousRuntime)) {
+          JSRuntime.setCurrent(previousRuntime);
+        }
+      }
+    }
+
+    final multilineRealm = JSRuntime.current;
+    JSException multilineTypeError(String message) {
+      final runtime = multilineRealm ?? JSRuntime.current;
+      final previousRuntime = JSRuntime.current;
+      if (runtime != null && !identical(previousRuntime, runtime)) {
+        JSRuntime.setCurrent(runtime);
+      }
+      try {
+        JSObject? prototype;
+        if (runtime != null) {
+          try {
+            final constructor = runtime.getGlobal('TypeError');
+            if (constructor is JSFunction && constructor is JSObject) {
+              final proto = constructor.getProperty('prototype');
+              if (proto is JSObject) {
+                prototype = proto;
+              }
+            }
+          } catch (_) {}
+        }
+        return JSException(
+          JSErrorObjectFactory.fromDartError(JSTypeError(message), prototype),
+        );
+      } finally {
+        if (!identical(JSRuntime.current, previousRuntime)) {
+          JSRuntime.setCurrent(previousRuntime);
+        }
+      }
+    }
+
+    final sourceRealm = JSRuntime.current;
+    JSException sourceTypeError(String message) {
+      final runtime = sourceRealm ?? JSRuntime.current;
+      final previousRuntime = JSRuntime.current;
+      if (runtime != null && !identical(previousRuntime, runtime)) {
+        JSRuntime.setCurrent(runtime);
+      }
+      try {
+        JSObject? prototype;
+        if (runtime != null) {
+          try {
+            final constructor = runtime.getGlobal('TypeError');
+            if (constructor is JSFunction && constructor is JSObject) {
+              final proto = constructor.getProperty('prototype');
+              if (proto is JSObject) {
+                prototype = proto;
+              }
+            }
+          } catch (_) {}
+        }
+        return JSException(
+          JSErrorObjectFactory.fromDartError(JSTypeError(message), prototype),
+        );
+      } finally {
+        if (!identical(JSRuntime.current, previousRuntime)) {
+          JSRuntime.setCurrent(previousRuntime);
+        }
+      }
+    }
+
     compileFunction = JSNativeFunction(
       functionName: 'compile',
       expectedArgs: 2,
@@ -1116,7 +1553,51 @@ class RuntimeBootstrap {
         return thisValue.exec(JSConversion.jsToString(stringValue));
       },
     );
+    final testFunction = JSNativeFunction(
+      functionName: 'test',
+      expectedArgs: 1,
+      nativeImpl: (args) {
+        final thisValue = args.isNotEmpty
+            ? args[0]
+            : JSValueFactory.undefined();
+        if (thisValue is! JSRegExp) {
+          throw compileTypeError(
+            'RegExp.prototype.test requires a RegExp receiver',
+          );
+        }
+
+        final stringValue = args.length > 1
+            ? args[1]
+            : JSValueFactory.undefined();
+        return JSValueFactory.boolean(
+          thisValue.test(JSConversion.jsToString(stringValue)),
+        );
+      },
+    );
+    final toStringFunction = JSNativeFunction(
+      functionName: 'toString',
+      expectedArgs: 0,
+      nativeImpl: (args) {
+        final thisValue = args.isNotEmpty
+            ? args[0]
+            : JSValueFactory.undefined();
+        if (thisValue is! JSObject && thisValue is! JSFunction) {
+          throw compileTypeError(
+            'RegExp.prototype.toString requires an object receiver',
+          );
+        }
+
+        final receiver = thisValue as dynamic;
+        final sourceValue = receiver.getProperty('source') as JSValue;
+        final flagsValue = receiver.getProperty('flags') as JSValue;
+        return JSValueFactory.string(
+          '/${JSConversion.jsToString(sourceValue)}/${JSConversion.jsToString(flagsValue)}',
+        );
+      },
+    );
     execFunction.deleteProperty('prototype');
+    testFunction.deleteProperty('prototype');
+    toStringFunction.deleteProperty('prototype');
     final symbolReplaceFunction = JSNativeFunction(
       functionName: '[Symbol.replace]',
       expectedArgs: 2,
@@ -1158,14 +1639,93 @@ class RuntimeBootstrap {
         return JSRegExp.symbolMatchOn(thisValue, stringValue);
       },
     );
+    final symbolMatchAllFunction = JSNativeFunction(
+      functionName: '[Symbol.matchAll]',
+      expectedArgs: 1,
+      nativeImpl: (args) {
+        final thisValue = args.isNotEmpty
+            ? args[0]
+            : JSValueFactory.undefined();
+        if (thisValue is! JSObject && thisValue is! JSFunction) {
+          throw compileTypeError(
+            'RegExp.prototype[Symbol.matchAll] requires an object receiver',
+          );
+        }
+
+        final stringValue = args.length > 1
+            ? args[1]
+            : JSValueFactory.undefined();
+        final string = JSConversion.jsToString(stringValue);
+        final receiver = thisValue as dynamic;
+        final flagsValue = receiver.getProperty('flags') as JSValue;
+        final flags = JSConversion.jsToString(flagsValue);
+
+        if (!isRegExpLike(thisValue)) {
+          final matcher = JSRegExpFactory.create(
+            JSConversion.jsToString(thisValue),
+            'g',
+          );
+          return JSRegExpMatchIterator(
+            string,
+            matcher,
+            global: true,
+            fullUnicode: false,
+          );
+        }
+
+        final constructor = speciesConstructor(thisValue, regexpConstructor);
+        final matcher = constructValue(constructor, [
+          thisValue,
+          JSValueFactory.string(flags),
+        ]);
+        final lastIndex = JSRegExp.toLengthValue(
+          receiver.getProperty('lastIndex') as JSValue,
+        );
+        JSRegExp.setPropertyStrictOn(
+          matcher,
+          'lastIndex',
+          JSValueFactory.number(lastIndex.toDouble()),
+        );
+
+        return JSRegExpMatchIterator(
+          string,
+          matcher,
+          global: flags.contains('g'),
+          fullUnicode: flags.contains('u') || flags.contains('v'),
+        );
+      },
+    );
+    final symbolSearchFunction = JSNativeFunction(
+      functionName: '[Symbol.search]',
+      expectedArgs: 1,
+      nativeImpl: (args) {
+        final thisValue = args.isNotEmpty
+            ? args[0]
+            : JSValueFactory.undefined();
+        if (thisValue is! JSObject && thisValue is! JSFunction) {
+          throw compileTypeError(
+            'RegExp.prototype[Symbol.search] requires an object receiver',
+          );
+        }
+
+        final stringValue = args.length > 1
+            ? args[1]
+            : JSValueFactory.undefined();
+        return JSRegExp.symbolSearchOn(thisValue, stringValue);
+      },
+    );
     final symbolSplitFunction = JSNativeFunction(
-      functionName: 'Symbol.split',
+      functionName: '[Symbol.split]',
       expectedArgs: 2,
       nativeImpl: (args) {
         final thisValue = args.isNotEmpty
             ? args[0]
             : JSValueFactory.undefined();
-        if (thisValue is! JSRegExp) {
+
+        // Check if receiver is a valid RegExp-like object
+        if (thisValue is! JSRegExp &&
+            thisValue is! JSObject &&
+            thisValue is! JSFunction) {
           throw compileTypeError(
             'RegExp.prototype[Symbol.split] requires a RegExp receiver',
           );
@@ -1175,9 +1735,36 @@ class RuntimeBootstrap {
 
         // Mirror the observable order relied on by Test262: clone the regex
         // after IsRegExp-like Symbol.match access, but before limit coercion.
-        thisValue.getPropertyBySymbol(JSSymbol.match);
-        final splitter = JSRegExp(thisValue.source, thisValue.flags);
-        splitter.setPrototype(regexpPrototype);
+        if (thisValue is JSObject || thisValue is JSFunction) {
+          (thisValue as dynamic).getPropertyBySymbol(JSSymbol.match);
+        } else if (thisValue is JSRegExp) {
+          thisValue.getPropertyBySymbol(JSSymbol.match);
+        }
+
+        // For JSRegExp, use the simple approach. For others, use species constructor.
+        final splitter = switch (thisValue) {
+          JSRegExp regexp => () {
+            final result = JSRegExp(regexp.source, regexp.flags);
+            result.setPrototype(regexpPrototype);
+            return result;
+          }(),
+          _ => () {
+            // Get flags from the receiver
+            final flagsValue = (thisValue as dynamic).getProperty('flags');
+            final flags = JSConversion.jsToString(flagsValue);
+
+            // Get the species constructor
+            final ctor = speciesConstructor(thisValue, regexpConstructor);
+
+            // Call the constructor with (receiver, flags)
+            final splitterValue = constructValue(ctor, [
+              thisValue,
+              JSValueFactory.string(flags),
+            ]);
+
+            return splitterValue;
+          }(),
+        };
 
         var limit = 0xFFFFFFFF;
         if (args.length > 2 && !args[2].isUndefined) {
@@ -1200,6 +1787,13 @@ class RuntimeBootstrap {
         var nextSourcePosition = 0;
 
         while (nextSourcePosition <= input.length && parts.length < limit) {
+          // Handle both JSRegExp and generic object splitters
+          if (splitter is! JSRegExp) {
+            // For non-JSRegExp splitters, we would need to call exec() method
+            // For now, just handle JSRegExp case
+            throw JSTypeError('splitter must be a RegExp');
+          }
+
           final iterator = splitter.dartRegExp
               .allMatches(input, nextSourcePosition)
               .iterator;
@@ -1271,6 +1865,364 @@ class RuntimeBootstrap {
         configurable: true,
       ),
     );
+    regexpPrototype.defineProperty(
+      'test',
+      PropertyDescriptor(
+        value: testFunction,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.defineProperty(
+      'toString',
+      PropertyDescriptor(
+        value: toStringFunction,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.defineProperty(
+      'hasIndices',
+      PropertyDescriptor(
+        getter: JSNativeFunction(
+          functionName: 'get hasIndices',
+          expectedArgs: 0,
+          nativeImpl: (args) {
+            final thisValue = args.isNotEmpty
+                ? args[0]
+                : JSValueFactory.undefined();
+
+            if (thisValue is! JSObject) {
+              throw hasIndicesTypeError(
+                'RegExp.prototype.hasIndices called on non-object receiver',
+              );
+            }
+            if (identical(thisValue, regexpPrototype)) {
+              return JSValueFactory.undefined();
+            }
+            if (thisValue is! JSRegExp) {
+              throw hasIndicesTypeError(
+                'RegExp.prototype.hasIndices called on incompatible receiver',
+              );
+            }
+
+            return JSValueFactory.boolean(thisValue.hasIndices);
+          },
+        ),
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.defineProperty(
+      'sticky',
+      PropertyDescriptor(
+        getter: JSNativeFunction(
+          functionName: 'get sticky',
+          expectedArgs: 0,
+          nativeImpl: (args) {
+            final thisValue = args.isNotEmpty
+                ? args[0]
+                : JSValueFactory.undefined();
+
+            if (thisValue is! JSObject) {
+              throw stickyTypeError(
+                'RegExp.prototype.sticky called on non-object receiver',
+              );
+            }
+            if (identical(thisValue, regexpPrototype)) {
+              return JSValueFactory.undefined();
+            }
+            if (thisValue is! JSRegExp) {
+              throw stickyTypeError(
+                'RegExp.prototype.sticky called on incompatible receiver',
+              );
+            }
+
+            return JSValueFactory.boolean(thisValue.sticky);
+          },
+        ),
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.defineProperty(
+      'unicode',
+      PropertyDescriptor(
+        getter: JSNativeFunction(
+          functionName: 'get unicode',
+          expectedArgs: 0,
+          nativeImpl: (args) {
+            final thisValue = args.isNotEmpty
+                ? args[0]
+                : JSValueFactory.undefined();
+
+            if (thisValue is! JSObject) {
+              throw unicodeTypeError(
+                'RegExp.prototype.unicode called on non-object receiver',
+              );
+            }
+            if (identical(thisValue, regexpPrototype)) {
+              return JSValueFactory.undefined();
+            }
+            if (thisValue is! JSRegExp) {
+              throw unicodeTypeError(
+                'RegExp.prototype.unicode called on incompatible receiver',
+              );
+            }
+
+            return JSValueFactory.boolean(thisValue.unicode);
+          },
+        ),
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.defineProperty(
+      'unicodeSets',
+      PropertyDescriptor(
+        getter: JSNativeFunction(
+          functionName: 'get unicodeSets',
+          expectedArgs: 0,
+          nativeImpl: (args) {
+            final thisValue = args.isNotEmpty
+                ? args[0]
+                : JSValueFactory.undefined();
+
+            if (thisValue is! JSObject) {
+              throw unicodeSetsTypeError(
+                'RegExp.prototype.unicodeSets called on non-object receiver',
+              );
+            }
+            if (identical(thisValue, regexpPrototype)) {
+              return JSValueFactory.undefined();
+            }
+            if (thisValue is! JSRegExp) {
+              throw unicodeSetsTypeError(
+                'RegExp.prototype.unicodeSets called on incompatible receiver',
+              );
+            }
+
+            return JSValueFactory.boolean(thisValue.unicodeSets);
+          },
+        ),
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.defineProperty(
+      'global',
+      PropertyDescriptor(
+        getter: JSNativeFunction(
+          functionName: 'get global',
+          expectedArgs: 0,
+          nativeImpl: (args) {
+            final thisValue = args.isNotEmpty
+                ? args[0]
+                : JSValueFactory.undefined();
+
+            if (thisValue is! JSObject) {
+              throw globalTypeError(
+                'RegExp.prototype.global called on non-object receiver',
+              );
+            }
+            if (identical(thisValue, regexpPrototype)) {
+              return JSValueFactory.undefined();
+            }
+            if (thisValue is! JSRegExp) {
+              throw globalTypeError(
+                'RegExp.prototype.global called on incompatible receiver',
+              );
+            }
+
+            return JSValueFactory.boolean(thisValue.global);
+          },
+        ),
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.defineProperty(
+      'ignoreCase',
+      PropertyDescriptor(
+        getter: JSNativeFunction(
+          functionName: 'get ignoreCase',
+          expectedArgs: 0,
+          nativeImpl: (args) {
+            final thisValue = args.isNotEmpty
+                ? args[0]
+                : JSValueFactory.undefined();
+
+            if (thisValue is! JSObject) {
+              throw ignoreCaseTypeError(
+                'RegExp.prototype.ignoreCase called on non-object receiver',
+              );
+            }
+            if (identical(thisValue, regexpPrototype)) {
+              return JSValueFactory.undefined();
+            }
+            if (thisValue is! JSRegExp) {
+              throw ignoreCaseTypeError(
+                'RegExp.prototype.ignoreCase called on incompatible receiver',
+              );
+            }
+
+            return JSValueFactory.boolean(thisValue.ignoreCase);
+          },
+        ),
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.defineProperty(
+      'flags',
+      PropertyDescriptor(
+        getter: JSNativeFunction(
+          functionName: 'get flags',
+          expectedArgs: 0,
+          nativeImpl: (args) {
+            final thisValue = args.isNotEmpty
+                ? args[0]
+                : JSValueFactory.undefined();
+
+            if (thisValue is! JSObject && thisValue is! JSFunction) {
+              throw flagsTypeError(
+                'RegExp.prototype.flags called on non-object receiver',
+              );
+            }
+
+            final receiver = thisValue as dynamic;
+            final buffer = StringBuffer();
+
+            if ((receiver.getProperty('hasIndices') as JSValue).toBoolean()) {
+              buffer.write('d');
+            }
+            if ((receiver.getProperty('global') as JSValue).toBoolean()) {
+              buffer.write('g');
+            }
+            if ((receiver.getProperty('ignoreCase') as JSValue).toBoolean()) {
+              buffer.write('i');
+            }
+            if ((receiver.getProperty('multiline') as JSValue).toBoolean()) {
+              buffer.write('m');
+            }
+            if ((receiver.getProperty('dotAll') as JSValue).toBoolean()) {
+              buffer.write('s');
+            }
+            if ((receiver.getProperty('unicode') as JSValue).toBoolean()) {
+              buffer.write('u');
+            }
+            if ((receiver.getProperty('unicodeSets') as JSValue).toBoolean()) {
+              buffer.write('v');
+            }
+            if ((receiver.getProperty('sticky') as JSValue).toBoolean()) {
+              buffer.write('y');
+            }
+
+            return JSValueFactory.string(buffer.toString());
+          },
+        ),
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.defineProperty(
+      'dotAll',
+      PropertyDescriptor(
+        getter: JSNativeFunction(
+          functionName: 'get dotAll',
+          expectedArgs: 0,
+          nativeImpl: (args) {
+            final thisValue = args.isNotEmpty
+                ? args[0]
+                : JSValueFactory.undefined();
+
+            if (thisValue is! JSObject) {
+              throw dotAllTypeError(
+                'RegExp.prototype.dotAll called on non-object receiver',
+              );
+            }
+            if (identical(thisValue, regexpPrototype)) {
+              return JSValueFactory.undefined();
+            }
+            if (thisValue is! JSRegExp) {
+              throw dotAllTypeError(
+                'RegExp.prototype.dotAll called on incompatible receiver',
+              );
+            }
+
+            return JSValueFactory.boolean(thisValue.dotAll);
+          },
+        ),
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.defineProperty(
+      'multiline',
+      PropertyDescriptor(
+        getter: JSNativeFunction(
+          functionName: 'get multiline',
+          expectedArgs: 0,
+          nativeImpl: (args) {
+            final thisValue = args.isNotEmpty
+                ? args[0]
+                : JSValueFactory.undefined();
+
+            if (thisValue is! JSObject) {
+              throw multilineTypeError(
+                'RegExp.prototype.multiline called on non-object receiver',
+              );
+            }
+            if (identical(thisValue, regexpPrototype)) {
+              return JSValueFactory.undefined();
+            }
+            if (thisValue is! JSRegExp) {
+              throw multilineTypeError(
+                'RegExp.prototype.multiline called on incompatible receiver',
+              );
+            }
+
+            return JSValueFactory.boolean(thisValue.multiline);
+          },
+        ),
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.defineProperty(
+      'source',
+      PropertyDescriptor(
+        getter: JSNativeFunction(
+          functionName: 'get source',
+          expectedArgs: 0,
+          nativeImpl: (args) {
+            final thisValue = args.isNotEmpty
+                ? args[0]
+                : JSValueFactory.undefined();
+
+            if (thisValue is! JSObject) {
+              throw sourceTypeError(
+                'RegExp.prototype.source called on non-object receiver',
+              );
+            }
+            if (identical(thisValue, regexpPrototype)) {
+              return JSValueFactory.string('(?:)');
+            }
+            if (thisValue is! JSRegExp) {
+              throw sourceTypeError(
+                'RegExp.prototype.source called on incompatible receiver',
+              );
+            }
+
+            return JSValueFactory.string(thisValue.sourceAccessorValue);
+          },
+        ),
+        enumerable: false,
+        configurable: true,
+      ),
+    );
     regexpPrototype.registerSymbolKey(
       JSSymbol.match.propertyKey,
       JSSymbol.match,
@@ -1292,6 +2244,32 @@ class RuntimeBootstrap {
       JSSymbol.replace.propertyKey,
       PropertyDescriptor(
         value: symbolReplaceFunction,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.registerSymbolKey(
+      JSSymbol.matchAll.propertyKey,
+      JSSymbol.matchAll,
+    );
+    regexpPrototype.defineProperty(
+      JSSymbol.matchAll.propertyKey,
+      PropertyDescriptor(
+        value: symbolMatchAllFunction,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      ),
+    );
+    regexpPrototype.registerSymbolKey(
+      JSSymbol.search.propertyKey,
+      JSSymbol.search,
+    );
+    regexpPrototype.defineProperty(
+      JSSymbol.search.propertyKey,
+      PropertyDescriptor(
+        value: symbolSearchFunction,
         writable: true,
         enumerable: false,
         configurable: true,
@@ -1346,7 +2324,15 @@ class RuntimeBootstrap {
         configurable: true,
       ),
     );
-    regexpConstructor.setProperty('prototype', regexpPrototype);
+    regexpConstructor.defineProperty(
+      'prototype',
+      PropertyDescriptor(
+        value: regexpPrototype,
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      ),
+    );
     regexpPrototype.defineConstructorProperty(regexpConstructor);
     JSRegExp.setRegExpPrototype(regexpPrototype);
     return regexpConstructor;
@@ -2104,6 +3090,9 @@ class RuntimeBootstrap {
           if (result is JSObject) {
             if (target.functionName == 'AggregateError' &&
                 constructProto != null) {
+              result.setPrototype(constructProto);
+            }
+            if (target.functionName == 'RegExp' && constructProto != null) {
               result.setPrototype(constructProto);
             }
             result.setProperty('constructor', newTarget);

@@ -427,6 +427,9 @@ enum Op {
   /// Push the current `this` binding onto the stack
   getThis,
 
+  /// Replace the current `this` binding with the top of the stack
+  setThis,
+
   /// Push the current `new.target` binding onto the stack
   getNewTarget,
 
@@ -685,6 +688,7 @@ const Map<Op, OpInfo> opInfo = {
   Op.createArguments: OpInfo('create_arguments', OpFmt.none, 0, 1),
   Op.createMappedArguments: OpInfo('create_mapped_arguments', OpFmt.none, 0, 1),
   Op.getThis: OpInfo('get_this', OpFmt.none, 0, 1),
+  Op.setThis: OpInfo('set_this', OpFmt.none, 1, 0),
   Op.getNewTarget: OpInfo('get_new_target', OpFmt.none, 0, 1),
   Op.objectRest: OpInfo('object_rest', OpFmt.u16, -1, 1),
 };

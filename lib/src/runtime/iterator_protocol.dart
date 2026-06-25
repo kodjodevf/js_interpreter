@@ -406,14 +406,19 @@ extension JSSetIterableExtension on JSSet {
 /// ES2020: Implementation of a regex match iterator for matchAll()
 class JSRegExpMatchIterator extends JSIterator {
   final String string;
-  final RegExp regex;
-  final JSRegExp? jsRegExp;
-  final Iterator<RegExpMatch> _matchIterator;
+  final JSValue matcherValue;
+  final dynamic _matcher;
+  final bool global;
+  final bool fullUnicode;
   bool _exhausted = false;
 
-  JSRegExpMatchIterator(this.string, this.regex, [this.jsRegExp])
-    : _matchIterator = regex.allMatches(string).iterator,
-      super() {
+  JSRegExpMatchIterator(
+    this.string,
+    this.matcherValue, {
+    required this.global,
+    required this.fullUnicode,
+  }) : _matcher = matcherValue as dynamic,
+       super() {
     // Expose the next method as a JavaScript property
     setProperty(
       'next',
@@ -426,59 +431,42 @@ class JSRegExpMatchIterator extends JSIterator {
 
   @override
   JSValue next([JSValue? value]) {
-    if (_exhausted || !_matchIterator.moveNext()) {
+    if (_exhausted) {
       _exhausted = true;
       return JSIteratorResult.create(JSValueFactory.undefined(), true);
     }
 
-    final match = _matchIterator.current;
+    final result = JSRegExp.regExpExecOn(
+      matcherValue,
+      JSValueFactory.string(string),
+    );
+    if (result.isNull) {
+      _exhausted = true;
+      return JSIteratorResult.create(JSValueFactory.undefined(), true);
+    }
 
-    // Create an array-like object with match properties
-    // Format: [fullMatch, group1, group2, ..., groupN]
-    final matchArray = <JSValue>[];
+    if (!global) {
+      _exhausted = true;
+      return JSIteratorResult.create(result, false);
+    }
 
-    // Add the complete match
-    matchArray.add(JSValueFactory.string(match.group(0) ?? ''));
-
-    // Add all capture groups
-    for (int i = 1; i <= match.groupCount; i++) {
-      final group = match.group(i);
-      matchArray.add(
-        group != null
-            ? JSValueFactory.string(group)
-            : JSValueFactory.undefined(),
+    final matchResult = result as dynamic;
+    final matched = JSConversion.jsToString(matchResult.getProperty('0'));
+    if (matched.isEmpty) {
+      final lastIndexValue = _matcher.getProperty('lastIndex') as JSValue;
+      final nextIndex = JSRegExp.advanceStringIndex(
+        string,
+        JSRegExp.toLengthValue(lastIndexValue),
+        fullUnicode,
+      );
+      JSRegExp.setPropertyStrictOn(
+        matcherValue,
+        'lastIndex',
+        JSValueFactory.number(nextIndex.toDouble()),
       );
     }
 
-    final resultArray = JSValueFactory.array(matchArray);
-
-    // Add supplementary match properties
-    // index: position of the match in the string
-    resultArray.setProperty(
-      'index',
-      JSValueFactory.number(match.start.toDouble()),
-    );
-
-    // input: the original string
-    resultArray.setProperty('input', JSValueFactory.string(string));
-
-    // groups: object containing named groups (ES2018)
-    final groupsObj = JSObject.withoutPrototype();
-    if (jsRegExp != null) {
-      for (final groupName in jsRegExp!.groupNames) {
-        final value = jsRegExp!.namedCaptureValue(match, groupName);
-        groupsObj.setProperty(
-          groupName,
-          value != null
-              ? JSValueFactory.string(value)
-              : JSValueFactory.undefined(),
-        );
-      }
-    }
-
-    resultArray.setProperty('groups', groupsObj);
-
-    return JSIteratorResult.create(resultArray, false);
+    return JSIteratorResult.create(result, false);
   }
 
   @override

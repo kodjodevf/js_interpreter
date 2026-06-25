@@ -329,6 +329,7 @@ class JSNativeFunction extends JSFunction {
       'toString',
       'toLocaleString',
       'exec',
+      'test',
       'compile',
       // Function.prototype methods that need the function as first arg
       'call',
@@ -393,8 +394,11 @@ class JSNativeFunction extends JSFunction {
       'fill',
       'copyWithin',
       '[Symbol.match]',
+      '[Symbol.matchAll]',
+      '[Symbol.search]',
       'Symbol.iterator',
       '[Symbol.replace]',
+      '[Symbol.split]',
       'Symbol.replace',
       'Symbol.split',
     };

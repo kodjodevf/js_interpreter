@@ -1650,6 +1650,11 @@ class BytecodeCompiler implements ASTVisitor<void> {
           _ctx.adjustStack(1);
           _bc.emit(Op.returnAsync);
           _ctx.adjustStack(-1);
+        } else if (kind == FunctionKind.constructor_) {
+          _bc.emit(Op.getThis);
+          _ctx.adjustStack(1);
+          _bc.emit(Op.return_);
+          _ctx.adjustStack(-1);
         } else {
           _bc.emit(Op.returnUndef);
         }
@@ -2589,6 +2594,14 @@ class BytecodeCompiler implements ASTVisitor<void> {
 
     // super() call — call super constructor with this binding
     if (node.callee is SuperExpression && _superVarName != null) {
+      final superCalledAtom = _ctx.addConstant('__superConstructorCalled__');
+      _bc.emit(Op.getThis);
+      _ctx.adjustStack(1);
+      _bc.emit(Op.pushTrue);
+      _ctx.adjustStack(1);
+      _bc.emitU32(Op.putField, superCalledAtom);
+      _ctx.adjustStack(-2);
+
       // Stack: push this, push super constructor
       _bc.emit(Op.getThis);
       _ctx.adjustStack(1);
@@ -2599,8 +2612,8 @@ class BytecodeCompiler implements ASTVisitor<void> {
       }
       _bc.emitU16(Op.callMethod, node.arguments.length);
       _ctx.adjustStack(-(node.arguments.length + 1));
-      // super() result is discarded — replace with this
-      _bc.emit(Op.drop);
+      // Derived built-in constructors can replace the receiver via super().
+      _bc.emit(Op.setThis);
       _ctx.adjustStack(-1);
       _bc.emit(Op.getThis);
       _ctx.adjustStack(1);
@@ -4600,6 +4613,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
         _staticMethodStack.add(false);
         final funcBytecode = _compileFunction(
           name: className,
+          kind: FunctionKind.constructor_,
           params: func.params,
           body: func.body,
         );
@@ -4621,6 +4635,7 @@ class BytecodeCompiler implements ASTVisitor<void> {
         // Default empty constructor: function() {}
         final funcBytecode = _compileFunction(
           name: className,
+          kind: FunctionKind.constructor_,
           params: [],
           body: BlockStatement(body: [], line: line, column: 0),
         );
@@ -4629,6 +4644,16 @@ class BytecodeCompiler implements ASTVisitor<void> {
         _ctx.adjustStack(1);
       }
       // Stack: [constructor]
+
+      if (superClass != null) {
+        final derivedCtorAtom = _ctx.addConstant('__derivedConstructor__');
+        _bc.emit(Op.dup);
+        _ctx.adjustStack(1);
+        _bc.emit(Op.pushTrue);
+        _ctx.adjustStack(1);
+        _bc.emitU32(Op.putField, derivedCtorAtom);
+        _ctx.adjustStack(-2);
+      }
 
       // Save constructor to temp local for later use
       final ctorTempSlot = _ctx.declareLocal(
@@ -4991,14 +5016,22 @@ class BytecodeCompiler implements ASTVisitor<void> {
   ) {
     _pushFunction(
       name: className,
-      kind: FunctionKind.normal,
+      kind: FunctionKind.constructor_,
       argCount: 1,
       hasRest: true,
     );
     _ctx.declareArg('args');
+    final superCalledAtom = _ctx.addConstant('__superConstructorCalled__');
 
     // super(...args) — call super constructor with this binding and forwarded args
     // Stack: push this (receiver), push super constructor, push args array
+    _bc.emit(Op.getThis);
+    _ctx.adjustStack(1);
+    _bc.emit(Op.pushTrue);
+    _ctx.adjustStack(1);
+    _bc.emitU32(Op.putField, superCalledAtom);
+    _ctx.adjustStack(-2);
+
     _bc.emit(Op.getThis);
     _ctx.adjustStack(1);
     _emitGetVar(_superVarName!, 0);
@@ -5006,9 +5039,12 @@ class BytecodeCompiler implements ASTVisitor<void> {
     _ctx.adjustStack(1);
     _bc.emit(Op.applyMethod);
     _ctx.adjustStack(-2); // [this, func, argsArray] -> [result]
-    _bc.emit(Op.drop);
+    _bc.emit(Op.setThis);
     _ctx.adjustStack(-1);
-    _bc.emit(Op.returnUndef);
+    _bc.emit(Op.getThis);
+    _ctx.adjustStack(1);
+    _bc.emit(Op.return_);
+    _ctx.adjustStack(-1);
 
     return _popFunction();
   }

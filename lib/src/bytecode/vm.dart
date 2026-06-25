@@ -1443,9 +1443,26 @@ class BytecodeVM implements JSRuntime {
               ? thisValue
               : JSUndefined.instance;
           final result = constructorThis is JSObject
-              ? JSNativeFunction.withConstructorCall(
-                  () => func.callWithThis(args, constructorThis),
-                )
+              ? () {
+                  constructorThis.defineProperty(
+                    '__nativeSuperConstructReceiver__',
+                    PropertyDescriptor(
+                      value: JSValueFactory.boolean(true),
+                      writable: true,
+                      enumerable: false,
+                      configurable: true,
+                    ),
+                  );
+                  try {
+                    return JSNativeFunction.withConstructorCall(
+                      () => func.callWithThis(args, constructorThis),
+                    );
+                  } finally {
+                    constructorThis.deleteProperty(
+                      '__nativeSuperConstructReceiver__',
+                    );
+                  }
+                }()
               : func.callWithThis(args, constructorThis);
           _postHostCallSync?.call();
           return result;
@@ -5133,9 +5150,15 @@ class BytecodeVM implements JSRuntime {
 
             case Op.getThis:
               push(frame.thisValue);
+              break;
+
+            case Op.setThis:
+              frame.thisValue = pop();
+              break;
 
             case Op.getNewTarget:
               push(frame.newTarget);
+              break;
 
             case Op.objectRest:
               // Object rest destructuring
@@ -5701,6 +5724,10 @@ class BytecodeVM implements JSRuntime {
           throw JSTypeError('${ctor.functionName} is not a constructor');
         }
         final instance = JSObject();
+        final requiresSuperCall = _getProperty(
+          ctor,
+          '__derivedConstructor__',
+        ).toBoolean();
         // Set prototype
         final proto = _getProperty(ctor, 'prototype');
         if (proto is JSObject) {
@@ -5712,6 +5739,20 @@ class BytecodeVM implements JSRuntime {
           args,
           newTarget: ctor,
         );
+        final superWasCalled = instance.hasProperty(
+          '__superConstructorCalled__',
+        );
+        if (superWasCalled) {
+          instance.deleteProperty('__superConstructorCalled__');
+        }
+        if (requiresSuperCall &&
+            !superWasCalled &&
+            ((result is! JSObject && result is! JSFunction) ||
+                identical(result, instance))) {
+          throw JSReferenceError(
+            'Must call super constructor in derived class before returning',
+          );
+        }
         // Constructors must preserve any object return value, including
         // callable objects such as functions.
         if (result is JSObject || result is JSFunction) return result;

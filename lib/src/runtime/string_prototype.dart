@@ -955,6 +955,14 @@ class StringPrototype {
   /// Returns an iterator of all matches (with capture groups)
   static JSValue matchAll(List<JSValue> args, String str) {
     final pattern = args.isEmpty ? JSValueFactory.undefined() : args[0];
+
+    if (pattern is JSRegExp) {
+      final flags = JSConversion.jsToString(pattern.getProperty('flags'));
+      if (!flags.contains('g')) {
+        throw JSTypeError('matchAll requires a global RegExp (use /pattern/g)');
+      }
+    }
+
     final matchAllMethod = _callSymbolMethod(
       pattern,
       JSSymbol.matchAll.propertyKey,
@@ -986,7 +994,12 @@ class StringPrototype {
     }
 
     // Return an iterator of matches
-    return JSRegExpMatchIterator(str, jsRegex.dartRegExp, jsRegex);
+    return JSRegExpMatchIterator(
+      str,
+      jsRegex,
+      global: true,
+      fullUnicode: jsRegex.unicode || jsRegex.unicodeSets,
+    );
   }
 
   /// String.prototype.search(regexp)

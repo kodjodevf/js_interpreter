@@ -2,6 +2,8 @@
 /// Lexical analysis to convert source code into tokens
 library;
 
+import '../runtime/unicode_property_escape_data.dart';
+
 import 'token.dart';
 
 /// Exception thrown during lexical analysis errors
@@ -52,6 +54,7 @@ class JSLexer {
       TokenType.leftBrace,
       TokenType.keywordReturn,
       TokenType.keywordThrow,
+      TokenType.keywordNew,
       TokenType.keywordIf,
       TokenType.keywordFor,
       TokenType.keywordWhile,
@@ -1719,10 +1722,222 @@ class JSLexer {
       flags.write(_advance());
     }
 
+    final flagString = flags.toString();
+
+    _validateRegexLiteralFlags(flagString, startLine, startColumn);
+    _validateUnicodePropertyEscapesRegexLiteral(
+      buffer.toString(),
+      flagString,
+      startLine,
+      startColumn,
+    );
+    if (flagString.contains('v')) {
+      _validateUnicodeSetsRegexLiteral(
+        buffer.toString(),
+        startLine,
+        startColumn,
+      );
+    }
+
     // Create the token value (pattern + flags)
-    final regexValue = '/${buffer.toString()}/${flags.toString()}';
+    final regexValue = '/${buffer.toString()}/$flagString';
 
     _addToken(TokenType.regex, regexValue, start, startLine, startColumn);
+  }
+
+  void _validateRegexLiteralFlags(String flags, int line, int column) {
+    const validFlags = {'g', 'i', 'm', 's', 'u', 'v', 'y', 'd'};
+    final seenFlags = <String>{};
+
+    for (final flag in flags.split('')) {
+      if (!validFlags.contains(flag)) {
+        throw LexerError('Invalid regular expression flag', line, column);
+      }
+      if (!seenFlags.add(flag)) {
+        throw LexerError('Duplicate regular expression flag', line, column);
+      }
+    }
+
+    if (seenFlags.contains('u') && seenFlags.contains('v')) {
+      throw LexerError(
+        'Flags "u" and "v" are mutually exclusive',
+        line,
+        column,
+      );
+    }
+  }
+
+  void _validateUnicodeSetsRegexLiteral(String pattern, int line, int column) {
+    const invalidSingles = {'(', ')', '[', '{', '}', '/', '-', '|'};
+    const invalidDoubles = {
+      '&',
+      '!',
+      '#',
+      r'$',
+      '%',
+      '*',
+      '+',
+      ',',
+      '.',
+      ':',
+      ';',
+      '<',
+      '=',
+      '>',
+      '?',
+      '@',
+      '^',
+      '`',
+      '~',
+    };
+
+    var escaped = false;
+    var inCharacterClass = false;
+
+    for (var index = 0; index < pattern.length; index++) {
+      final char = pattern[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char == r'\') {
+        escaped = true;
+        continue;
+      }
+      if (!inCharacterClass) {
+        if (char == '[') {
+          inCharacterClass = true;
+        }
+        continue;
+      }
+      if (char == ']') {
+        inCharacterClass = false;
+        continue;
+      }
+      if (invalidSingles.contains(char)) {
+        throw LexerError('Invalid regular expression literal', line, column);
+      }
+      if (index + 1 < pattern.length && pattern[index + 1] == char) {
+        if (invalidDoubles.contains(char)) {
+          throw LexerError('Invalid regular expression literal', line, column);
+        }
+      }
+    }
+  }
+
+  void _validateUnicodePropertyEscapesRegexLiteral(
+    String pattern,
+    String flags,
+    int line,
+    int column,
+  ) {
+    if (!flags.contains('u') && !flags.contains('v')) {
+      return;
+    }
+
+    for (var index = 0; index < pattern.length; index++) {
+      final char = pattern[index];
+      if (char != r'\') {
+        continue;
+      }
+
+      if (index + 1 >= pattern.length) {
+        break;
+      }
+
+      final escapeKind = pattern[index + 1];
+      if (escapeKind != 'p' && escapeKind != 'P') {
+        if (escapeKind != r'\') {
+          index++;
+        }
+        continue;
+      }
+
+      if (index + 2 >= pattern.length || pattern[index + 2] != '{') {
+        throw LexerError('Invalid regular expression literal', line, column);
+      }
+
+      final end = pattern.indexOf('}', index + 3);
+      if (end == -1) {
+        throw LexerError('Invalid regular expression literal', line, column);
+      }
+
+      final body = pattern.substring(index + 3, end);
+      final isNegated = escapeKind == 'P';
+      final isSupportedCodePointProperty = UnicodePropertyEscapeData.isKnown(
+        body,
+      );
+      final isSupportedStringProperty =
+          UnicodePropertyEscapeData.isKnownStringProperty(body);
+
+      if (!isSupportedCodePointProperty) {
+        if (!flags.contains('v') || !isSupportedStringProperty || isNegated) {
+          throw LexerError('Invalid regular expression literal', line, column);
+        }
+      }
+
+      index = end;
+    }
+
+    if (!flags.contains('u')) {
+      return;
+    }
+
+    var inCharClass = false;
+    var escaped = false;
+    for (var index = 0; index < pattern.length - 2; index++) {
+      final char = pattern[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char == r'\') {
+        if (inCharClass &&
+            index + 2 < pattern.length &&
+            (pattern[index + 1] == 'p' || pattern[index + 1] == 'P') &&
+            pattern[index + 2] == '{') {
+          final end = pattern.indexOf('}', index + 3);
+          if (end == -1) {
+            break;
+          }
+
+          final nextIndex = end + 1;
+          if (nextIndex < pattern.length - 1 && pattern[nextIndex] == '-') {
+            final following = pattern[nextIndex + 1];
+            if (following != ']') {
+              throw LexerError(
+                'Invalid regular expression literal',
+                line,
+                column,
+              );
+            }
+          }
+          if (index > 1 && pattern[index - 1] == '-') {
+            final previous = pattern[index - 2];
+            if (previous != '[') {
+              throw LexerError(
+                'Invalid regular expression literal',
+                line,
+                column,
+              );
+            }
+          }
+
+          index = end;
+          continue;
+        }
+
+        escaped = true;
+        continue;
+      }
+      if (char == '[') {
+        inCharClass = true;
+        continue;
+      }
+      if (char == ']') {
+        inCharClass = false;
+      }
+    }
   }
 
   /// Utilities for navigation in the source code

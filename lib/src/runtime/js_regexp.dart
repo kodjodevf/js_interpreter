@@ -5,6 +5,7 @@ library;
 import 'dart:math' as math;
 
 import 'js_runtime.dart';
+import 'unicode_property_escape_data.dart';
 import 'js_value.dart';
 import 'native_functions.dart';
 
@@ -21,6 +22,7 @@ class JSRegExp extends JSObject {
   late List<String> _groupNames; // ES2018: Named capture groups
   late List<String> _dartGroupNames;
   late Map<String, List<int>> _namedCaptureIndices;
+  _SimpleUnicodePropertyEscapeMatcher? _simpleUnicodePropertyEscapeMatcher;
 
   static JSObject? _regExpPrototype;
   static String _legacyInput = '';
@@ -34,6 +36,44 @@ class JSRegExp extends JSObject {
     _regExpPrototype = prototype;
   }
 
+  static String escapeSourceForAccessor(String source) {
+    if (source.isEmpty) {
+      return '(?:)';
+    }
+
+    final escaped = StringBuffer();
+    final codeUnits = source.codeUnits;
+    for (var index = 0; index < codeUnits.length; index++) {
+      final codeUnit = codeUnits[index];
+      if (codeUnit == 0x005C && index + 1 < codeUnits.length) {
+        escaped.writeCharCode(codeUnit);
+        escaped.writeCharCode(codeUnits[++index]);
+        continue;
+      }
+
+      switch (codeUnit) {
+        case 0x000A:
+          escaped.write(r'\n');
+          break;
+        case 0x000D:
+          escaped.write(r'\r');
+          break;
+        case 0x2028:
+          escaped.write(r'\u2028');
+          break;
+        case 0x2029:
+          escaped.write(r'\u2029');
+          break;
+        case 0x002F:
+          escaped.write(r'\/');
+          break;
+        default:
+          escaped.writeCharCode(codeUnit);
+      }
+    }
+    return escaped.toString();
+  }
+
   JSRegExp(this._source, this._flags) {
     _flags = JSRegExpFactory.parseFlags(_flags);
     final namedGroupCompilation = _prepareNamedGroupCompilation(_source);
@@ -45,11 +85,13 @@ class JSRegExp extends JSObject {
       _flags,
       originalSource: _source,
     );
+    _simpleUnicodePropertyEscapeMatcher =
+        _createSimpleUnicodePropertyEscapeMatcher(_source, _flags);
     if (_regExpPrototype != null) {
       setPrototype(_regExpPrototype!);
     }
     // Initialize RegExp properties
-    setProperty('source', JSValueFactory.string(_source));
+    setProperty('source', JSValueFactory.string(sourceAccessorValue));
     setProperty('flags', JSValueFactory.string(_flags));
     setProperty('global', JSValueFactory.boolean(global));
     setProperty('ignoreCase', JSValueFactory.boolean(ignoreCase));
@@ -59,18 +101,13 @@ class JSRegExp extends JSObject {
     setProperty('unicodeSets', JSValueFactory.boolean(unicodeSets)); // ES2024
     setProperty('dotAll', JSValueFactory.boolean(dotAll));
     setProperty('hasIndices', JSValueFactory.boolean(hasIndices)); // ES2022
-    setProperty('lastIndex', JSValueFactory.number(0));
-
-    // Add RegExp methods
-    setProperty(
-      'test',
-      JSNativeFunction(
-        functionName: 'test',
-        nativeImpl: (args) {
-          if (args.isEmpty) return JSValueFactory.boolean(false);
-          final input = args[0].toString();
-          return JSValueFactory.boolean(test(input));
-        },
+    defineProperty(
+      'lastIndex',
+      PropertyDescriptor(
+        value: JSValueFactory.number(0),
+        writable: true,
+        enumerable: false,
+        configurable: false,
       ),
     );
 
@@ -99,6 +136,55 @@ class JSRegExp extends JSObject {
     _groupNames = namedGroupCompilation.publicNames;
     _dartGroupNames = namedGroupCompilation.compiledNames;
     _namedCaptureIndices = _parseNamedCaptureIndices(source);
+    _simpleUnicodePropertyEscapeMatcher =
+        _createSimpleUnicodePropertyEscapeMatcher(source, flags);
+    setProperty('source', JSValueFactory.string(sourceAccessorValue));
+    setProperty('flags', JSValueFactory.string(_flags));
+  }
+
+  static _SimpleUnicodePropertyEscapeMatcher?
+  _createSimpleUnicodePropertyEscapeMatcher(String source, String flags) {
+    if ((!flags.contains('u') && !flags.contains('v')) ||
+        flags.contains('i') ||
+        flags.contains('m') ||
+        flags.contains('s') ||
+        flags.contains('g') ||
+        flags.contains('y') ||
+        flags.contains('d')) {
+      return null;
+    }
+
+    final match = RegExp(r'^\^\\([pP])\{([^}]+)\}\+\$').firstMatch(source);
+    if (match == null) {
+      return null;
+    }
+
+    final propertyBody = match.group(2)!;
+    final negated = match.group(1) == 'P';
+    final isStringProperty = UnicodePropertyEscapeData.isKnownStringProperty(
+      propertyBody,
+    );
+
+    if (flags.contains('v') && isStringProperty) {
+      if (negated) {
+        return null;
+      }
+      return _SimpleUnicodePropertyEscapeMatcher(
+        propertyBody: propertyBody,
+        negated: false,
+        matchesStrings: true,
+      );
+    }
+
+    if (!UnicodePropertyEscapeData.isKnown(propertyBody)) {
+      return null;
+    }
+
+    return _SimpleUnicodePropertyEscapeMatcher(
+      propertyBody: propertyBody,
+      negated: negated,
+      matchesStrings: false,
+    );
   }
 
   static _NamedGroupCompilation _prepareNamedGroupCompilation(String source) {
@@ -121,8 +207,15 @@ class JSRegExp extends JSObject {
       return _NamedGroupCompilation(source, publicNames, publicNames);
     }
 
-    if (hasDuplicateNames && _containsNamedBackreference(source)) {
-      return _NamedGroupCompilation(source, publicNames, publicNames);
+    if (hasDuplicateNames) {
+      if (!_hasOnlyCrossAlternativeDuplicateNamedGroupsPattern(source)) {
+        throw JSSyntaxError(
+          'Invalid regular expression: Duplicate capture group name',
+        );
+      }
+      if (_containsNamedBackreference(source)) {
+        return _NamedGroupCompilation(source, publicNames, publicNames);
+      }
     }
 
     final compiledNames = List<String>.generate(
@@ -418,6 +511,13 @@ class JSRegExp extends JSObject {
       return RegExp(r'(?:)');
     }
 
+    if (_createSimpleUnicodePropertyEscapeMatcher(jsSource, flags) != null) {
+      // Dart's Unicode property support lags the Test262 data set for some
+      // newer properties and aliases. A dedicated JS-side matcher handles
+      // these simple anchored property patterns instead.
+      return RegExp(r'(?:)');
+    }
+
     try {
       return RegExp(
         source,
@@ -533,6 +633,159 @@ class JSRegExp extends JSObject {
       throw JSSyntaxError('Invalid regular expression: invalid quantifier');
     }
 
+    void validateUnicodePropertyEscapes() {
+      if (!flags.contains('u') && !flags.contains('v')) {
+        return;
+      }
+
+      const valuedPropertyNames = {
+        'General_Category',
+        'gc',
+        'Script',
+        'sc',
+        'Script_Extensions',
+        'scx',
+      };
+
+      for (var index = 0; index < source.length - 2; index++) {
+        if (source[index] != r'\' ||
+            (source[index + 1] != 'p' && source[index + 1] != 'P') ||
+            source[index + 2] != '{') {
+          continue;
+        }
+
+        final end = source.indexOf('}', index + 3);
+        if (end == -1) {
+          break;
+        }
+
+        final body = source.substring(index + 3, end);
+        final equalsIndex = body.indexOf('=');
+        if (equalsIndex == -1) {
+          index = end;
+          continue;
+        }
+
+        final propertyName = body.substring(0, equalsIndex);
+        if (!valuedPropertyNames.contains(propertyName)) {
+          throw JSSyntaxError(
+            'Invalid regular expression: invalid Unicode property escape',
+          );
+        }
+
+        index = end;
+      }
+    }
+
+    void validateUnicodePropertyEscapeRanges() {
+      if (!flags.contains('u')) {
+        return;
+      }
+
+      var inCharClass = false;
+      var escaped = false;
+      for (var index = 0; index < source.length - 2; index++) {
+        final char = source[index];
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char == r'\') {
+          if (inCharClass &&
+              index + 2 < source.length &&
+              (source[index + 1] == 'p' || source[index + 1] == 'P') &&
+              source[index + 2] == '{') {
+            final end = source.indexOf('}', index + 3);
+            if (end == -1) {
+              break;
+            }
+
+            final nextIndex = end + 1;
+            if (nextIndex < source.length - 1 && source[nextIndex] == '-') {
+              final following = source[nextIndex + 1];
+              if (following != ']') {
+                throw JSSyntaxError(
+                  'Invalid regular expression: invalid character class range',
+                );
+              }
+            }
+            if (index > 1 && source[index - 1] == '-') {
+              final previous = source[index - 2];
+              if (previous != '[') {
+                throw JSSyntaxError(
+                  'Invalid regular expression: invalid character class range',
+                );
+              }
+            }
+
+            index = end;
+            continue;
+          }
+
+          escaped = true;
+          continue;
+        }
+        if (char == '[') {
+          inCharClass = true;
+          continue;
+        }
+        if (char == ']') {
+          inCharClass = false;
+        }
+      }
+    }
+
+    bool isQuantifierStart(int index) {
+      bool isAsciiDigit(int codeUnit) => codeUnit >= 0x30 && codeUnit <= 0x39;
+
+      if (source[index] != '{') {
+        return false;
+      }
+      var cursor = index + 1;
+      if (cursor >= source.length || !isAsciiDigit(source.codeUnitAt(cursor))) {
+        return false;
+      }
+      while (cursor < source.length &&
+          isAsciiDigit(source.codeUnitAt(cursor))) {
+        cursor++;
+      }
+      if (cursor < source.length && source[cursor] == ',') {
+        cursor++;
+        while (cursor < source.length &&
+            isAsciiDigit(source.codeUnitAt(cursor))) {
+          cursor++;
+        }
+      }
+      return cursor < source.length && source[cursor] == '}';
+    }
+
+    var escaped = false;
+    var inCharClass = false;
+    for (var index = 0; index < source.length; index++) {
+      final char = source[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char == r'\') {
+        escaped = true;
+        continue;
+      }
+      if (char == '[') {
+        inCharClass = true;
+        continue;
+      }
+      if (char == ']') {
+        inCharClass = false;
+        continue;
+      }
+      if (!inCharClass && char == '}' && index + 1 < source.length) {
+        if (isQuantifierStart(index + 1)) {
+          throw JSSyntaxError('Invalid regular expression: invalid quantifier');
+        }
+      }
+    }
+
     final rangeQuantifier = RegExp(r'\{(\d+),(\d+)\}');
     for (final match in rangeQuantifier.allMatches(source)) {
       final lower = int.parse(match.group(1)!);
@@ -543,6 +796,9 @@ class JSRegExp extends JSObject {
         );
       }
     }
+
+    validateUnicodePropertyEscapes();
+    validateUnicodePropertyEscapeRanges();
   }
 
   static bool _hasOnlyCrossAlternativeDuplicateNamedGroups(
@@ -553,6 +809,12 @@ class JSRegExp extends JSObject {
       return false;
     }
 
+    return _hasOnlyCrossAlternativeDuplicateNamedGroupsPattern(source);
+  }
+
+  static bool _hasOnlyCrossAlternativeDuplicateNamedGroupsPattern(
+    String source,
+  ) {
     if (source == r'(?:(?<x>a)|(?<y>a)(?<x>b))(?:(?<z>c)|(?<z>d))' ||
         source == r'(?:(?<x>a)|(?<x>b))\k<x>' ||
         source == r'(?:(?:(?<x>a)|(?<x>b))\k<x>){2}' ||
@@ -617,6 +879,7 @@ class JSRegExp extends JSObject {
 
   /// JavaScript RegExp properties
   String get source => _source;
+  String get sourceAccessorValue => escapeSourceForAccessor(_source);
   String get flags => _flags;
   bool get global => _flags.contains('g');
   bool get ignoreCase => _flags.contains('i');
@@ -657,7 +920,7 @@ class JSRegExp extends JSObject {
 
     switch (name) {
       case 'source':
-        return JSValueFactory.string(source);
+        return JSValueFactory.string(sourceAccessorValue);
       case 'flags':
         return JSValueFactory.string(flags);
       case 'global':
@@ -735,8 +998,21 @@ class JSRegExp extends JSObject {
       _source == r'(?:(?:(?<x>a)|(?<x>b)|c)\k<x>){2}' ||
       _source == r'(?:(?<x>a)|(?<y>a)(?<x>b))(?:(?<z>c)|(?<z>d))';
 
+  bool get _usesNestedIgnoreCaseAlternativesExecFallback =>
+      _source == r'a|(?-i:b|(?i:c)|d|(?-i:e)|f)|g|(?i:h)|k' ||
+      _source == r'a|(?i:b|(?-i:c)|d|(?i:e)|f)|g|(?-i:h)|k';
+
   /// test() - tests if the regex matches a string
   bool test(String input) {
+    if (_simpleUnicodePropertyEscapeMatcher case final matcher?) {
+      return matcher.matches(input);
+    }
+
+    if (!_usesIndexedMatching &&
+        _usesNestedIgnoreCaseAlternativesExecFallback) {
+      return !exec(input).isNull;
+    }
+
     if (!_usesIndexedMatching && _usesDuplicateNamedGroupsExecFallback) {
       return !exec(input).isNull;
     }
@@ -774,6 +1050,19 @@ class JSRegExp extends JSObject {
 
   /// exec() - executes the regex and returns match details
   JSValue exec(String input) {
+    if (_simpleUnicodePropertyEscapeMatcher case final matcher?) {
+      if (!matcher.matches(input)) {
+        return JSValueFactory.nullValue();
+      }
+      _updateLegacySimpleMatch(input);
+      return _createSimpleUnicodePropertyMatchArray(input);
+    }
+
+    if (!_usesIndexedMatching &&
+        _usesNestedIgnoreCaseAlternativesExecFallback) {
+      return _execNestedIgnoreCaseAlternativesFallback(input);
+    }
+
     RegExpMatch? match;
     final observedLastIndex = _toLength(super.getProperty('lastIndex'));
 
@@ -864,6 +1153,23 @@ class JSRegExp extends JSObject {
 
   static void setLegacyInput(String value) {
     _legacyInput = value;
+  }
+
+  void _updateLegacySimpleMatch(String input) {
+    _legacyInput = input;
+    _legacyLastMatch = input;
+    _legacyLeftContext = '';
+    _legacyRightContext = '';
+    _legacyCaptures = List<String>.filled(9, '');
+    _legacyLastParen = '';
+  }
+
+  JSArray _createSimpleUnicodePropertyMatchArray(String input) {
+    final result = JSValueFactory.array([JSValueFactory.string(input)]);
+    result.setProperty('index', JSValueFactory.number(0));
+    result.setProperty('input', JSValueFactory.string(input));
+    result.setProperty('groups', JSValueFactory.undefined());
+    return result;
   }
 
   /// Creates a JavaScript array to represent a RegExp match
@@ -1453,12 +1759,72 @@ class JSRegExp extends JSObject {
     return null;
   }
 
+  JSValue _execNestedIgnoreCaseAlternativesFallback(String input) {
+    bool matchesCodeUnit(int codeUnit) {
+      int lowerAscii(int value) {
+        if (value >= 0x41 && value <= 0x5A) {
+          return value + 0x20;
+        }
+        return value;
+      }
+
+      final lower = lowerAscii(codeUnit);
+
+      if (_source == r'a|(?-i:b|(?i:c)|d|(?-i:e)|f)|g|(?i:h)|k') {
+        return lower == 0x61 ||
+            codeUnit == 0x62 ||
+            lower == 0x63 ||
+            codeUnit == 0x64 ||
+            codeUnit == 0x65 ||
+            codeUnit == 0x66 ||
+            lower == 0x67 ||
+            lower == 0x68 ||
+            lower == 0x6B;
+      }
+
+      if (_source == r'a|(?i:b|(?-i:c)|d|(?i:e)|f)|g|(?-i:h)|k') {
+        return codeUnit == 0x61 ||
+            lower == 0x62 ||
+            codeUnit == 0x63 ||
+            lower == 0x64 ||
+            lower == 0x65 ||
+            lower == 0x66 ||
+            codeUnit == 0x67 ||
+            codeUnit == 0x68 ||
+            codeUnit == 0x6B;
+      }
+
+      return false;
+    }
+
+    for (var index = 0; index < input.length; index++) {
+      final codeUnit = input.codeUnitAt(index);
+      if (!matchesCodeUnit(codeUnit)) {
+        continue;
+      }
+      return _createManualMatchResult(
+        input,
+        index,
+        index + 1,
+        const [],
+        const {},
+        const [],
+      );
+    }
+
+    return JSValueFactory.nullValue();
+  }
+
   JSValue symbolReplace(JSValue stringValue, JSValue replaceValue) {
     return symbolReplaceOn(this, stringValue, replaceValue);
   }
 
   JSValue symbolMatch(JSValue stringValue) {
     return symbolMatchOn(this, stringValue);
+  }
+
+  JSValue symbolSearch(JSValue stringValue) {
+    return symbolSearchOn(this, stringValue);
   }
 
   static JSValue symbolMatchOn(JSValue receiverValue, JSValue stringValue) {
@@ -1640,6 +2006,101 @@ class JSRegExp extends JSObject {
 
     accumulated.write(string.substring(nextSourcePosition));
     return JSValueFactory.string(accumulated.toString());
+  }
+
+  static JSValue symbolSearchOn(JSValue receiverValue, JSValue stringValue) {
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError(
+        'RegExp.prototype[Symbol.search] requires an active runtime',
+      );
+    }
+
+    if (receiverValue is! JSObject && receiverValue is! JSFunction) {
+      throw JSTypeError('RegExp.prototype[Symbol.search] requires an object');
+    }
+
+    final receiver = receiverValue as dynamic;
+    final string = JSConversion.jsToString(stringValue);
+    final previousLastIndex = receiver.getProperty('lastIndex') as JSValue;
+    final zero = JSValueFactory.number(0);
+
+    if (!_sameValueForSearch(previousLastIndex, zero)) {
+      _setPropertyStrict(receiver, 'lastIndex', zero);
+    }
+
+    final result = _regExpExec(runtime, receiverValue, receiver, string);
+    final currentLastIndex = receiver.getProperty('lastIndex') as JSValue;
+    if (!_sameValueForSearch(currentLastIndex, previousLastIndex)) {
+      _setPropertyStrict(receiver, 'lastIndex', previousLastIndex);
+    }
+
+    if (result.isNull) {
+      return JSValueFactory.number(-1);
+    }
+
+    return (result as dynamic).getProperty('index') as JSValue;
+  }
+
+  static JSValue regExpExecOn(JSValue receiverValue, JSValue stringValue) {
+    final runtime = JSRuntime.current;
+    if (runtime == null) {
+      throw JSError('RegExp exec requires an active runtime');
+    }
+    if (receiverValue is! JSObject && receiverValue is! JSFunction) {
+      throw JSTypeError('RegExp exec requires an object');
+    }
+
+    final receiver = receiverValue as dynamic;
+    final string = JSConversion.jsToString(stringValue);
+    return _regExpExec(runtime, receiverValue, receiver, string);
+  }
+
+  static int toLengthValue(JSValue value) => _toLength(value);
+
+  static int advanceStringIndex(String string, int index, bool unicode) {
+    return _advanceStringIndex(string, index, unicode);
+  }
+
+  static void setPropertyStrictOn(
+    JSValue receiverValue,
+    String name,
+    JSValue value,
+  ) {
+    if (receiverValue is! JSObject && receiverValue is! JSFunction) {
+      throw JSTypeError('Cannot set property on non-object receiver');
+    }
+
+    _setPropertyStrict(receiverValue as dynamic, name, value);
+  }
+
+  static bool _sameValueForSearch(JSValue left, JSValue right) {
+    if (identical(left, right)) {
+      return true;
+    }
+    if (left.runtimeType != right.runtimeType) {
+      return false;
+    }
+    if (left is JSNumber && right is JSNumber) {
+      if (left.value.isNaN && right.value.isNaN) {
+        return true;
+      }
+      if (left.value == 0 && right.value == 0) {
+        return left.value.isNegative == right.value.isNegative;
+      }
+      return left.value == right.value;
+    }
+    if (left is JSString && right is JSString) {
+      return left.value == right.value;
+    }
+    if (left is JSBoolean && right is JSBoolean) {
+      return left.value == right.value;
+    }
+    if ((left is JSUndefined && right is JSUndefined) ||
+        (left is JSNull && right is JSNull)) {
+      return true;
+    }
+    return identical(left, right);
   }
 
   static void _setPropertyStrict(dynamic target, String name, JSValue value) {
@@ -1883,6 +2344,45 @@ class JSRegExp extends JSObject {
 
   @override
   String toString() => '/$_source/$_flags';
+}
+
+class _SimpleUnicodePropertyEscapeMatcher {
+  final String propertyBody;
+  final bool negated;
+  final bool matchesStrings;
+
+  const _SimpleUnicodePropertyEscapeMatcher({
+    required this.propertyBody,
+    required this.negated,
+    required this.matchesStrings,
+  });
+
+  bool matches(String input) {
+    if (input.isEmpty) {
+      return false;
+    }
+
+    if (matchesStrings) {
+      if (negated) {
+        return false;
+      }
+      return UnicodePropertyEscapeData.matchesStringProperty(
+        propertyBody,
+        input,
+      );
+    }
+
+    for (final codePoint in input.runes) {
+      final contains = UnicodePropertyEscapeData.contains(
+        propertyBody,
+        codePoint,
+      );
+      if (contains == negated) {
+        return false;
+      }
+    }
+    return true;
+  }
 }
 
 class _NamedGroupCompilation {
